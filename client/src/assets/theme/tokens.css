@@ -48,6 +48,9 @@
   --warning: oklch(0.52 0.13 68);
   --warning-foreground: oklch(0.985 0 0);
 
+  /* In flight: neither finished nor broken. Tuned per theme for the same reason. */
+  --info: oklch(0.55 0.12 255);
+
   --star-highlight: oklch(0.76 0.18 90);
 
   --border: oklch(0.878 var(--tint-c-surface) var(--tint-h));
@@ -138,6 +141,27 @@
   --pattern-modifier: oklch(0.47 0.17 305);
   --pattern-optional: oklch(0.46 0.1 195);
   --pattern-fallback: oklch(0.48 0.13 68);
+  /* Release chips. Protocol is a fact about the release and keeps two fixed hues; the source hues
+     below are the operator's to assign. */
+  --pill-torrent: oklch(0.52 0.2 295);
+  --pill-direct: oklch(0.5 0.11 195);
+
+  --pill-source-blue: oklch(0.55 0.16 245);
+  --pill-source-indigo: oklch(0.55 0.18 275);
+  --pill-source-purple: oklch(0.55 0.19 330);
+  --pill-source-pink: oklch(0.55 0.17 355);
+  --pill-source-red: oklch(0.55 0.17 25);
+  --pill-source-orange: oklch(0.58 0.15 60);
+  --pill-source-yellow: oklch(0.6 0.13 95);
+  --pill-source-lime: oklch(0.56 0.15 135);
+  --pill-source-green: oklch(0.55 0.14 160);
+  --pill-source-teal: oklch(0.53 0.11 180);
+
+  /* Medium, read as an icon alone in the request list. Three hues far enough apart to separate at
+     16px, and the icon shape still carries the meaning where colour does not land. */
+  --pill-media-ebook: oklch(0.55 0.16 245);
+  --pill-media-audiobook: oklch(0.55 0.2 300);
+  --pill-media-comic: oklch(0.55 0.18 25);
 
   --audit-authentication: oklch(0.55 0.17 295);
   --audit-books: oklch(0.55 0.16 245);
@@ -195,6 +219,8 @@
 
   --warning: oklch(0.8 0.13 75);
   --warning-foreground: oklch(0.145 0 0);
+
+  --info: oklch(0.72 0.12 255);
 
   --star-highlight: oklch(0.84 0.17 95);
 
@@ -259,6 +285,23 @@
   --pattern-modifier: oklch(0.8 0.11 305);
   --pattern-optional: oklch(0.82 0.09 195);
   --pattern-fallback: oklch(0.82 0.12 75);
+  --pill-torrent: oklch(0.74 0.17 295);
+  --pill-direct: oklch(0.78 0.11 195);
+
+  --pill-source-blue: oklch(0.72 0.14 245);
+  --pill-source-indigo: oklch(0.72 0.16 275);
+  --pill-source-purple: oklch(0.72 0.17 330);
+  --pill-source-pink: oklch(0.73 0.15 355);
+  --pill-source-red: oklch(0.72 0.15 25);
+  --pill-source-orange: oklch(0.76 0.13 60);
+  --pill-source-yellow: oklch(0.8 0.13 95);
+  --pill-source-lime: oklch(0.78 0.15 135);
+  --pill-source-green: oklch(0.75 0.13 160);
+  --pill-source-teal: oklch(0.76 0.11 180);
+
+  --pill-media-ebook: oklch(0.72 0.14 245);
+  --pill-media-audiobook: oklch(0.72 0.17 300);
+  --pill-media-comic: oklch(0.72 0.16 25);
 
   --audit-authentication: oklch(0.72 0.17 295);
   --audit-books: oklch(0.72 0.14 245);

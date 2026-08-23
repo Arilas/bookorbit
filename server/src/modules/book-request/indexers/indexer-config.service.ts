@@ -1,0 +1,328 @@
+import { BadRequestException, ConflictException, HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BOOK_REQUEST_MEDIA_KINDS, DEFAULT_INDEXER_CATEGORIES, INDEXER_ADAPTER_TYPES, pickUnusedIndexerColor } from '@bookorbit/types';
+import type {
+  BookRequestMediaKind,
+  IndexerAdapterType,
+  IndexerCategoryMap,
+  IndexerErrorCode,
+  IndexerItem,
+  IndexerListResult,
+  IndexerSettings,
+  IndexerSettingsField,
+  IndexerTestResult,
+} from '@bookorbit/types';
+
+import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
+import { PrivateAddressException, ensureSafeUrl } from '../../../common/utils/ssrf.utils';
+import type { RequestIndexerRow } from '../../../db/schema';
+import { RequestCredentialService } from '../request-credential.service';
+import type { ResolvedIndexerConfig } from './indexer-adapter';
+import { IndexerRegistry } from './indexer-registry';
+import { IndexerRepository } from './indexer.repository';
+import type { CreateIndexerDto, UpdateIndexerDto } from './dto/indexer.dto';
+
+/** Postgres unique_violation, raised by the case-insensitive unique index on `name`. */
+const UNIQUE_VIOLATION = '23505';
+
+const MAX_INDEXER_SETTING_STRING_LENGTH = 2_048;
+
+/** Editing any of these changes how the adapter reaches the tracker, so its session must be dropped. */
+const CONNECTION_FIELDS = ['baseUrl', 'credential', 'allowPrivateAddress', 'adapterType'] as const satisfies ReadonlyArray<keyof UpdateIndexerDto>;
+
+@Injectable()
+export class IndexerConfigService {
+  private readonly logger = new Logger(IndexerConfigService.name);
+
+  constructor(
+    private readonly repo: IndexerRepository,
+    private readonly credentials: RequestCredentialService,
+    private readonly registry: IndexerRegistry,
+  ) {}
+
+  async findAll(): Promise<IndexerListResult> {
+    const rows = await this.repo.findAll();
+    return { indexers: rows.map(toItem), encryptionConfigured: this.credentials.isConfigured() };
+  }
+
+  async findOne(id: number): Promise<IndexerItem> {
+    return toItem(await this.requireIndexer(id));
+  }
+
+  async create(dto: CreateIndexerDto): Promise<IndexerItem> {
+    // Everything that can reject the save runs before anything is written, so a rejected URL does
+    // not leave a half-made indexer behind whose name the operator then cannot save over.
+    await this.assertReachableUrl(dto.baseUrl, dto.allowPrivateAddress ?? false);
+    this.assertCredentialPresent(dto.adapterType, Boolean(dto.credential?.trim()));
+    const credentialsEnc = dto.credential ? this.credentials.encrypt(dto.credential) : null;
+    const color = dto.color === undefined ? pickUnusedIndexerColor(await this.repo.findAssignedColors()) : dto.color;
+
+    try {
+      const created = await this.repo.create({
+        name: dto.name.trim(),
+        color,
+        adapterType: dto.adapterType,
+        baseUrl: dto.baseUrl.trim(),
+        credentialsEnc,
+        enabled: dto.enabled ?? true,
+        allowPrivateAddress: dto.allowPrivateAddress ?? false,
+        categories: mergeCategories(dto.adapterType, dto.categories),
+        disabledMediaKinds: normalizeDisabledMediaKinds(dto.disabledMediaKinds),
+        settings: this.cleanSettings(dto.adapterType, dto.settings),
+        networkProfile: dto.networkProfile ?? null,
+      });
+      this.logger.log(`[request_indexer.create] [end] indexerId=${created.id} adapterType=${created.adapterType} - indexer created`);
+      return toItem(created);
+    } catch (error) {
+      throw this.translateUniqueViolation(error);
+    }
+  }
+
+  async update(id: number, dto: UpdateIndexerDto): Promise<IndexerItem> {
+    const existing = await this.requireIndexer(id);
+
+    const baseUrl = dto.baseUrl?.trim() ?? existing.baseUrl;
+    const allowPrivate = dto.allowPrivateAddress ?? existing.allowPrivateAddress;
+    if (dto.baseUrl !== undefined || dto.allowPrivateAddress !== undefined) {
+      await this.assertReachableUrl(baseUrl, allowPrivate);
+    }
+
+    const adapterType = (dto.adapterType ?? existing.adapterType) as IndexerAdapterType;
+    const keepsCredential = dto.credential === undefined ? existing.credentialsEnc !== null : Boolean(dto.credential.trim());
+    this.assertCredentialPresent(adapterType, keepsCredential);
+
+    const patch: Partial<RequestIndexerRow> = {};
+    if (dto.name !== undefined) patch.name = dto.name.trim();
+    if (dto.color !== undefined) patch.color = dto.color;
+    if (dto.adapterType !== undefined) patch.adapterType = dto.adapterType;
+    if (dto.baseUrl !== undefined) patch.baseUrl = baseUrl;
+    if (dto.enabled !== undefined) patch.enabled = dto.enabled;
+    if (dto.allowPrivateAddress !== undefined) patch.allowPrivateAddress = dto.allowPrivateAddress;
+    if (dto.categories !== undefined) patch.categories = mergeCategories(adapterType, dto.categories);
+    if (dto.disabledMediaKinds !== undefined) patch.disabledMediaKinds = normalizeDisabledMediaKinds(dto.disabledMediaKinds);
+    if (dto.settings !== undefined) patch.settings = this.cleanSettings(adapterType, dto.settings);
+    if (dto.networkProfile !== undefined) patch.networkProfile = dto.networkProfile;
+    // An omitted credential keeps the stored one, so the settings form never round-trips a secret.
+    if (dto.credential !== undefined) patch.credentialsEnc = dto.credential ? this.credentials.encrypt(dto.credential) : null;
+
+    try {
+      if (Object.keys(patch).length > 0 && !(await this.repo.update(id, patch))) {
+        throw new NotFoundException('Indexer not found');
+      }
+    } catch (error) {
+      throw this.translateUniqueViolation(error);
+    }
+
+    // A cached session outliving the config it was opened with would keep talking to the old host
+    // with the old credential until it happened to be rejected.
+    if (CONNECTION_FIELDS.some((field) => dto[field] !== undefined)) {
+      this.registry.find(existing.adapterType as IndexerAdapterType)?.forget?.(id);
+    }
+
+    return toItem(await this.requireIndexer(id));
+  }
+
+  async remove(id: number): Promise<void> {
+    const existing = await this.requireIndexer(id);
+    if (!(INDEXER_ADAPTER_TYPES as readonly string[]).includes(existing.adapterType)) {
+      throw new BadRequestException('A plugin-backed source must be deleted with its plugin');
+    }
+    this.registry.find(existing.adapterType as IndexerAdapterType)?.forget?.(id);
+    await this.repo.delete(id);
+    this.logger.log(`[request_indexer.delete] [end] indexerId=${id} - indexer removed`);
+  }
+
+  async test(id: number): Promise<IndexerTestResult> {
+    const config = await this.resolveConfig(id);
+    const adapter = this.registry.require(config.adapterType);
+    const result = await adapter.test(config);
+    await this.repo.recordTestResult(id, result.success, result.success ? null : (result.error ?? 'Unknown error'));
+    return result;
+  }
+
+  /** Every enabled indexer, resolved for search. One decrypt pass, not one per release. */
+  async resolveEnabledConfigs(): Promise<ResolvedIndexerConfig[]> {
+    const rows = await this.repo.findAllEnabled();
+    return rows.map((row) => this.toConfig(row));
+  }
+
+  /**
+   * The only place a credential is decrypted. Callers get a value object, never the row, so a
+   * `credentialsEnc` blob cannot reach a response body or a log line by accident.
+   */
+  async resolveConfig(id: number): Promise<ResolvedIndexerConfig> {
+    return this.toConfig(await this.requireIndexer(id));
+  }
+
+  private toConfig(row: RequestIndexerRow): ResolvedIndexerConfig {
+    return {
+      id: row.id,
+      name: row.name,
+      color: row.color ?? null,
+      adapterType: row.adapterType as IndexerAdapterType,
+      baseUrl: row.baseUrl,
+      credential: row.credentialsEnc ? this.credentials.decrypt(row.credentialsEnc) : null,
+      allowPrivateAddress: row.allowPrivateAddress,
+      categories: resolveCategories(row),
+      disabledMediaKinds: normalizeDisabledMediaKinds(row.disabledMediaKinds),
+      settings: row.settings ?? null,
+      networkProfile: row.networkProfile ?? null,
+    };
+  }
+
+  private async requireIndexer(id: number): Promise<RequestIndexerRow> {
+    const row = await this.repo.findById(id);
+    if (!row) throw new NotFoundException('Indexer not found');
+    return row;
+  }
+
+  /**
+   * Whitelisting by the adapter's own declaration, since the pipe cannot: `settings` is opaque at
+   * the DTO because an adapter loaded at runtime names its own fields. Anything undeclared is
+   * dropped rather than stored, so a jsonb column never takes a blob nobody asked for.
+   */
+  private cleanSettings(adapterType: string, settings: Record<string, unknown> | undefined): IndexerSettings | null {
+    if (!settings) return null;
+    const declared = this.registry.require(adapterType).settingsFields ?? [];
+    const kept: Record<string, unknown> = {};
+
+    for (const field of declared) {
+      const value = settings[field.key];
+      if (value === undefined || value === null) continue;
+      if (field.type === 'boolean' && typeof value !== 'boolean') continue;
+      if (field.type === 'number' && (typeof value !== 'number' || !Number.isFinite(value))) continue;
+      if (field.type === 'string' && (typeof value !== 'string' || value.length > MAX_INDEXER_SETTING_STRING_LENGTH)) continue;
+      kept[field.key] = field.type === 'string' && field.format === 'list' ? this.cleanListSetting(field, value as string) : value;
+    }
+
+    const dropped = Object.keys(settings).filter((key) => !(key in kept));
+    if (dropped.length > 0) {
+      this.logger.warn(
+        `[request_indexer.settings] [fail] adapterType=${adapterType} dropped="${sanitizeLogValue(dropped.join(','))}" - settings the adapter does not declare`,
+      );
+    }
+    return Object.keys(kept).length > 0 ? kept : null;
+  }
+
+  private cleanListSetting(field: IndexerSettingsField, value: string): string {
+    const canonicalByValue = field.options ? new Map(field.options.map((option) => [option.toLowerCase(), option])) : null;
+    const entries = canonicalByValue
+      ? [
+          ...new Map(
+            value
+              .split(',')
+              .map((entry) => entry.trim())
+              .filter(Boolean)
+              .map((entry) => [entry.toLowerCase(), entry]),
+          ).values(),
+        ]
+      : [
+          ...new Set(
+            value
+              .split(',')
+              .map((entry) => entry.trim())
+              .filter(Boolean),
+          ),
+        ];
+    const canonical = canonicalByValue
+      ? entries.map((entry) => canonicalByValue.get(entry.toLowerCase())).filter((entry): entry is string => entry !== undefined)
+      : entries;
+
+    if (canonicalByValue && canonical.length !== entries.length) {
+      throw indexerError('INDEXER_SETTINGS_INVALID', `${field.label} contains a value the plugin does not support`);
+    }
+    if (canonical.length < (field.minItems ?? 0)) {
+      throw indexerError('INDEXER_SETTINGS_INVALID', `${field.label} requires at least ${field.minItems} selection`);
+    }
+    return canonical.join(',');
+  }
+
+  /**
+   * A private tracker rejects every search without one, and it would do so as a per-indexer
+   * failure in the picker rather than as a save error the operator can act on.
+   */
+  private assertCredentialPresent(adapterType: string, hasCredential: boolean): void {
+    const adapter = this.registry.require(adapterType);
+    if (adapter.requiresCredential && !hasCredential) {
+      throw indexerError('INDEXER_CREDENTIAL_REQUIRED', `${adapter.label} cannot be used without a credential`);
+    }
+  }
+
+  /**
+   * Unlike a download client this defaults to off: a public tracker has no business resolving to
+   * a private address, and a self-hosted torznab proxy is the one case worth opting into.
+   */
+  private async assertReachableUrl(baseUrl: string, allowPrivate: boolean): Promise<void> {
+    try {
+      await ensureSafeUrl(baseUrl, { allowPrivate });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`[request_indexer.url_check] [fail] error="${sanitizeLogValue(message)}" - rejected indexer base URL`);
+      const isPrivateAddress = error instanceof PrivateAddressException;
+      throw indexerError(
+        isPrivateAddress ? 'INDEXER_URL_PRIVATE' : 'INDEXER_URL_UNSAFE',
+        isPrivateAddress && !allowPrivate ? `${message}. Enable "Allow private addresses" if this is a torznab proxy on your own network.` : message,
+      );
+    }
+  }
+
+  private translateUniqueViolation(error: unknown): unknown {
+    if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === UNIQUE_VIOLATION) {
+      return new ConflictException({ message: 'An indexer with this name already exists', errorCode: 'INDEXER_NAME_TAKEN' });
+    }
+    return error;
+  }
+}
+
+/** Carries a stable code alongside the English text, so the settings form can translate it. */
+function indexerError(errorCode: IndexerErrorCode, message: string): BadRequestException {
+  return new BadRequestException({ message, errorCode, statusCode: HttpStatus.BAD_REQUEST });
+}
+
+/**
+ * A medium the operator left blank falls back to the adapter's default rather than searching no
+ * categories at all, which most trackers answer with everything they have.
+ */
+function mergeCategories(adapterType: string, categories: Partial<IndexerCategoryMap> | undefined): IndexerCategoryMap {
+  const defaults = DEFAULT_INDEXER_CATEGORIES[adapterType as IndexerAdapterType] ?? { ebook: [], audiobook: [], comic: [] };
+  return {
+    ebook: categories?.ebook ?? defaults.ebook,
+    audiobook: categories?.audiobook ?? defaults.audiobook,
+    comic: categories?.comic ?? defaults.comic,
+  };
+}
+
+/**
+ * A jsonb column can hold whatever a hand-edited row put there, and this list decides which
+ * searches a source is left out of. Anything that is not a medium is dropped rather than kept,
+ * so a typo cannot silently take a tracker out of every search.
+ */
+function normalizeDisabledMediaKinds(value: unknown): BookRequestMediaKind[] {
+  if (!Array.isArray(value)) return [];
+  return BOOK_REQUEST_MEDIA_KINDS.filter((kind) => value.includes(kind));
+}
+
+function resolveCategories(row: RequestIndexerRow): IndexerCategoryMap {
+  return mergeCategories(row.adapterType as IndexerAdapterType, row.categories ?? undefined);
+}
+
+function toItem(row: RequestIndexerRow): IndexerItem {
+  return {
+    id: row.id,
+    name: row.name,
+    color: row.color ?? null,
+    adapterType: row.adapterType as IndexerAdapterType,
+    enabled: row.enabled,
+    baseUrl: row.baseUrl,
+    hasCredential: row.credentialsEnc !== null,
+    allowPrivateAddress: row.allowPrivateAddress,
+    categories: resolveCategories(row),
+    disabledMediaKinds: normalizeDisabledMediaKinds(row.disabledMediaKinds),
+    settings: row.settings ?? {},
+    networkProfile: row.networkProfile ?? null,
+    lastTestedAt: row.lastTestedAt?.toISOString() ?? null,
+    lastTestOk: row.lastTestOk,
+    lastErrorMessage: row.lastErrorMessage,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}

@@ -1,6 +1,6 @@
 import { Permission } from '@bookorbit/types'
 
-export const SYSTEM_TABS = ['file-naming', 'book-dock', 'maintenance', 'audit-log'] as const
+export const SYSTEM_TABS = ['file-naming', 'book-dock', 'requests', 'maintenance', 'audit-log'] as const
 
 export type SystemTab = (typeof SYSTEM_TABS)[number]
 
@@ -14,6 +14,11 @@ export const SYSTEM_TAB_INFO: Record<SystemTab, SystemTabInfo> = {
   },
   'book-dock': {
     permission: Permission.ManageBookDock,
+  },
+  // Holding download-client credentials is a different level of trust from moderating the queue,
+  // so this is ManageAppSettings rather than ManageBookRequests.
+  requests: {
+    permission: Permission.ManageAppSettings,
   },
   maintenance: {
     permission: Permission.ManageAppSettings,

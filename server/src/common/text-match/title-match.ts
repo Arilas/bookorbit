@@ -147,6 +147,44 @@ export function scoreTitleMatch(query: string, candidate: string): number {
   return Math.max(tokenScore, levenshteinScore);
 }
 
+/**
+ * Symmetric 0-1 similarity, unlike `scoreTitleMatch`, which is deliberately generous about a
+ * candidate that extends the query so a search for "Dune" still surfaces "Dune (Special Edition)".
+ *
+ * That generosity is wrong when the question is "is this the book that was asked for": under it,
+ * "Dune" and "Dune Messiah" score as a prefix hit. Here every token either side does not share
+ * costs, so a sequel separates from its predecessor.
+ */
+export function symmetricTitleSimilarity(left: string, right: string): number {
+  const a = normalizeTitleText(left);
+  const b = normalizeTitleText(right);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+
+  const leftTokens = new Set(significantTokens(tokenizeTitleText(a)));
+  const rightTokens = new Set(significantTokens(tokenizeTitleText(b)));
+  let shared = 0;
+  for (const token of leftTokens) if (rightTokens.has(token)) shared++;
+  const union = leftTokens.size + rightTokens.size - shared;
+  const jaccard = union > 0 ? shared / union : 0;
+
+  // Below the floor, edit distance is measuring alphabet overlap rather than a typo, and two
+  // unrelated titles would carry a few points each into whatever weighting sits on top of this.
+  const similarity = levenshteinSimilarity(a, b);
+  return Math.max(jaccard, similarity >= MIN_LEVENSHTEIN_SIMILARITY ? similarity : 0);
+}
+
+/**
+ * The part of a title before its subtitle. A subtitle is punctuation-separated and a sequel is
+ * not, which is the one cheap signal that tells "The Hobbit: There and Back Again" apart from
+ * "Dune Messiah" when comparing against a bare series title.
+ */
+export function mainTitlePart(value: string): string {
+  const cut = value.search(/[:(\u2013\u2014]|\s-\s/);
+  const main = cut > 0 ? value.slice(0, cut) : value;
+  return main.trim() || value.trim();
+}
+
 export function shareSignificantToken(left: readonly string[], right: readonly string[]): boolean {
   const leftTokens = new Set(left.flatMap((value) => tokenizeTitleText(normalizeTitleText(value))).filter((token) => token.length > 2));
   if (leftTokens.size === 0) return false;

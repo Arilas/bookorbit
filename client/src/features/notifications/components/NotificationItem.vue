@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { X, FolderSync, BookOpen, PackageOpen, UserCheck, Mail, Tablet, ArrowRightLeft, FileDown, TriangleAlert, BookOpenCheck } from '@lucide/vue'
-import type { NotificationItem } from '@bookorbit/types'
+import { NotificationType, type NotificationItem } from '@bookorbit/types'
 import { useNotifications } from '../composables/useNotifications'
 
 const props = defineProps<{ notification: NotificationItem }>()
@@ -49,16 +49,20 @@ const icon = computed(() => ICON_MAP[props.notification.type] ?? FolderSync)
 const isFailed = computed(() => FAILED_TYPES.has(props.notification.type))
 const isWarning = computed(() => WARNING_TYPES.has(props.notification.type))
 const relativeTime = computed(() => formatRelativeTime(props.notification.createdAt))
+const actionUrl = computed(() => {
+  if (props.notification.type === NotificationType.BookRequestSubmitted) return '/requests?tab=all'
+  return props.notification.actionUrl
+})
 
 function handleClick() {
   if (!props.notification.read) {
     emit('read', props.notification.id)
   }
-  if (props.notification.actionUrl) {
-    if (props.notification.actionUrl.startsWith('/')) {
-      router.push(props.notification.actionUrl)
+  if (actionUrl.value) {
+    if (actionUrl.value.startsWith('/')) {
+      router.push(actionUrl.value)
     } else {
-      window.open(props.notification.actionUrl, '_blank')
+      window.open(actionUrl.value, '_blank')
     }
   }
 }

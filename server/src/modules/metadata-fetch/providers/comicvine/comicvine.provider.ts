@@ -87,6 +87,7 @@ export class ComicVineProvider implements IdentifiableProvider {
   readonly key = MetadataProviderKey.COMICVINE;
   readonly label = 'ComicVine';
   readonly identifiable = true as const;
+  readonly mediaKinds = ['comic'] as const;
 
   private readonly logger = new Logger(ComicVineProvider.name);
 

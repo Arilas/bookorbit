@@ -4,12 +4,12 @@ import { SYSTEM_TABS, SYSTEM_TAB_INFO, normalizeSystemTab } from '../lib/system-
 
 describe('system-tabs', () => {
   describe('SYSTEM_TABS', () => {
-    it('contains exactly file-naming, book-dock, maintenance, audit-log', () => {
-      expect(SYSTEM_TABS).toEqual(['file-naming', 'book-dock', 'maintenance', 'audit-log'])
+    it('contains exactly file-naming, book-dock, requests, maintenance, audit-log', () => {
+      expect(SYSTEM_TABS).toEqual(['file-naming', 'book-dock', 'requests', 'maintenance', 'audit-log'])
     })
 
-    it('has length 4', () => {
-      expect(SYSTEM_TABS.length).toBe(4)
+    it('has length 5', () => {
+      expect(SYSTEM_TABS.length).toBe(5)
     })
   })
 
@@ -33,6 +33,10 @@ describe('system-tabs', () => {
 
     it('book-dock requires management permission', () => {
       expect(SYSTEM_TAB_INFO['book-dock'].permission).toBe(Permission.ManageBookDock)
+    })
+
+    it('requests has manage_app_settings permission, not manage_book_requests', () => {
+      expect(SYSTEM_TAB_INFO.requests.permission).toBe(Permission.ManageAppSettings)
     })
 
     it('maintenance has manage_app_settings permission', () => {
@@ -71,6 +75,10 @@ describe('system-tabs', () => {
 
     it('returns book-dock when given "book-dock"', () => {
       expect(normalizeSystemTab('book-dock')).toBe('book-dock')
+    })
+
+    it('returns requests when given "requests"', () => {
+      expect(normalizeSystemTab('requests')).toBe('requests')
     })
 
     it('returns maintenance when given "maintenance"', () => {
