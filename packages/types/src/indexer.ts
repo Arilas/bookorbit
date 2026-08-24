@@ -460,6 +460,18 @@ export interface ReleaseSearchResult {
    */
   uncoveredIndexerCount: number;
   /**
+   * Enabled indexers at the time of the search, counted before the medium filter. Zero means
+   * nothing was searched at all, which is a different sentence from "this book was not found" and
+   * the only way the picker can tell them apart: the indexer list itself is admin-only.
+   */
+  enabledIndexerCount: number;
+  /**
+   * Indexer rows that exist, enabled or not. Separates "none configured" from "all switched off",
+   * because the second is a toggle away and telling that operator to add a source is telling them
+   * to duplicate one they already have.
+   */
+  configuredIndexerCount: number;
+  /**
    * Whether the requested medium has a release profile at all.
    *
    * The picker cannot work this out from the rows. A profile that nothing matched returns every
@@ -470,6 +482,20 @@ export interface ReleaseSearchResult {
   searchedAt: string;
   /** True when this came from the short-lived cache rather than a fresh hit on every tracker. */
   cached: boolean;
+}
+
+/**
+ * How many search sources this instance has, readable by anybody who may file a request.
+ *
+ * Counts only, deliberately: names, addresses and credentials stay behind `ManageAppSettings`,
+ * and a requester needs no more than this to be told whether their request has anywhere to be
+ * fulfilled from.
+ */
+export interface BookRequestSourceStatus {
+  /** Indexer rows that exist, enabled or not. */
+  configured: number;
+  /** Of those, the ones switched on. Zero means nothing will ever be searched. */
+  enabled: number;
 }
 
 export interface InspectBookRequestReleasePayload {

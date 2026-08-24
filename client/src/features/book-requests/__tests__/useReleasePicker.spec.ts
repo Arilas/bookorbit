@@ -13,7 +13,15 @@ function ok(body: unknown): Response {
 
 const release = { indexerId: 9, guid: 'release-guid' } as ReleaseCandidateItem
 
-function searchResult(overrides: { activeIsbn?: string | null; releases?: ReleaseCandidateItem[]; uncoveredIndexerCount?: number } = {}) {
+function searchResult(
+  overrides: {
+    activeIsbn?: string | null
+    releases?: ReleaseCandidateItem[]
+    uncoveredIndexerCount?: number
+    enabledIndexerCount?: number
+    configuredIndexerCount?: number
+  } = {},
+) {
   return {
     releases: overrides.releases ?? [],
     criteria: {
@@ -29,6 +37,8 @@ function searchResult(overrides: { activeIsbn?: string | null; releases?: Releas
     },
     indexers: [],
     uncoveredIndexerCount: overrides.uncoveredIndexerCount ?? 0,
+    enabledIndexerCount: overrides.enabledIndexerCount ?? 1,
+    configuredIndexerCount: overrides.configuredIndexerCount ?? 1,
     profileActive: false,
     cached: false,
   }
@@ -86,6 +96,20 @@ describe('useReleasePicker', () => {
     expect(picker.criteria.value?.authors).toEqual(['Frank Herbert'])
   })
 
+  /**
+   * Both counts, because zero enabled sources and zero configured sources need opposite fixes and
+   * the search result is the only place the picker can learn either: the indexer list is admin-only.
+   */
+  it('carries how many sources were enabled and how many exist at all', async () => {
+    apiMock.mockResolvedValue(ok(searchResult({ enabledIndexerCount: 0, configuredIndexerCount: 3 })))
+    const picker = useReleasePicker(() => true)
+
+    await picker.fetchReleases(42)
+
+    expect(picker.enabledIndexerCount.value).toBe(0)
+    expect(picker.configuredIndexerCount.value).toBe(3)
+  })
+
   it('posts explicit manual search fields to the scoped fulfillment endpoint', async () => {
     apiMock.mockResolvedValue(
       ok({
@@ -134,6 +158,8 @@ describe('useReleasePicker', () => {
     picker.reset()
 
     expect(picker.uncoveredIndexerCount.value).toBe(0)
+    expect(picker.enabledIndexerCount.value).toBe(0)
+    expect(picker.configuredIndexerCount.value).toBe(0)
     expect(picker.criteria.value).toBeNull()
     expect(picker.attempts.value.size).toBe(0)
   })

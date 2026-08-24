@@ -58,6 +58,8 @@ function makeService(
     request?: Partial<BookRequestRow>;
     releases?: ReleaseCandidateItem[];
     indexers?: IndexerSearchStatus[];
+    /** What the instance had to search with. Defaults to one working source, as every case assumes. */
+    sourceCounts?: { enabledIndexerCount?: number; configuredIndexerCount?: number; uncoveredIndexerCount?: number };
     attempts?: number;
     tried?: string[];
     download?: Partial<BookRequestDownloadRow> | null;
@@ -80,6 +82,9 @@ function makeService(
     search: vi.fn().mockResolvedValue({
       releases: options.releases ?? [release()],
       indexers: options.indexers ?? [],
+      enabledIndexerCount: options.sourceCounts?.enabledIndexerCount ?? 1,
+      configuredIndexerCount: options.sourceCounts?.configuredIndexerCount ?? 1,
+      uncoveredIndexerCount: options.sourceCounts?.uncoveredIndexerCount ?? 0,
       searchedAt: '',
       cached: false,
     }),
@@ -318,6 +323,56 @@ describe('RequestAutomationService.considerRequest', () => {
     expect(fulfillment.setRequestStatus).toHaveBeenLastCalledWith(7, 'approved', expect.stringContaining('80'), {
       code: 'BELOW_SCORE_FLOOR',
       meta: { floor: 80 },
+    });
+  });
+
+  /**
+   * The floor, the profile and the tried list are all answers about releases. Reporting one of them
+   * for a search that never ran sends the approver to tune a number that had no bearing on it.
+   */
+  it('says nothing was searched rather than blaming the score floor when no source is enabled', async () => {
+    const { service, fulfillment } = makeService({
+      releases: [],
+      sourceCounts: { enabledIndexerCount: 0, configuredIndexerCount: 0 },
+    });
+
+    service.considerRequest(7);
+    await settle();
+
+    expect(fulfillment.setRequestStatus).toHaveBeenLastCalledWith(7, 'approved', expect.any(String), {
+      code: 'NO_SOURCES_CONFIGURED',
+      meta: undefined,
+    });
+  });
+
+  it('separates every source being switched off from having none at all', async () => {
+    const { service, fulfillment } = makeService({
+      releases: [],
+      sourceCounts: { enabledIndexerCount: 0, configuredIndexerCount: 4 },
+    });
+
+    service.considerRequest(7);
+    await settle();
+
+    expect(fulfillment.setRequestStatus).toHaveBeenLastCalledWith(7, 'approved', expect.any(String), {
+      code: 'NO_SOURCES_ENABLED',
+      meta: undefined,
+    });
+  });
+
+  it('says so when sources are enabled but none of them carries this medium', async () => {
+    const { service, fulfillment } = makeService({
+      releases: [],
+      indexers: [],
+      sourceCounts: { enabledIndexerCount: 2, configuredIndexerCount: 2, uncoveredIndexerCount: 2 },
+    });
+
+    service.considerRequest(7);
+    await settle();
+
+    expect(fulfillment.setRequestStatus).toHaveBeenLastCalledWith(7, 'approved', expect.any(String), {
+      code: 'MEDIUM_UNCOVERED',
+      meta: undefined,
     });
   });
 

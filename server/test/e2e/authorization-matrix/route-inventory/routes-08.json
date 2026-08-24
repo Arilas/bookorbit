@@ -230,6 +230,18 @@
   {
     "file": "server/src/modules/book-request/book-request.controller.ts",
     "className": "BookRequestController",
+    "methodName": "getSourceStatus",
+    "httpMethod": "GET",
+    "path": "/book-requests/source-status",
+    "permissions": ["Permission.BookRequestAccess"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-request/book-request.controller.ts",
+    "className": "BookRequestController",
     "methodName": "getDefaultDestinations",
     "httpMethod": "GET",
     "path": "/book-requests/default-destinations",

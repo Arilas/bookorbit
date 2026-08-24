@@ -12,11 +12,22 @@ import SettingsRow from './components/SettingsRow.vue'
 import SettingsSlider from './components/SettingsSlider.vue'
 import { useLibraries } from '@/features/library/composables/useLibraries'
 import { useRequestAutomation } from '@/features/book-requests/composables/useRequestAutomation'
+import { useRequestSourceStatus } from '@/features/book-requests/composables/useRequestSourceStatus'
 
 const { t } = useI18n()
 
 const { settings, loading, loadFailed, fetchSettings, save } = useRequestAutomation()
 const { libraries, fetchLibraries } = useLibraries()
+/**
+ * Auto-grab switched on with nothing to search is the one setting on this tab that reports success
+ * and does nothing. Every request it touches is handed straight back, and the summary above it
+ * says BookOrbit will grab anything clearing the score - about a search that will never run.
+ *
+ * The counts rather than the indexer list, even though this is an admin page: the list carries a
+ * row per source with its credential state, and all this needs to know is whether any of them is
+ * on. The counts also answer for an operator who holds `manage_app_settings` alone.
+ */
+const { noSourcesEnabled, noSourcesConfigured, fetchSourceStatus } = useRequestSourceStatus()
 
 const MEDIA_KINDS = BOOK_REQUEST_MEDIA_KINDS
 
@@ -36,6 +47,7 @@ watch(settings, (next) => {
 
 onMounted(fetchSettings)
 onMounted(fetchLibraries)
+onMounted(fetchSourceStatus)
 
 /**
  * What this server will actually do to an approved request, in one sentence. Assembled from the
@@ -148,6 +160,18 @@ function handleVerificationChange(enabled: boolean) {
       </div>
 
       <p class="settings-hint settings-prose bg-card px-4 py-3 md:px-5">{{ downloadsSummary }}</p>
+
+      <p
+        v-if="settings.autoGrabEnabled && noSourcesEnabled"
+        role="status"
+        class="settings-hint settings-prose bg-card px-4 pb-3 text-warning md:px-5"
+      >
+        {{
+          noSourcesConfigured
+            ? t('settings.system.requests.automation.noSourcesConfigured')
+            : t('settings.system.requests.automation.noSourcesEnabled')
+        }}
+      </p>
 
       <SettingsRow :label="t('settings.system.requests.automation.autoGrab')">
         <ToggleSwitch

@@ -39,6 +39,16 @@ export class BookRequestController {
   }
 
   /**
+   * Counts only, for the same reason `default-destinations` is here: it is instance configuration
+   * a requester has to be told about, and the indexer list it comes from is admin-only. Without
+   * it a request queued against nothing looks identical to one waiting its turn.
+   */
+  @Get('source-status')
+  getSourceStatus() {
+    return this.service.getSourceStatus();
+  }
+
+  /**
    * Instance configuration rather than anything of this user's, but read from the request form,
    * so it is gated on requesting rather than on managing settings.
    */

@@ -60,6 +60,8 @@ const {
   criteria,
   indexers,
   uncoveredIndexerCount,
+  enabledIndexerCount,
+  configuredIndexerCount,
   profileActive,
   cached,
   loading,
@@ -141,7 +143,12 @@ const isRetry = computed(() => request.value?.status === 'failed')
 const failureText = computed(() => (request.value ? requestFailureText(request.value, (key, named) => t(key, named)) : null))
 const authorLine = computed(() => request.value?.authors.join(', ') ?? '')
 const localOnlyCriteriaFacts = computed(() => (criteria.value ? localOnlyFacts(criteria.value) : []))
-const canFixSources = computed(() => canManage())
+/**
+ * Adding a source or switching one back on happens under Settings > System > Requests, which is
+ * gated on managing settings. Gating this on managing requests pointed some approvers at a page
+ * the router would not open for them.
+ */
+const canFixSources = computed(() => hasPermission(Permission.ManageAppSettings))
 /**
  * One line per searched source, saying what it was asked and what it gave back. The query alone
  * was the old panel: it repeated the ISBN already stated above it, and stayed silent about the
@@ -177,6 +184,21 @@ const condensedReleaseCount = computed(() => cleanSourceRows.value.reduce((total
 /** Nothing was searched at all, because nothing configured carries this medium. */
 const nothingCoversMedium = computed(() => indexers.value.length === 0 && uncoveredIndexerCount.value > 0)
 /**
+ * Nothing was searched because nothing is switched on. This is not a result about the book, and
+ * the panel used to report it as one: "Nothing found for 9781932382082" says the ISBN was tried
+ * and came back empty, when no request was ever made and the ISBN had nothing to do with it.
+ */
+const noSourcesEnabled = computed(() => searched.value && enabledIndexerCount.value === 0)
+/** Whether the fix is adding a source or switching one back on. Kept apart: one is a toggle. */
+const noSourcesConfigured = computed(() => noSourcesEnabled.value && configuredIndexerCount.value === 0)
+const noSourcesTitle = computed(() =>
+  t(noSourcesConfigured.value ? 'bookRequests.releases.noSourcesConfigured' : 'bookRequests.releases.noSourcesEnabled'),
+)
+const noSourcesHint = computed(() => {
+  if (!canFixSources.value) return t('bookRequests.releases.noSourcesAskAdmin')
+  return t(noSourcesConfigured.value ? 'bookRequests.releases.noSourcesConfiguredHint' : 'bookRequests.releases.noSourcesEnabledHint')
+})
+/**
  * A profile is configured for this medium and not one release fell into any of its tiers. Worth
  * saying outright, because the list looks completely normal: the rows are all still here, nothing
  * is marked, and the only visible symptom is that the automation quietly grabs none of them.
@@ -188,7 +210,9 @@ const nothingMatchedProfile = computed(
  * A search that ran and found nothing is stated by the panel itself, which is also where the next
  * key to try lives. Repeating it below the list only put the explanation further from the fix.
  */
-const searchFoundNothing = computed(() => searched.value && !loading.value && releases.value.length === 0 && !nothingCoversMedium.value)
+const searchFoundNothing = computed(
+  () => searched.value && !loading.value && releases.value.length === 0 && !nothingCoversMedium.value && !noSourcesEnabled.value,
+)
 const searchPanelOpen = computed(() => searchPanelChoice.value ?? searchFoundNothing.value)
 
 type CriteriaFact = { key: string; label: string; value: string }
@@ -588,7 +612,17 @@ function showEverySource(): void {
           {{ t('bookRequests.releases.previousFailure', { reason: failureText }) }}
         </p>
 
-        <section v-if="criteria" class="mt-3 rounded-lg border border-border bg-muted/40 p-3" :aria-label="t('bookRequests.releases.criteria.label')">
+        <!--
+          Hidden entirely while no source is enabled, rather than headed with a different sentence.
+          Every part of it - the key, the local filters, the alternate keys to try next - describes
+          a search, and offering to change the terms of one that will not run is the same lie in a
+          quieter voice. The empty state below says what actually happened.
+        -->
+        <section
+          v-if="criteria && !noSourcesEnabled"
+          class="mt-3 rounded-lg border border-border bg-muted/40 p-3"
+          :aria-label="t('bookRequests.releases.criteria.label')"
+        >
           <div class="flex items-start justify-between gap-3">
             <!--
               One key, stated once. The old panel said it three times: in the hint sentence, in a
@@ -894,7 +928,10 @@ function showEverySource(): void {
           </div>
         </section>
 
-        <p v-if="cached && !loading" class="mt-3 text-xs text-muted-foreground">{{ t('bookRequests.releases.cached') }}</p>
+        <!-- Not while nothing was searched: "showing the last search" is the same claim again. -->
+        <p v-if="cached && !loading && !noSourcesEnabled" class="mt-3 text-xs text-muted-foreground">
+          {{ t('bookRequests.releases.cached') }}
+        </p>
 
         <p v-if="loading" role="status" class="mt-5 flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 class="size-4 animate-spin" aria-hidden="true" />
@@ -905,12 +942,27 @@ function showEverySource(): void {
 
         <template v-else>
           <!--
+            Nothing was asked anything, so this is not a fact about the book. The fix is one of two
+            things and they are not interchangeable: an instance with three sources switched off
+            does not need a fourth.
+          -->
+          <RequestEmptyState v-if="noSourcesEnabled" :icon="SearchX" :title="noSourcesTitle" :message="noSourcesHint">
+            <Button v-if="canFixSources" variant="outline" size="sm" as-child>
+              <RouterLink :to="{ name: 'settings-admin-requests' }" class="inline-flex items-center justify-center gap-1.5">
+                {{ noSourcesConfigured ? t('bookRequests.releases.addSource') : t('bookRequests.releases.reviewSources') }}
+                <ArrowUpRight :size="14" aria-hidden="true" />
+              </RouterLink>
+            </Button>
+            <Button variant="ghost" size="sm" @click="openManual">{{ t('bookRequests.releases.manual') }}</Button>
+          </RequestEmptyState>
+
+          <!--
             A medium nothing carries is the one empty state the panel above cannot explain: no
             source was searched, so its list is empty too, and the fix is to add a source that
             covers this kind of book rather than to try another key.
           -->
           <RequestEmptyState
-            v-if="releases.length === 0 && searched && nothingCoversMedium"
+            v-else-if="releases.length === 0 && searched && nothingCoversMedium"
             :icon="SearchX"
             :title="t('bookRequests.releases.mediumUncovered')"
             :message="t('bookRequests.releases.mediumUncoveredHint')"

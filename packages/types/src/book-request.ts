@@ -82,10 +82,7 @@ export function isGrabbableBookRequestStatus(status: BookRequestStatus): boolean
  * Shared so the UI cannot offer an action `assertCanFulfil` would refuse, and holds no permission
  * check: the caller still needs `book_request_self_fulfill`, or to be moderating the queue.
  */
-export function isBookRequestFulfiller(
-  request: Pick<BookRequestItem, "userId" | "fulfillerUserId">,
-  userId: number | null | undefined,
-): boolean {
+export function isBookRequestFulfiller(request: Pick<BookRequestItem, "userId" | "fulfillerUserId">, userId: number | null | undefined): boolean {
   if (userId === null || userId === undefined) return false;
   return (request.fulfillerUserId ?? request.userId) === userId;
 }
@@ -170,6 +167,17 @@ export const BOOK_REQUEST_HANDBACK_CODES = [
   "ATTEMPT_LIMIT",
   /** The indexer search itself failed rather than coming back empty. Carries `detail`. */
   "SEARCH_FAILED",
+  /**
+   * Nothing was searched, because no indexer is configured at all. Kept apart from the two states
+   * below it: the score floor and the profile are both answers about releases, and reporting one
+   * of those for a search that never ran sends the operator to tune a number that had no bearing
+   * on anything.
+   */
+  "NO_SOURCES_CONFIGURED",
+  /** Nothing was searched, because every configured indexer is switched off. A toggle away. */
+  "NO_SOURCES_ENABLED",
+  /** Indexers are enabled, but not one of them carries the requested medium. */
+  "MEDIUM_UNCOVERED",
   /** A release profile is active for this medium and nothing the search returned fell in a tier. */
   "PROFILE_EXCLUDED_ALL",
   /** Everything good enough has already been tried for this request. */

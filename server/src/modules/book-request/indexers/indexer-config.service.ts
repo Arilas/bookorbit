@@ -2,6 +2,7 @@ import { BadGatewayException, BadRequestException, ConflictException, HttpStatus
 import { BOOK_REQUEST_MEDIA_KINDS, DEFAULT_INDEXER_CATEGORIES, INDEXER_ADAPTER_TYPES, pickUnusedIndexerColor } from '@bookorbit/types';
 import type {
   BookRequestMediaKind,
+  BookRequestSourceStatus,
   IndexerAdapterType,
   IndexerCategoryMap,
   IndexerErrorCode,
@@ -147,6 +148,14 @@ export class IndexerConfigService {
       throw new BadGatewayException({ message: reason, errorCode: 'INDEXER_TEST_FAILED', statusCode: HttpStatus.BAD_GATEWAY });
     }
     return result;
+  }
+
+  /**
+   * How many sources exist and how many are on. The only fact about the indexer list a requester
+   * is allowed, and what lets an empty release list say why it is empty.
+   */
+  countSources(): Promise<BookRequestSourceStatus> {
+    return this.repo.countSources();
   }
 
   /** Every enabled indexer, resolved for search. One decrypt pass, not one per release. */

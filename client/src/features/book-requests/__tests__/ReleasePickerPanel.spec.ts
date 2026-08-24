@@ -1,6 +1,7 @@
 import { flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
 import type { DOMWrapper, VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { Permission } from '@bookorbit/types'
 import type { BookRequestItem, IndexerSearchStatus, ReleaseCandidateItem } from '@bookorbit/types'
 
 const api = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>()
@@ -133,6 +134,8 @@ const MIXED = {
     }),
   ],
   uncoveredIndexerCount: 0,
+  enabledIndexerCount: 2,
+  configuredIndexerCount: 2,
   profileActive: false,
   searchedAt: '2026-08-20T00:00:00.000Z',
   cached: false,
@@ -258,6 +261,38 @@ describe('ReleasePickerPanel', () => {
     expect(wrapper.get('#release-search-options').text()).toContain('9781250301697')
     // The panel is the empty state now, so nothing repeats it under the list.
     expect(wrapper.text()).not.toContain('No release matched this request.')
+  })
+
+  /**
+   * The reported bug: with nothing switched on the panel said "Nothing found for <isbn>", which
+   * claims the ISBN was tried. No request was made, and the ISBN had no bearing on the outcome.
+   */
+  it('says nothing was searched rather than blaming the key when no source is enabled', async () => {
+    const wrapper = await render({ ...MIXED, releases: [], indexers: [], enabledIndexerCount: 0, configuredIndexerCount: 0 })
+
+    expect(wrapper.text()).not.toContain('Nothing found for')
+    expect(wrapper.text()).not.toContain('Searched9781234567897')
+    // The whole search transcript goes with it: its filters and alternate keys describe a search.
+    expect(wrapper.find('section[aria-label="Active search"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('No search sources are set up yet.')
+    expect(wrapper.text()).toContain('Add a source')
+  })
+
+  it('offers to switch a source back on rather than to add one when they are all off', async () => {
+    const wrapper = await render({ ...MIXED, releases: [], indexers: [], enabledIndexerCount: 0, configuredIndexerCount: 3 })
+
+    expect(wrapper.text()).toContain('Every search source is switched off.')
+    expect(wrapper.text()).toContain('Review sources')
+    expect(wrapper.text()).not.toContain('Add a source')
+  })
+
+  /** Nobody who cannot open the settings page is sent to it, in copy or in a link. */
+  it('tells a requester who to ask instead of linking them to settings they cannot open', async () => {
+    hasPermission.mockImplementation((permission: string) => permission !== Permission.ManageAppSettings)
+    const wrapper = await render({ ...MIXED, releases: [], indexers: [], enabledIndexerCount: 0, configuredIndexerCount: 0 })
+
+    expect(wrapper.text()).toContain('Ask an administrator to set up a search source')
+    expect(wrapper.text()).not.toContain('Add a source')
   })
 
   it('says what an alternative key returned once this visit has spent it', async () => {

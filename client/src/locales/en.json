@@ -2888,6 +2888,7 @@
         "indexers": {
           "title": "Torrent indexers",
           "hint": "Your own Prowlarr, Jackett or NZBHydra, over Torznab. Add one per Torznab feed you want searched.",
+          "allDisabled": "Every source below is switched off, so no request search will find anything. Switch at least one back on.",
           "loading": "Loading indexers...",
           "empty": {
             "title": "No sources yet",
@@ -3072,6 +3073,8 @@
           "saveFailed": "Could not save that setting",
           "saved": "Automation settings saved",
           "autoGrab": "Download the best release automatically",
+          "noSourcesConfigured": "No search sources are set up, so nothing will be searched and every approved request will be handed straight back. Add one under Sources.",
+          "noSourcesEnabled": "Every search source is switched off, so nothing will be searched and every approved request will be handed straight back. Switch one back on under Sources.",
           "autoGrabHint": "When a request is approved, its highest-scoring release goes straight to the download client and nobody has to open the release picker. Off by default, because matching a book to the right release is hard and a person is usually the better judge.",
           "autoGrabEnabled": "Automatic downloads are on",
           "autoGrabDisabled": "Automatic downloads are off",
@@ -6103,6 +6106,13 @@
       "inspectionFailedHint": "It was not sent to a download client. Try again, or use Paste a link instead.",
       "mediumUncovered": "No source carries this kind of book.",
       "mediumUncoveredHint": "None of your enabled indexers cover it. Add one that does, or paste a link yourself.",
+      "noSourcesConfigured": "No search sources are set up yet.",
+      "noSourcesEnabled": "Every search source is switched off.",
+      "noSourcesConfiguredHint": "Nothing was searched. Add an indexer or install a source plugin, or paste a link to a release yourself.",
+      "noSourcesEnabledHint": "Nothing was searched. Switch one back on, or paste a link to a release yourself.",
+      "noSourcesAskAdmin": "Nothing was searched. Ask an administrator to set up a search source, or paste a link to a release yourself.",
+      "addSource": "Add a source",
+      "reviewSources": "Review sources",
       "protocol": {
         "torrent": "Torrent",
         "direct": "Direct download",
@@ -6210,6 +6220,9 @@
       "NO_DESTINATION": "This request has no destination library, so there is nowhere to file the book",
       "ATTEMPT_LIMIT": "Automatic fulfilment gave up after {attempts} attempts",
       "SEARCH_FAILED": "Could not search for a release: {detail}",
+      "NO_SOURCES_CONFIGURED": "No search sources are set up, so nothing was searched for this request",
+      "NO_SOURCES_ENABLED": "Every search source is switched off, so nothing was searched for this request",
+      "MEDIUM_UNCOVERED": "No enabled search source carries this kind of book, so nothing was searched for this request",
       "PROFILE_EXCLUDED_ALL": "No release matched the profile for this medium, so this one needs a release picked by hand",
       "ALL_TRIED": "Every release good enough to grab has already been tried, so this one needs a release picked by hand",
       "BELOW_SCORE_FLOOR": "No release scored {floor} or better, so this one needs a release picked by hand",
@@ -6287,6 +6300,15 @@
       "missingEntryNext": "If the book is already in your library, close this request against it below. If it is not, cancel the request and search for another release.",
       "filed": "Filed into your library.",
       "fileFailed": "Could not file this import"
+    },
+    "sources": {
+      "noneConfigured": "No search sources are set up.",
+      "allDisabled": "Every search source is switched off.",
+      "noneConfiguredHint": "Requests can be filed, but nothing will be searched for them until you add an indexer or install a source plugin.",
+      "allDisabledHint": "Requests can be filed, but nothing will be searched for them until you switch one back on.",
+      "askAdmin": "Requests can be filed, but nothing will be searched for them until an administrator sets one up.",
+      "addSource": "Add a source",
+      "reviewSources": "Review sources"
     },
     "selfServeBadge": "Self-served",
     "selfServeBadgeHint": "Downloaded directly by the requester, with no approval step"

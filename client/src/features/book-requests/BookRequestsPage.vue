@@ -13,6 +13,7 @@ import { useAuth } from '@/features/auth/composables/useAuth'
 import { formatCompactNumber, formatNumber } from '@/i18n/formatters'
 import { canBulkActRequest, canDismissRequest, cancelStopsATransfer } from './requestActions'
 import RequestDrawer from './components/RequestDrawer.vue'
+import NoRequestSourcesNotice from './components/NoRequestSourcesNotice.vue'
 import RequestEmptyState from './components/RequestEmptyState.vue'
 import RequestListSkeleton from './components/RequestListSkeleton.vue'
 import RequestListTable from './components/RequestListTable.vue'
@@ -20,6 +21,7 @@ import RequestSearchPanel from './components/RequestSearchPanel.vue'
 import { useBookRequestActions, useBookRequests } from './composables/useBookRequests'
 import { useBookRequestProgress } from './composables/useBookRequestProgress'
 import { useBookRequestSummary } from './composables/useBookRequestSummary'
+import { useRequestSourceStatus } from './composables/useRequestSourceStatus'
 import { useCoalescedRefresh } from './composables/useCoalescedRefresh'
 import { useRequestListDensity } from './composables/useRequestListDensity'
 import { useRequestQueue } from './composables/useRequestQueue'
@@ -51,6 +53,7 @@ const mine = useBookRequests('mine')
 const all = useBookRequests('all')
 const actions = useBookRequestActions(() => hasPermission(Permission.ManageBookRequests))
 const { summary: requestSummary, fetchSummary, refreshSummary } = useBookRequestSummary()
+const { noSourcesEnabled, noSourcesConfigured, fetchSourceStatus } = useRequestSourceStatus()
 const { density, setDensity } = useRequestListDensity()
 
 const { progressByRequest, onRequestsChanged, pruneSettledProgress } = useBookRequestProgress()
@@ -136,6 +139,7 @@ function pruneSelection() {
 onMounted(() => {
   void loadActive()
   void fetchSummary()
+  void fetchSourceStatus()
 })
 
 function refreshAfterChange() {
@@ -454,6 +458,13 @@ function goToNextPage() {
       </div>
       <p class="mt-1.5 text-sm text-muted-foreground">{{ t('bookRequests.subtitle') }}</p>
     </header>
+
+    <!--
+      Above the tabs rather than inside one of them: it is the same fact whether you are filing a
+      request or waiting on one, and the queue below it is otherwise a list of rows with no stated
+      reason for standing still.
+    -->
+    <NoRequestSourcesNotice v-if="noSourcesEnabled" :nothing-configured="noSourcesConfigured" class="mb-4" />
 
     <!-- Underline tabs with a roving tabindex, matching the only other tablist in the app. -->
     <div role="tablist" :aria-label="t('bookRequests.title')" class="mb-4 flex gap-1 border-b border-border">

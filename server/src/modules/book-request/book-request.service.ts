@@ -27,6 +27,7 @@ import type {
   BookRequestStatus,
   BookRequestBulkFailure,
   BookRequestBulkResult,
+  BookRequestSourceStatus,
   BookRequestSummary,
   ResolvedRequestDestinations,
 } from '@bookorbit/types';
@@ -47,6 +48,7 @@ import { DownloadRemovalService } from './fulfillment/download-removal.service';
 import { BookRequestRepository, type BookRequestJoinedRow } from './book-request.repository';
 import { RequestAutomationService } from './fulfillment/request-automation.service';
 import { RequestAutomationSettingsService } from './fulfillment/request-automation-settings.service';
+import { IndexerConfigService } from './indexers/indexer-config.service';
 import type { CreateBookRequestDto } from './dto/create-book-request.dto';
 import type { DecideBookRequestDto } from './dto/decide-book-request.dto';
 import type { FulfillBookRequestDto } from './dto/fulfill-book-request.dto';
@@ -152,6 +154,7 @@ export class BookRequestService {
     private readonly removal: DownloadRemovalService,
     private readonly gateway: BookRequestGateway,
     private readonly attribution: BookRequestAttributionService,
+    private readonly indexers: IndexerConfigService,
   ) {}
 
   canManageAll(user: RequestUser): boolean {
@@ -448,6 +451,14 @@ export class BookRequestService {
       throw error;
     }
     return targetLibraryId;
+  }
+
+  /**
+   * Whether this instance can search for anything at all. Counts only, never names or addresses:
+   * this is read by everybody who may file a request, and the list it comes from is admin-only.
+   */
+  getSourceStatus(): Promise<BookRequestSourceStatus> {
+    return this.indexers.countSources();
   }
 
   /**

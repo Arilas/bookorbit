@@ -112,6 +112,13 @@ export function useIndexerPlugins(options: IndexerPluginsOptions) {
    */
   const nothingConfigured = computed(() => pluginRows.value.length === 0 && torznabRows.value.length === 0)
 
+  /**
+   * Rows exist and not one of them is on, which searches exactly as far as having none: the rows
+   * are all still on screen looking configured, so this is the one misconfiguration the list
+   * cannot show by itself.
+   */
+  const allSourcesDisabled = computed(() => indexers.value.length > 0 && indexers.value.every((indexer) => !indexer.enabled))
+
   /** Every non-built-in source belongs to a plugin, including one whose plugin file is already gone. */
   const editingPluginType = computed(() => {
     const type = editingType.value
@@ -272,6 +279,7 @@ export function useIndexerPlugins(options: IndexerPluginsOptions) {
     pluginRows,
     torznabRows,
     nothingConfigured,
+    allSourcesDisabled,
     editingPluginType,
     editingPlugin,
     pluginUseCount,

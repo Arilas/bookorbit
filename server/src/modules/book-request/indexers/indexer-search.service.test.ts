@@ -63,7 +63,12 @@ function makeService(
   configs: ResolvedIndexerConfig[],
   adapters: Record<string, { search: ReturnType<typeof vi.fn>; mediaKinds?: readonly string[]; seedsBack?: boolean; supportsIsbnSearch?: boolean }>,
 ) {
-  const indexers = { resolveEnabledConfigs: vi.fn().mockResolvedValue(configs) };
+  // The rows that exist, of which `configs` is the enabled subset. Every case here builds its
+  // sources enabled, so the two counts match unless a case says otherwise.
+  const indexers = {
+    resolveEnabledConfigs: vi.fn().mockResolvedValue(configs),
+    countSources: vi.fn().mockResolvedValue({ configured: configs.length, enabled: configs.length }),
+  };
   const registry = {
     find: vi.fn((type: string) => {
       const adapter = adapters[type];
@@ -443,6 +448,23 @@ describe('IndexerSearchService', () => {
     const { service } = makeService([indexer()], { torznab });
 
     await expect(service.search(request())).resolves.toMatchObject({ uncoveredIndexerCount: 0 });
+  });
+
+  /**
+   * The picker cannot ask for the indexer list, so an empty release list has to carry why it is
+   * empty. Without these two counts "nothing is set up", "everything is switched off" and "this
+   * book was not found" all arrive as the same empty array.
+   */
+  it('reports how many sources were enabled and how many exist at all', async () => {
+    const { service, indexers } = makeService([], {});
+    indexers.countSources.mockResolvedValue({ configured: 3, enabled: 0 });
+
+    const result = await service.search(request());
+
+    expect(result.enabledIndexerCount).toBe(0);
+    expect(result.configuredIndexerCount).toBe(3);
+    expect(result.releases).toEqual([]);
+    expect(result.indexers).toEqual([]);
   });
 
   /**

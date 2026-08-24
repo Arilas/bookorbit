@@ -69,7 +69,10 @@ export class IndexerSearchService {
       return { ...cached.result, cached: true };
     }
 
-    const configs = await this.indexers.resolveEnabledConfigs();
+    // Counted alongside the resolve rather than derived from it: an empty result has to be able to
+    // say whether anything was ever going to be searched, and "no source configured" and "every
+    // source switched off" need opposite fixes.
+    const [configs, sources] = await Promise.all([this.indexers.resolveEnabledConfigs(), this.indexers.countSources()]);
     const { profiles } = await this.automationSettings.get();
     const tiers = profiles[request.mediaKind] ?? [];
     const { scoringRequest, availableIsbns } = prepareScoringRequest(request, tiers, options.overrides);
@@ -146,6 +149,8 @@ export class IndexerSearchService {
       criteria: toSearchCriteria(scoringRequest, availableIsbns),
       indexers: statuses,
       uncoveredIndexerCount,
+      enabledIndexerCount: configs.length,
+      configuredIndexerCount: sources.configured,
       profileActive: releaseProfileIsActive(tiers),
       searchedAt: new Date().toISOString(),
       cached: false,

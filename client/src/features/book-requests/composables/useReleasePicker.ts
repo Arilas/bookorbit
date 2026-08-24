@@ -30,6 +30,13 @@ export function useReleasePicker(canManage: () => boolean) {
   const criteria = ref<ReleaseSearchCriteria | null>(null)
   /** Enabled indexers that do not carry this medium and were never searched. Not failures. */
   const uncoveredIndexerCount = ref(0)
+  /**
+   * What the instance had to search with. Zero enabled means nothing was searched at all, which
+   * the picker cannot work out any other way: the indexer list is admin-only, and an approver who
+   * cannot open settings is exactly who ends up staring at an empty list.
+   */
+  const enabledIndexerCount = ref(0)
+  const configuredIndexerCount = ref(0)
   const profileActive = ref(false)
   const cached = ref(false)
   const loading = ref(false)
@@ -85,6 +92,8 @@ export function useReleasePicker(canManage: () => boolean) {
       criteria.value = result.criteria
       indexers.value = result.indexers
       uncoveredIndexerCount.value = result.uncoveredIndexerCount
+      enabledIndexerCount.value = result.enabledIndexerCount
+      configuredIndexerCount.value = result.configuredIndexerCount
       profileActive.value = result.profileActive
       cached.value = result.cached
       searched.value = true
@@ -152,6 +161,8 @@ export function useReleasePicker(canManage: () => boolean) {
     criteria.value = null
     indexers.value = []
     uncoveredIndexerCount.value = 0
+    enabledIndexerCount.value = 0
+    configuredIndexerCount.value = 0
     profileActive.value = false
     cached.value = false
     loadFailed.value = false
@@ -173,6 +184,8 @@ export function useReleasePicker(canManage: () => boolean) {
     criteria,
     indexers,
     uncoveredIndexerCount,
+    enabledIndexerCount,
+    configuredIndexerCount,
     profileActive,
     cached,
     loading,

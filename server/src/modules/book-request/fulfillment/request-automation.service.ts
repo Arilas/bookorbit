@@ -182,8 +182,10 @@ export class RequestAutomationService implements OnModuleInit {
 
     if (pick.candidates.length === 0) {
       // "Nothing scored well enough" and "everything that did has already been tried" are
-      // different problems, and only one of them is fixed by adding an indexer.
-      const handback: Handback = pick.profileExcludedAll
+      // different problems, and only one of them is fixed by adding an indexer. A search that
+      // never ran is a third: reporting a score floor for it points the operator at a number that
+      // had no bearing on anything, and reads as a judgement about a book nothing ever looked for.
+      const scoredNothing: Handback = pick.profileExcludedAll
         ? {
             code: 'PROFILE_EXCLUDED_ALL',
             reason: 'No release matched the profile for this medium, so this one needs a release picked by hand',
@@ -198,8 +200,9 @@ export class RequestAutomationService implements OnModuleInit {
               reason: `No release scored ${settings.autoGrabMinScore} or better, so this one needs a release picked by hand`,
               meta: { floor: settings.autoGrabMinScore },
             };
+      const handback = this.nothingSearched(pick) ?? scoredNothing;
       this.logger.log(
-        `[book_request.auto_grab] [end] requestId=${requestId} trigger=${trigger} attempt=${spent + 1} picked=none allTried=${pick.allTried} floor=${settings.autoGrabMinScore} - nothing left to grab`,
+        `[book_request.auto_grab] [end] requestId=${requestId} trigger=${trigger} attempt=${spent + 1} picked=none code=${handback.code} enabled=${pick.enabledIndexerCount} allTried=${pick.allTried} floor=${settings.autoGrabMinScore} - nothing left to grab`,
       );
       await this.decline(requestId, trigger, handback);
       return;
@@ -279,6 +282,22 @@ export class RequestAutomationService implements OnModuleInit {
   }
 
   /**
+   * Why no source was asked anything, where that is what happened. Null when a search really ran
+   * and the empty list is a fact about the book rather than about the instance.
+   */
+  private nothingSearched(pick: ReleasePicks): Handback | null {
+    if (pick.enabledIndexerCount === 0) {
+      return pick.configuredIndexerCount === 0
+        ? { code: 'NO_SOURCES_CONFIGURED', reason: 'No search source is configured, so nothing was searched' }
+        : { code: 'NO_SOURCES_ENABLED', reason: 'Every search source is switched off, so nothing was searched' };
+    }
+    if (pick.indexers.length === 0 && pick.uncoveredIndexerCount > 0) {
+      return { code: 'MEDIUM_UNCOVERED', reason: 'No enabled search source carries this kind of book, so nothing was searched' };
+    }
+    return null;
+  }
+
+  /**
    * Searches the recommended ISBN, one alternate ISBN, then title and author, stopping as soon as
    * an untried release clears the profile and score floor. Indexers without ISBN search support
    * participate in the first pass by title and author and are not called again.
@@ -301,7 +320,15 @@ export class RequestAutomationService implements OnModuleInit {
             { indexerMode: 'isbn-capable', isbn: null },
           ];
 
-    let picks: ReleasePicks = { candidates: [], indexers: [], allTried: false, profileExcludedAll: false };
+    let picks: ReleasePicks = {
+      candidates: [],
+      indexers: [],
+      allTried: false,
+      profileExcludedAll: false,
+      enabledIndexerCount: 0,
+      configuredIndexerCount: 0,
+      uncoveredIndexerCount: 0,
+    };
 
     for (const [index, variant] of variants.entries()) {
       if (index > 0) await this.searchDelay.wait();
@@ -335,6 +362,11 @@ export class RequestAutomationService implements OnModuleInit {
         // Only when the profile is what emptied the list. Without this the operator is told nothing
         // scored well enough, while the picker in front of them is full of releases that did.
         profileExcludedAll: profiled && inProfile.length === 0 && ranked.length > 0,
+        enabledIndexerCount: result.enabledIndexerCount,
+        configuredIndexerCount: result.configuredIndexerCount,
+        // From whichever variant ran last. The medium filter runs before the ISBN-capable
+        // narrowing, so every variant of one pass reports the same number.
+        uncoveredIndexerCount: result.uncoveredIndexerCount,
       };
       if (candidates.length > 0) return picks;
     }
@@ -383,6 +415,14 @@ interface ReleasePicks {
   allTried: boolean;
   /** The medium has a profile and nothing the search returned fell into any of its tiers. */
   profileExcludedAll: boolean;
+  /**
+   * What the instance had to search with. An empty candidate list has several causes and only
+   * these separate the ones a score floor cannot explain, so they travel with the picks rather
+   * than being read again after the fact.
+   */
+  enabledIndexerCount: number;
+  configuredIndexerCount: number;
+  uncoveredIndexerCount: number;
 }
 
 interface AutomationSearchVariant {

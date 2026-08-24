@@ -105,6 +105,7 @@ const {
   pluginRows,
   torznabRows,
   nothingConfigured,
+  allSourcesDisabled,
   editingPluginType,
   editingPlugin,
   pluginUseCount,
@@ -250,6 +251,15 @@ function handleTestCurrent() {
 
     <p v-if="pluginRestartPending" role="status" class="settings-hint text-primary">
       {{ t('settings.system.requests.indexers.plugins.restartRequired') }}
+    </p>
+
+    <!--
+      A list of rows that are all switched off looks configured, and this page is where somebody
+      comes to find out why nothing is being searched. Stated above the groups rather than on each
+      row, because the fact is about the set rather than about any one source.
+    -->
+    <p v-if="allSourcesDisabled" role="status" class="settings-hint text-warning">
+      {{ t('settings.system.requests.indexers.allDisabled') }}
     </p>
 
     <RequestSourcesEmpty

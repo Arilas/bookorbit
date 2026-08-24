@@ -1,6 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
+
+import type { BookRequestSourceStatus } from '@bookorbit/types';
 
 import { DB } from '../../../db';
 import * as schema from '../../../db/schema';
@@ -24,6 +26,20 @@ export class IndexerRepository {
   async findById(id: number): Promise<RequestIndexerRow | undefined> {
     const [row] = await this.db.select().from(requestIndexers).where(eq(requestIndexers.id, id)).limit(1);
     return row;
+  }
+
+  /**
+   * Both counts in one pass. Read on every visit to the requests page by anybody who may file a
+   * request, so it never selects the rows themselves: a count is all that surface is allowed.
+   */
+  async countSources(): Promise<BookRequestSourceStatus> {
+    const [row] = await this.db
+      .select({
+        configured: sql<number>`count(*)::int`,
+        enabled: sql<number>`count(*) filter (where ${requestIndexers.enabled})::int`,
+      })
+      .from(requestIndexers);
+    return { configured: row?.configured ?? 0, enabled: row?.enabled ?? 0 };
   }
 
   /** Every enabled row. Order is stable rather than meaningful: all of them are searched. */
