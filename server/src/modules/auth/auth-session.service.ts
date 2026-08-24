@@ -2,7 +2,8 @@ import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { type ConfigType } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { randomBytes } from 'crypto';
-import type { AuthClientOptions, AuthenticationMethod, NativeCredentials } from '@bookorbit/types';
+import { AuthenticationMethod } from '@bookorbit/types';
+import type { AuthClientOptions, NativeCredentials } from '@bookorbit/types';
 import { authConfig } from '../../config/config';
 import { AuthSessionRepository, type OidcSessionInput } from './auth-session.repository';
 import { hashRefreshToken, nextRefreshToken } from './refresh-token.utils';
@@ -16,8 +17,11 @@ export class AuthSessionService {
     @Inject(authConfig.KEY) private readonly config: ConfigType<typeof authConfig>,
   ) {}
 
-  expiry(base = new Date()) {
-    return new Date(base.getTime() + ms(this.config.jwtRefreshExpiresIn as StringValue));
+  expiry(base = new Date(), authenticationMethod: AuthenticationMethod = AuthenticationMethod.Password, maximum?: Date) {
+    const duration =
+      authenticationMethod === AuthenticationMethod.AppPassword ? this.config.appPasswordRefreshExpiresIn : this.config.jwtRefreshExpiresIn;
+    const configured = new Date(base.getTime() + ms(duration as StringValue));
+    return maximum && maximum < configured ? maximum : configured;
   }
 
   async issue(
@@ -26,16 +30,22 @@ export class AuthSessionService {
     authenticationMethod: AuthenticationMethod,
     options: AuthClientOptions = {},
     oidc?: OidcSessionInput,
+    appPassword?: { id: number; expiresAt: Date },
   ) {
+    if ((authenticationMethod === AuthenticationMethod.AppPassword) !== !!appPassword) throw new UnauthorizedException();
     const refreshToken = randomBytes(32).toString('hex');
+    const now = new Date();
+    const expiresAt = this.expiry(now, authenticationMethod, appPassword?.expiresAt);
+    if (expiresAt <= now) throw new UnauthorizedException();
     const session = await this.repository.create(
       {
         userId,
+        appPasswordId: appPassword?.id ?? null,
         tokenVersion,
         authenticationMethod,
         clientKind: options.clientKind ?? 'web',
         deviceLabel: options.deviceLabel?.trim() || null,
-        expiresAt: this.expiry(),
+        expiresAt,
       },
       hashRefreshToken(refreshToken),
       oidc,
@@ -44,17 +54,27 @@ export class AuthSessionService {
     return this.credentials(session, refreshToken, session.expiresAt);
   }
 
-  async refresh(rawToken: string, userId: number, tokenVersion: number, sessionId: number) {
+  async refresh(
+    rawToken: string,
+    userId: number,
+    tokenVersion: number,
+    sessionId: number,
+    authenticationMethod: AuthenticationMethod,
+    maximumExpiresAt?: Date,
+  ) {
+    if ((authenticationMethod === AuthenticationMethod.AppPassword) !== !!maximumExpiresAt) throw new UnauthorizedException();
     const tokens = [rawToken];
     for (let hop = 0; hop < 5; hop++) tokens.push(nextRefreshToken(tokens[hop], this.config.jwtSecret));
     const now = new Date();
+    const expiresAt = this.expiry(now, authenticationMethod, maximumExpiresAt);
+    if (expiresAt <= now) throw new UnauthorizedException();
     const result = await this.repository.exchange({
       sessionId,
       userId,
       tokenVersion,
       tokenHashes: tokens.map(hashRefreshToken),
       now,
-      expiresAt: this.expiry(now),
+      expiresAt,
       graceMs: this.config.refreshRotationGraceMs,
     });
     if (!result) throw new UnauthorizedException();

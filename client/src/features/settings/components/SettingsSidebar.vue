@@ -13,7 +13,7 @@ withDefaults(defineProps<{ isRail?: boolean }>(), { isRail: false })
 
 const { t } = useI18n()
 const route = useRoute()
-const { isSuperuser, userPermissions, isDemoRestrictedAccount } = usePermissions()
+const { isSuperuser, userPermissions, isDemoRestrictedAccount, authenticationMethod, provisioningMethod } = usePermissions()
 const { showBookRequests } = useBookRequestVisibility()
 
 const groups = computed(() =>
@@ -22,6 +22,8 @@ const groups = computed(() =>
     permissions: userPermissions.value,
     isDemoRestricted: isDemoRestrictedAccount.value,
     showBookRequests: showBookRequests.value,
+    authenticationMethod: authenticationMethod.value,
+    provisioningMethod: provisioningMethod.value,
   }),
 )
 

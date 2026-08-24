@@ -119,7 +119,7 @@ describe('AuthorEnrichmentGateway', () => {
   it('handleConnection emits snapshot when user has required permission', async () => {
     const { gateway, jwtService, authService, queueRepo, enrichmentConfig, session } = makeGateway();
     const user = { id: 11, isSuperuser: false, permissions: [Permission.ManageMetadataConfig] };
-    jwtService.verify.mockReturnValue({ sub: 11, ver: 2 });
+    jwtService.verify.mockReturnValue({ sub: 11, ver: 2, amr: 'app_password', sid: 31 });
     authService.validateSessionUser.mockResolvedValue(user);
     queueRepo.getStatusSummary.mockResolvedValue({ queued: 3, processing: 1, rateLimited: 0, failed: 0, latestFailureAt: null, done: 2, total: 6 });
     enrichmentConfig.isPaused.mockResolvedValue(true);
@@ -133,7 +133,7 @@ describe('AuthorEnrichmentGateway', () => {
 
     await gateway.handleConnection(client);
 
-    expect(authService.validateSessionUser).toHaveBeenCalledWith(11, 2, 'legacy', undefined);
+    expect(authService.validateSessionUser).toHaveBeenCalledWith(11, 2, 'app_password', 31);
     expect(client.emit).toHaveBeenCalledWith(AUTHOR_ENRICHMENT_STATUS_EVENT, {
       queued: 3,
       processing: 1,

@@ -75,13 +75,13 @@ describe('MigrationProgressGateway', () => {
   it('accepts websocket connections for authorized users', async () => {
     const { gateway, jwtService, authService } = makeGateway();
     const client = makeClient();
-    jwtService.verify.mockReturnValue({ sub: 7, ver: 1 });
+    jwtService.verify.mockReturnValue({ sub: 7, ver: 1, amr: 'app_password', sid: 23 });
     authService.validateSessionUser.mockResolvedValue(makeUser({ permissions: [Permission.ManageAppSettings] }));
 
     await gateway.handleConnection(client as never);
 
     expect(jwtService.verify).toHaveBeenCalledWith('token-1', { algorithms: ['HS256'] });
-    expect(authService.validateSessionUser).toHaveBeenCalledWith(7, 1, 'legacy', undefined);
+    expect(authService.validateSessionUser).toHaveBeenCalledWith(7, 1, 'app_password', 23);
     expect(client.disconnect).not.toHaveBeenCalled();
     expect((client.data as { user?: RequestUser }).user?.id).toBe(7);
   });

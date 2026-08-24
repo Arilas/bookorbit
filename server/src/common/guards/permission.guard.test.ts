@@ -227,4 +227,38 @@ describe('PermissionGuard', () => {
     expect(permissionService.userHas).toHaveBeenCalledWith(expect.any(Object), Permission.BookDockAccess);
     expect(permissionService.userHas).toHaveBeenCalledWith(expect.any(Object), Permission.LibraryUpload);
   });
+
+  it('rejects app-password sessions for primary-only administrative permissions', () => {
+    const reflector = {
+      getAllAndOverride: vi.fn((key: string) => {
+        if (key === IS_PUBLIC_KEY) return false;
+        if (key === PERMISSION_KEY) return Permission.ManageUsers;
+        return undefined;
+      }),
+    };
+    const permissionService = { userHas: vi.fn().mockReturnValue(true), userHasExplicit: vi.fn().mockReturnValue(false) };
+    const guard = new PermissionGuard(reflector as never, permissionService as never);
+
+    expect(() => guard.canActivate(makeContext(makeUser({ authenticationMethod: 'app_password' })))).toThrow(
+      'Primary authentication required for administrative operations',
+    );
+  });
+
+  it('lets an app-password session satisfy a safe alternative in an any-of rule', () => {
+    const reflector = {
+      getAllAndOverride: vi.fn((key: string) => {
+        if (key === IS_PUBLIC_KEY) return false;
+        if (key === ANY_PERMISSION_KEY) return [Permission.ManageAppSettings, Permission.BookRequestAccess];
+        return undefined;
+      }),
+    };
+    const permissionService = {
+      userHas: vi.fn((_user: RequestUser, permission: Permission) => permission === Permission.BookRequestAccess),
+      userHasExplicit: vi.fn().mockReturnValue(false),
+    };
+    const guard = new PermissionGuard(reflector as never, permissionService as never);
+
+    expect(guard.canActivate(makeContext(makeUser({ authenticationMethod: 'app_password' })))).toBe(true);
+    expect(permissionService.userHas).not.toHaveBeenCalledWith(expect.any(Object), Permission.ManageAppSettings);
+  });
 });

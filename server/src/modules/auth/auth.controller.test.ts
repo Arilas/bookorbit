@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { Permission } from '@bookorbit/types';
 
 import { FORBIDDEN_PERMISSION_KEY } from '../../common/decorators/forbid-permission.decorator';
+import { REQUIRE_PRIMARY_AUTHENTICATION_KEY } from '../../common/decorators/require-primary-authentication.decorator';
 import { AuthController } from './auth.controller';
 
 function makeController() {
@@ -188,5 +189,26 @@ describe('AuthController', () => {
       permission: Permission.DemoRestricted,
       message: 'Demo-restricted account cannot edit account settings',
     });
+  });
+
+  it('requires primary authentication for credential and session controls', () => {
+    const primaryOnlyHandlers = [
+      AuthController.prototype.getSessions,
+      AuthController.prototype.revokeSession,
+      AuthController.prototype.changePassword,
+      AuthController.prototype.oidcGenerateLinkState,
+      AuthController.prototype.oidcGeneratePreviewState,
+      AuthController.prototype.oidcGetIdentities,
+      AuthController.prototype.oidcUnlinkIdentity,
+      AuthController.prototype.createMagicLink,
+      AuthController.prototype.listMagicLinks,
+      AuthController.prototype.updateMagicLink,
+      AuthController.prototype.revokeMagicLink,
+    ];
+
+    for (const handler of primaryOnlyHandlers) {
+      expect(Reflect.getMetadata(REQUIRE_PRIMARY_AUTHENTICATION_KEY, handler)).toBe(true);
+    }
+    expect(Reflect.getMetadata(REQUIRE_PRIMARY_AUTHENTICATION_KEY, AuthController.prototype.me)).toBeUndefined();
   });
 });

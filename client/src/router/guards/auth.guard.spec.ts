@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ref, type Ref } from 'vue'
-import { Permission } from '@bookorbit/types'
+import { AuthenticationMethod, Permission, ProvisioningMethod } from '@bookorbit/types'
 
 import { registerAuthGuard } from './auth.guard'
 
@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
     isSuperuser: boolean
     permissions: string[]
     provisioningMethod: string
+    authenticationMethod: 'password' | 'app_password'
     settings: { achievementPreferences: { enabled: boolean } }
   }>,
 }))
@@ -46,6 +47,7 @@ describe('registerAuthGuard', () => {
       isSuperuser: false,
       permissions: [],
       provisioningMethod: 'local',
+      authenticationMethod: 'password',
       settings: { achievementPreferences: { enabled: false } },
     })
     registerAuthGuard({
@@ -117,6 +119,40 @@ describe('registerAuthGuard', () => {
         meta: {
           requiredPermission: Permission.NotificationAccess,
           forbiddenPermission: Permission.DemoRestricted,
+          permissionFallback: 'settings-account-profile',
+        },
+      }),
+    ).resolves.toEqual({ name: 'settings-account-profile' })
+  })
+
+  it('redirects app-password-authenticated sessions away from app-password management', async () => {
+    if (!guard) throw new Error('Expected guard to be registered')
+    mocks.user.value.authenticationMethod = 'app_password'
+
+    await expect(
+      guard({
+        name: 'settings-account-app-passwords',
+        path: '/settings/account/app-passwords',
+        fullPath: '/settings/account/app-passwords',
+        meta: {
+          forbiddenAuthenticationMethod: AuthenticationMethod.AppPassword,
+          permissionFallback: 'settings-account-profile',
+        },
+      }),
+    ).resolves.toEqual({ name: 'settings-account-profile' })
+  })
+
+  it('redirects shared accounts away from app-password management', async () => {
+    if (!guard) throw new Error('Expected guard to be registered')
+    mocks.user.value.provisioningMethod = 'shared'
+
+    await expect(
+      guard({
+        name: 'settings-account-app-passwords',
+        path: '/settings/account/app-passwords',
+        fullPath: '/settings/account/app-passwords',
+        meta: {
+          forbiddenProvisioningMethod: ProvisioningMethod.Shared,
           permissionFallback: 'settings-account-profile',
         },
       }),

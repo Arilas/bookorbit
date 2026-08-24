@@ -19,6 +19,7 @@ function resetEnv(): void {
   delete process.env.JWT_SECRET;
   delete process.env.JWT_EXPIRES_IN;
   delete process.env.JWT_REFRESH_EXPIRES_IN;
+  delete process.env.APP_PASSWORD_REFRESH_EXPIRES_IN;
   delete process.env.SETUP_BOOTSTRAP_TOKEN;
   delete process.env.DISABLE_LOCAL_AUTH;
   delete process.env.APP_DATA_PATH;
@@ -113,6 +114,7 @@ describe('config', () => {
       jwtSecret: 'change-me-in-production',
       jwtExpiresIn: '15m',
       jwtRefreshExpiresIn: '7d',
+      appPasswordRefreshExpiresIn: '90d',
       setupBootstrapToken: '',
       refreshRotationGraceMs: 30_000,
       passwordLoginEnabled: true,

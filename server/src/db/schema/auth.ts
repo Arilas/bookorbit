@@ -89,6 +89,30 @@ export const userPermissions = pgTable(
   (t) => [primaryKey({ columns: [t.userId, t.permissionName] })],
 );
 
+export const appPasswords = pgTable(
+  'app_passwords',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    label: varchar('label', { length: 100 }).notNull(),
+    selector: varchar('selector', { length: 32 }).notNull().unique(),
+    secretHash: varchar('secret_hash', { length: 64 }).notNull().unique(),
+    secretHint: varchar('secret_hint', { length: 32 }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    lastUsedIp: varchar('last_used_ip', { length: 45 }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('app_passwords_user_id_idx').on(t.userId),
+    index('app_passwords_expires_at_idx').on(t.expiresAt),
+    check('app_passwords_expires_after_created_chk', sql`${t.expiresAt} > ${t.createdAt}`),
+  ],
+);
+
 export const libraryAccessLevelEnum = pgEnum('library_access_level', ['viewer', 'editor', 'owner']);
 
 export const userLibraryAccess = pgTable(
@@ -112,6 +136,7 @@ export const authSessions = pgTable(
     userId: integer('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    appPasswordId: integer('app_password_id').references(() => appPasswords.id, { onDelete: 'cascade' }),
     tokenVersion: integer('token_version').notNull(),
     authenticationMethod: varchar('authentication_method', { length: 20 }).notNull(),
     clientKind: varchar('client_kind', { length: 10 }).notNull().default('web'),
@@ -122,9 +147,14 @@ export const authSessions = pgTable(
   },
   (t) => [
     index('auth_sessions_user_id_idx').on(t.userId),
+    index('auth_sessions_app_password_id_idx').on(t.appPasswordId),
     index('auth_sessions_expires_at_idx').on(t.expiresAt),
     check('auth_sessions_client_kind_chk', sql`${t.clientKind} in ('web', 'native')`),
-    check('auth_sessions_authentication_method_chk', sql`${t.authenticationMethod} in ('password', 'oidc', 'magic_link', 'setup', 'legacy')`),
+    check(
+      'auth_sessions_authentication_method_chk',
+      sql`${t.authenticationMethod} in ('password', 'oidc', 'magic_link', 'setup', 'legacy', 'app_password')`,
+    ),
+    check('auth_sessions_app_password_auth_chk', sql`(${t.authenticationMethod} = 'app_password') = (${t.appPasswordId} is not null)`),
   ],
 );
 
@@ -149,7 +179,10 @@ export const refreshTokens = pgTable(
     index('refresh_tokens_session_id_idx').on(t.sessionId),
     index('refresh_tokens_expires_at_idx').on(t.expiresAt),
     check('refresh_tokens_expires_after_created_chk', sql`${t.expiresAt} > ${t.createdAt}`),
-    check('refresh_tokens_authentication_method_chk', sql`${t.authenticationMethod} in ('password', 'oidc', 'magic_link', 'setup', 'legacy')`),
+    check(
+      'refresh_tokens_authentication_method_chk',
+      sql`${t.authenticationMethod} in ('password', 'oidc', 'magic_link', 'setup', 'legacy', 'app_password')`,
+    ),
   ],
 );
 
@@ -186,6 +219,7 @@ export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 
 export type RefreshToken = typeof refreshTokens.$inferSelect;
+export type AppPassword = typeof appPasswords.$inferSelect;
 export type AppSetting = typeof appSettings.$inferSelect;
 
 export const magicAccessTokens = pgTable(

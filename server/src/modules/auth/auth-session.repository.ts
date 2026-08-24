@@ -47,22 +47,21 @@ export class AuthSessionRepository {
     return this.db.query.authSessions.findFirst({ where: eq(schema.authSessions.id, id) });
   }
 
+  findActive(id: number, userId: number, tokenVersion: number, authenticationMethod: string) {
+    return this.db.query.authSessions.findFirst({
+      where: and(
+        eq(schema.authSessions.id, id),
+        eq(schema.authSessions.userId, userId),
+        eq(schema.authSessions.tokenVersion, tokenVersion),
+        eq(schema.authSessions.authenticationMethod, authenticationMethod),
+        isNull(schema.authSessions.revokedAt),
+        gt(schema.authSessions.expiresAt, new Date()),
+      ),
+    });
+  }
+
   async isActive(id: number, userId: number, tokenVersion: number, authenticationMethod: string) {
-    const [row] = await this.db
-      .select({ id: schema.authSessions.id })
-      .from(schema.authSessions)
-      .where(
-        and(
-          eq(schema.authSessions.id, id),
-          eq(schema.authSessions.userId, userId),
-          eq(schema.authSessions.tokenVersion, tokenVersion),
-          eq(schema.authSessions.authenticationMethod, authenticationMethod),
-          isNull(schema.authSessions.revokedAt),
-          gt(schema.authSessions.expiresAt, new Date()),
-        ),
-      )
-      .limit(1);
-    return !!row;
+    return !!(await this.findActive(id, userId, tokenVersion, authenticationMethod));
   }
 
   async exchange(params: {
@@ -103,7 +102,7 @@ export class AuthSessionRepository {
         .where(and(eq(schema.refreshTokens.sessionId, sessionId), inArray(schema.refreshTokens.tokenHash, tokenHashes)));
       const byHash = new Map(rows.map((row) => [row.tokenHash, row]));
       const presented = byHash.get(tokenHashes[0]);
-      if (!presented || presented.expiresAt <= now) return null;
+      if (!presented || presented.expiresAt <= now || presented.authenticationMethod !== session.authenticationMethod) return null;
       if (!presented.revokedAt) {
         await tx
           .update(schema.refreshTokens)
@@ -182,6 +181,7 @@ export class AuthSessionRepository {
       .where(
         and(
           eq(schema.authSessions.userId, userId),
+          isNull(schema.authSessions.appPasswordId),
           isNull(schema.authSessions.revokedAt),
           gt(schema.authSessions.expiresAt, new Date()),
           eq(schema.authSessions.tokenVersion, schema.users.tokenVersion),

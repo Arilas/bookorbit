@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RouteRecordRaw } from 'vue-router'
-import { Permission } from '@bookorbit/types'
+import { AuthenticationMethod, Permission, ProvisioningMethod } from '@bookorbit/types'
 import { routes } from '@/router'
 
 type MissingRoute = {
@@ -56,6 +56,17 @@ describe('router redirects', () => {
     })
   })
 
+  it('protects app-password management from restricted and app-password-authenticated sessions', () => {
+    const route = findRoute(routes, 'settings-account-app-passwords')
+
+    expect(route?.meta).toMatchObject({
+      forbiddenPermission: Permission.DemoRestricted,
+      forbiddenAuthenticationMethod: AuthenticationMethod.AppPassword,
+      forbiddenProvisioningMethod: ProvisioningMethod.Shared,
+      permissionFallback: 'settings-account-profile',
+    })
+  })
+
   it('redirects the legacy Integrations tab URL to the Readwise page', () => {
     const route = findRoute(routes, 'settings-integrations')
     expect(route?.redirect).toBeTypeOf('function')
@@ -80,6 +91,7 @@ describe('router redirects', () => {
       { name: 'settings-appearance', tab: 'layout', expected: 'settings-appearance-layout' },
       { name: 'settings-reader', tab: 'comics', expected: 'settings-reader-comics' },
       { name: 'settings-account', tab: 'notifications', expected: 'settings-notifications' },
+      { name: 'settings-account', tab: 'app-passwords', expected: 'settings-account-app-passwords' },
     ]
 
     for (const { name, tab, expected } of cases) {

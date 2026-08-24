@@ -8,6 +8,8 @@ const permState = {
   isSuperuser: false,
   permissions: [] as string[],
   demoRestricted: false,
+  authenticationMethod: 'password' as 'password' | 'app_password',
+  provisioningMethod: 'local' as 'local' | 'shared',
 }
 
 const routeState = { name: 'settings-appearance-theme' }
@@ -35,13 +37,25 @@ vi.mock('@/features/auth/composables/usePermissions', () => ({
     isSuperuser: computed(() => permState.isSuperuser),
     userPermissions: computed(() => permState.permissions),
     isDemoRestrictedAccount: computed(() => permState.demoRestricted),
+    authenticationMethod: computed(() => permState.authenticationMethod),
+    provisioningMethod: computed(() => permState.provisioningMethod),
   }),
 }))
 
-function mountNav(opts?: { su?: boolean; perms?: string[]; demo?: boolean; routeName?: string; scanning?: boolean }) {
+function mountNav(opts?: {
+  su?: boolean
+  perms?: string[]
+  demo?: boolean
+  authenticationMethod?: 'password' | 'app_password'
+  provisioningMethod?: 'local' | 'shared'
+  routeName?: string
+  scanning?: boolean
+}) {
   permState.isSuperuser = opts?.su ?? false
   permState.permissions = opts?.perms ?? []
   permState.demoRestricted = opts?.demo ?? false
+  permState.authenticationMethod = opts?.authenticationMethod ?? 'password'
+  permState.provisioningMethod = opts?.provisioningMethod ?? 'local'
   navStatus.scanning = opts?.scanning ?? false
   routeState.name = opts?.routeName ?? 'settings-appearance-theme'
   return mount(SettingsNav, {
@@ -99,6 +113,7 @@ describe('SettingsNav', () => {
     it('always shows the personal destinations', () => {
       const labels = itemLabels(mountNav())
       expect(labels).toContain('Profile')
+      expect(labels).toContain('App Passwords')
       expect(labels).toContain('Display')
       expect(labels).toContain('Reader')
       expect(labels).toContain('Privacy & Sharing')
@@ -117,6 +132,13 @@ describe('SettingsNav', () => {
     it('hides notifications for a demo-restricted account even when otherwise allowed', () => {
       expect(itemLabels(mountNav({ perms: [Permission.NotificationAccess], demo: true }))).not.toContain('Notifications')
       expect(itemLabels(mountNav({ su: true, demo: true }))).not.toContain('Notifications')
+    })
+
+    it('hides app passwords for restricted and app-password-authenticated sessions', () => {
+      expect(itemLabels(mountNav({ demo: true }))).not.toContain('App Passwords')
+      expect(itemLabels(mountNav({ authenticationMethod: 'app_password' }))).not.toContain('App Passwords')
+      expect(itemLabels(mountNav({ provisioningMethod: 'shared' }))).not.toContain('App Passwords')
+      expect(itemLabels(mountNav({ authenticationMethod: 'password' }))).toContain('App Passwords')
     })
   })
 

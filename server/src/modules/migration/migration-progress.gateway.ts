@@ -10,7 +10,7 @@ import type { RequestUser } from '../../common/types/request-user';
 import { AuthService } from '../auth/auth.service';
 import { MigrationRepository } from './migration.repository';
 import { sanitizeRunForApi } from './core/api-sanitizers';
-import { rejectSocketConnection, resolveSocketUser, trackSocketHandshake } from '../../common/utils/ws-auth.utils';
+import { disconnectSocketAtTokenExpiry, rejectSocketConnection, resolveSocketUser, trackSocketHandshake } from '../../common/utils/ws-auth.utils';
 import { appConfig } from '../../config/config';
 
 @WebSocketGateway({ namespace: '/migration', cors: { credentials: true } })
@@ -45,11 +45,12 @@ export class MigrationProgressGateway implements OnGatewayInit, OnGatewayConnect
     try {
       const token = client.handshake.auth?.token as string | undefined;
       if (!token) throw new UnauthorizedException('No token provided');
-      const payload = this.jwtService.verify<{ sub: number; ver: number; sid?: number; amr?: AuthenticationMethod }>(token, {
+      const payload = this.jwtService.verify<{ sub: number; ver: number; sid?: number; amr?: AuthenticationMethod; exp?: number }>(token, {
         algorithms: ['HS256'],
       });
       const user = await this.authService.validateSessionUser(payload.sub, payload.ver, payload.amr ?? 'legacy', payload.sid);
       if (!user) throw new UnauthorizedException('User not found or token revoked');
+      disconnectSocketAtTokenExpiry(client, payload.exp);
       this.assertCanViewMigrationProgress(user);
       (client.data as Record<string, unknown>).user = user;
       this.logger.debug(`[migration.ws_connection] [start] userId=${user.id} socketId=${client.id} - websocket connected`);

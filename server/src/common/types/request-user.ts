@@ -18,6 +18,7 @@ export interface RequestUser {
   avatarVersion?: number | null;
   provisioningMethod: string;
   authenticationMethod?: AuthenticationMethod;
+  appPasswordId?: number;
   permissions: Permission[];
   contentFilters: ContentFilterRules;
 }

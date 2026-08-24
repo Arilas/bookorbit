@@ -16,7 +16,8 @@ const user = { id: 2, tokenVersion: 3, active: true, username: 'reader', provisi
 async function fixture() {
   const repository = {
     findRefresh: vi.fn().mockResolvedValue({ id: 10, sessionId: 7, userId: 2, authenticationMethod: 'password' }),
-    findSession: vi.fn().mockResolvedValue({ id: 7, userId: 2, clientKind: 'native' }),
+    findSession: vi.fn().mockResolvedValue({ id: 7, userId: 2, clientKind: 'native', authenticationMethod: 'password', appPasswordId: null }),
+    findActive: vi.fn().mockResolvedValue({ id: 7, userId: 2, authenticationMethod: 'password', appPasswordId: null }),
     revoke: vi.fn(),
     isActive: vi.fn().mockResolvedValue(true),
     list: vi.fn(),
@@ -76,7 +77,7 @@ describe('Auth native and web transports', () => {
   it('refreshes with an explicit credential and returns its replacement', async () => {
     const { service, sessions, req, res, reply } = await fixture();
     expect(await service.refresh(req, res, { refreshToken: raw })).toEqual(credentials);
-    expect(sessions.refresh).toHaveBeenCalledWith(raw, 2, 3, 7);
+    expect(sessions.refresh).toHaveBeenCalledWith(raw, 2, 3, 7, 'password', undefined);
     expect(reply.setCookie).not.toHaveBeenCalled();
   });
 
@@ -131,20 +132,20 @@ describe('Auth native and web transports', () => {
   it.each([undefined, 0, -1, 0.5])('rejects access tokens without a valid session ID: %s', async (id) => {
     const { service, repository } = await fixture();
     await expect(service.validateSessionUser(2, 3, 'password', id)).rejects.toThrow(UnauthorizedException);
-    expect(repository.isActive).not.toHaveBeenCalled();
+    expect(repository.findActive).not.toHaveBeenCalled();
   });
 
   it('checks the session and account on every authenticated request', async () => {
     const { service, repository } = await fixture();
     expect(await service.validateSessionUser(2, 3, 'password', 7)).toMatchObject({ id: 2, sessionId: 7 });
-    expect(repository.isActive).toHaveBeenCalledWith(7, 2, 3, 'password');
-    repository.isActive.mockResolvedValue(false);
+    expect(repository.findActive).toHaveBeenCalledWith(7, 2, 3, 'password');
+    repository.findActive.mockResolvedValue(null);
     await expect(service.validateSessionUser(2, 3, 'password', 7)).rejects.toThrow(UnauthorizedException);
   });
 
   it('keeps resource-ticket account validation independent of login session IDs', async () => {
     const { service, repository } = await fixture();
     expect(await service.validateUser(2, 3, 'password')).toMatchObject({ id: 2 });
-    expect(repository.isActive).not.toHaveBeenCalled();
+    expect(repository.findActive).not.toHaveBeenCalled();
   });
 });

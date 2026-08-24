@@ -9,6 +9,7 @@ export const AuthenticationMethod = {
   MagicLink: "magic_link",
   Setup: "setup",
   Legacy: "legacy",
+  AppPassword: "app_password",
 } as const;
 
 export type AuthenticationMethod = (typeof AuthenticationMethod)[keyof typeof AuthenticationMethod];
@@ -201,6 +202,28 @@ export interface Session {
   authenticationMethod: AuthenticationMethod;
   createdAt: string;
   expiresAt: string;
+}
+
+export interface AppPassword {
+  id: number;
+  label: string;
+  hint: string;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+  activeSessions: number;
+  status: "active" | "expired";
+}
+
+export interface CreateAppPasswordRequest {
+  label: string;
+  expiresAt: string;
+}
+
+export interface CreateAppPasswordResponse {
+  appPassword: AppPassword;
+  password: string;
 }
 
 export interface MagicLinkToken {

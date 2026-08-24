@@ -6,7 +6,7 @@ import { Server, Socket } from 'socket.io';
 import type { AuthenticationMethod } from '@bookorbit/types';
 
 import { AuthService } from '../auth/auth.service';
-import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { disconnectSocketAtTokenExpiry, rejectSocketConnection } from '../../common/utils/ws-auth.utils';
 import { wsCorsOrigin } from '../../common/utils/ws-cors.utils';
 
 @WebSocketGateway({ namespace: '/book-dock', cors: { origin: wsCorsOrigin() } })
@@ -23,12 +23,13 @@ export class BookDockGateway implements OnGatewayConnection, OnGatewayDisconnect
     try {
       const token = client.handshake.auth?.token as string | undefined;
       if (!token) throw new UnauthorizedException('No token provided');
-      const payload = this.jwtService.verify<{ sub: number; ver: number; sid?: number; amr?: AuthenticationMethod }>(token, {
+      const payload = this.jwtService.verify<{ sub: number; ver: number; sid?: number; amr?: AuthenticationMethod; exp?: number }>(token, {
         algorithms: ['HS256'],
       });
       const user = await this.authService.validateSessionUser(payload.sub, payload.ver, payload.amr ?? 'legacy', payload.sid);
       if (!user) throw new UnauthorizedException('User not found or token revoked');
       (client.data as Record<string, unknown>).user = user;
+      disconnectSocketAtTokenExpiry(client, payload.exp);
       this.logger.debug(`WS connected: user=${user.id} socket=${client.id}`);
     } catch (err) {
       this.logger.warn(`WS rejected: ${(err as Error).message} socket=${client.id}`);

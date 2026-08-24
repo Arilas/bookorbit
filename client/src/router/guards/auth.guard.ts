@@ -62,6 +62,14 @@ export function registerAuthGuard(router: Router): void {
       if (to.path !== '/') return { path: '/' }
     }
 
+    if (to.meta.forbiddenAuthenticationMethod && user.value.authenticationMethod === to.meta.forbiddenAuthenticationMethod) {
+      return permissionFallback(to.meta.permissionFallback)
+    }
+
+    if (to.meta.forbiddenProvisioningMethod && user.value.provisioningMethod === to.meta.forbiddenProvisioningMethod) {
+      return permissionFallback(to.meta.permissionFallback)
+    }
+
     const permissions = user.value.permissions ?? []
     if (to.meta.forbiddenPermission && permissions.includes(to.meta.forbiddenPermission)) {
       return permissionFallback(to.meta.permissionFallback)

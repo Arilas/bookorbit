@@ -1,6 +1,6 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { Permission } from '@bookorbit/types';
+import { AuthenticationMethod, Permission } from '@bookorbit/types';
 
 import { FORBIDDEN_PERMISSION_KEY, type ForbiddenPermissionRule } from '../decorators/forbid-permission.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
@@ -8,6 +8,18 @@ import { ANY_PERMISSION_KEY } from '../decorators/require-any-permission.decorat
 import { PERMISSION_KEY } from '../decorators/require-permission.decorator';
 import { PermissionService } from '../services/permission.service';
 import { RequestUser } from '../types/request-user';
+
+const PRIMARY_AUTH_ONLY_PERMISSIONS = new Set<Permission>([
+  Permission.ManageLibraries,
+  Permission.ManageMetadataConfig,
+  Permission.ManageIcons,
+  Permission.ManageAppSettings,
+  Permission.ManageBookDock,
+  Permission.ManageUsers,
+  Permission.ManageEmail,
+  Permission.ViewUserActivity,
+  Permission.ViewAuditLog,
+]);
 
 @Injectable()
 export class PermissionGuard implements CanActivate {
@@ -31,7 +43,12 @@ export class PermissionGuard implements CanActivate {
 
     const anyOf = this.reflector.getAllAndOverride<Permission[] | undefined>(ANY_PERMISSION_KEY, [context.getHandler()]);
     if (anyOf) {
-      if (anyOf.some((permission) => this.permissionService.userHas(user, permission))) return true;
+      const allowed =
+        user.authenticationMethod === AuthenticationMethod.AppPassword
+          ? anyOf.filter((permission) => !PRIMARY_AUTH_ONLY_PERMISSIONS.has(permission))
+          : anyOf;
+      if (allowed.some((permission) => this.permissionService.userHas(user, permission))) return true;
+      if (allowed.length === 0) throw new ForbiddenException('Primary authentication required for administrative operations');
       throw new ForbiddenException(`Missing permission: ${anyOf.join(' or ')}`);
     }
 
@@ -42,6 +59,12 @@ export class PermissionGuard implements CanActivate {
     if (!required) return true;
 
     const permissions = Array.isArray(required) ? required : [required];
+    if (
+      user.authenticationMethod === AuthenticationMethod.AppPassword &&
+      permissions.some((permission) => PRIMARY_AUTH_ONLY_PERMISSIONS.has(permission))
+    ) {
+      throw new ForbiddenException('Primary authentication required for administrative operations');
+    }
     const missing = permissions.find((permission) => !this.permissionService.userHas(user, permission));
     if (missing) {
       throw new ForbiddenException(`Missing permission: ${missing}`);

@@ -45,6 +45,7 @@ describe('SettingsView shell', () => {
   })
 
   it.each([
+    ['settings-account-app-passwords', 'App Passwords', 'Dedicated credentials for apps and reading devices.'],
     [
       'settings-koreader',
       'KOReader',

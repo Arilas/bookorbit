@@ -2,15 +2,18 @@ import { ForbiddenException, Inject, Logger, UnauthorizedException } from '@nest
 import type { ConfigType } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
-import { Permission } from '@bookorbit/types';
-import type { NotificationItem } from '@bookorbit/types';
+import { AuthenticationMethod, Permission, type NotificationItem } from '@bookorbit/types';
 import { Server, Socket } from 'socket.io';
+import { and, eq, gt, isNull } from 'drizzle-orm';
+import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { DB } from '../../db';
+import * as schema from '../../db/schema';
 import { UserService } from '../user/user.service';
 import { NotificationRepository } from './notification.repository';
-import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { disconnectSocketAtTokenExpiry, rejectSocketConnection } from '../../common/utils/ws-auth.utils';
 import { appConfig } from '../../config/config';
 
 @WebSocketGateway({ namespace: '/notifications', cors: { credentials: true } })
@@ -24,6 +27,7 @@ export class NotificationGateway implements OnGatewayInit, OnGatewayConnection, 
     private readonly userService: UserService,
     private readonly notificationRepo: NotificationRepository,
     @Inject(appConfig.KEY) app: ConfigType<typeof appConfig>,
+    @Inject(DB) private readonly db: NodePgDatabase<typeof schema>,
   ) {
     this.clientOrigin = app.appUrl;
   }
@@ -43,12 +47,17 @@ export class NotificationGateway implements OnGatewayInit, OnGatewayConnection, 
       const token = client.handshake.auth?.token as string | undefined;
       if (!token) throw new UnauthorizedException('No token provided');
 
-      const payload = this.jwtService.verify<{ sub: number; ver: number }>(token, { algorithms: ['HS256'] });
-      const user = await this.userService.findByIdWithPermissions(payload.sub);
-      if (!user || !user.active) throw new UnauthorizedException('User not found or inactive');
-      if (user.tokenVersion !== payload.ver) throw new UnauthorizedException('Token revoked');
+      const payload = this.jwtService.verify<{
+        sub: number;
+        ver: number;
+        sid?: number;
+        amr?: AuthenticationMethod;
+        exp?: number;
+      }>(token, { algorithms: ['HS256'] });
+      const user = await this.validateSessionUser(payload);
 
       this.assertHasAccess(user);
+      disconnectSocketAtTokenExpiry(client, payload.exp);
 
       await client.join(`user:${user.id}`);
       this.logger.debug(`[${event}] [start] userId=${user.id} socketId=${client.id} - websocket connected`);
@@ -110,5 +119,36 @@ export class NotificationGateway implements OnGatewayInit, OnGatewayConnection, 
     if (user.isSuperuser) return;
     if (user.permissions.includes(Permission.NotificationAccess)) return;
     throw new ForbiddenException('Missing permission: notification_access');
+  }
+
+  private async validateSessionUser(payload: { sub: number; ver: number; sid?: number; amr?: AuthenticationMethod }): Promise<RequestUser> {
+    if (!Number.isSafeInteger(payload.sid) || !payload.sid || payload.sid < 1) {
+      throw new UnauthorizedException('Missing session binding');
+    }
+    const authenticationMethod = payload.amr ?? AuthenticationMethod.Legacy;
+    const user = await this.userService.findByIdWithPermissions(payload.sub);
+    if (!user || !user.active) throw new UnauthorizedException('User not found or inactive');
+    if (user.tokenVersion !== payload.ver) throw new UnauthorizedException('Token revoked');
+
+    const session = await this.db.query.authSessions.findFirst({
+      where: and(
+        eq(schema.authSessions.id, payload.sid),
+        eq(schema.authSessions.userId, payload.sub),
+        eq(schema.authSessions.tokenVersion, payload.ver),
+        eq(schema.authSessions.authenticationMethod, authenticationMethod),
+        isNull(schema.authSessions.revokedAt),
+        gt(schema.authSessions.expiresAt, new Date()),
+      ),
+      columns: { id: true, appPasswordId: true },
+    });
+    if (!session) throw new UnauthorizedException('Session revoked');
+
+    const appPasswordId = session.appPasswordId ?? undefined;
+    return {
+      ...user,
+      sessionId: session.id,
+      authenticationMethod,
+      ...(appPasswordId ? { appPasswordId } : {}),
+    };
   }
 }

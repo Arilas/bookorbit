@@ -43,6 +43,7 @@ import { MagicLinkRepository } from './magic-link.repository';
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import { OidcProviderService } from '../app-settings/oidc-provider.service';
 import { AuthenticationPolicyService } from '../../common/services/authentication-policy.service';
+import { AppPasswordService } from './app-password.service';
 
 function parseDurationMs(duration: string): number {
   const match = duration.match(/^(\d+)([smhd])$/);
@@ -91,6 +92,7 @@ export class AuthService {
     private readonly appSettings: AppSettingsService,
     private readonly oidcProviderService: OidcProviderService,
     private readonly authenticationPolicy: AuthenticationPolicyService,
+    private readonly appPasswordService: AppPasswordService,
     private readonly sessions: AuthSessionService,
     private readonly sessionRepo: AuthSessionRepository,
     @Inject(DB) private readonly db: NodePgDatabase<typeof schema>,
@@ -243,7 +245,9 @@ export class AuthService {
   }
 
   async login(dto: LoginDto, reply: FastifyReply, ip?: string) {
-    this.authenticationPolicy.assertPasswordLoginEnabled();
+    const isAppPasswordAttempt = dto.password.startsWith('boap_');
+    if (!isAppPasswordAttempt) this.authenticationPolicy.assertPasswordLoginEnabled();
+
     const user = await this.userService.findByUsername(dto.username);
     const now = new Date();
 
@@ -252,10 +256,13 @@ export class AuthService {
     // The lockout is reported only to someone who supplied the correct password, so an attacker
     // probing usernames still gets the generic failure and learns nothing about which accounts exist.
     const passwordHash = user?.passwordHash ?? DUMMY_HASH;
-    const isPasswordValid = await compare(dto.password, passwordHash);
-    if (!user || !user.active || !isPasswordValid) {
+    const isPasswordValid = !isAppPasswordAttempt && (await compare(dto.password, passwordHash));
+    const appPassword = isAppPasswordAttempt ? await this.appPasswordService.verify(user?.active ? user.id : 0, dto.password, ip) : null;
+    if (!user || !user.active || (!isPasswordValid && !appPassword)) {
       const newlyLockedUntil =
-        user && user.active && !isLockedOut ? await this.recordFailedLoginAttempt(user.id, user.failedLoginAttempts ?? 0, now) : null;
+        user && user.active && !isLockedOut && !isAppPasswordAttempt
+          ? await this.recordFailedLoginAttempt(user.id, user.failedLoginAttempts ?? 0, now)
+          : null;
       const lockedUntil = newlyLockedUntil ?? (isLockedOut ? (user?.lockedUntil ?? null) : null);
       this.logger.warn(
         `[auth.login] [fail]${user ? ` userId=${user.id}` : ''} username=${dto.username} ip=${ip ?? 'unknown'} errorClass=UnauthorizedException error="${lockedUntil ? 'account locked' : 'invalid credentials'}" - login failed`,
@@ -273,7 +280,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    if (isLockedOut && user.lockedUntil) {
+    if (!appPassword && isLockedOut && user.lockedUntil) {
       const retryAfterSeconds = Math.max(1, Math.ceil((user.lockedUntil.getTime() - now.getTime()) / 1000));
       this.logger.warn(
         `[auth.login] [fail] userId=${user.id} username=${dto.username} ip=${ip ?? 'unknown'} errorClass=UnauthorizedException error="account locked" - login failed`,
@@ -293,26 +300,37 @@ export class AuthService {
       });
     }
 
-    if ((user.failedLoginAttempts ?? 0) > 0 || user.lockedUntil) {
+    if (!appPassword && ((user.failedLoginAttempts ?? 0) > 0 || user.lockedUntil)) {
       await this.db.update(schema.users).set({ failedLoginAttempts: 0, lockedUntil: null }).where(eq(schema.users.id, user.id));
     }
 
     const fullUser = await this.userService.findByIdWithPermissions(user.id);
-    const credentials = await this.sessions.issue(user.id, user.tokenVersion, AuthenticationMethod.Password, dto);
+    const authenticationMethod = appPassword ? AuthenticationMethod.AppPassword : AuthenticationMethod.Password;
+    const credentials = await this.sessions.issue(
+      user.id,
+      user.tokenVersion,
+      authenticationMethod,
+      dto,
+      undefined,
+      appPassword ? { id: appPassword.id, expiresAt: appPassword.expiresAt } : undefined,
+    );
 
-    this.logger.log(`[auth.login] [end] userId=${user.id} username=${user.username} ip=${ip ?? 'unknown'} - login completed`);
+    this.logger.log(
+      `[auth.login] [end] userId=${user.id} username=${user.username} authenticationMethod=${authenticationMethod} ip=${ip ?? 'unknown'} - login completed`,
+    );
 
     this.auditEvents.emit(AUDIT_EVENT, {
       userId: user.id,
       actorUsername: user.username,
       action: AuditAction.AuthLogin,
-      description: `User '${user.username}' logged in`,
+      description: `User '${user.username}' logged in${appPassword ? ` with app password '${appPassword.label}'` : ''}`,
       ip,
+      meta: { authenticationMethod, ...(appPassword ? { appPasswordId: appPassword.id } : {}) },
     });
 
     return {
       ...this.deliverCredentials(credentials, reply, dto.clientKind === 'native'),
-      user: this.buildUserResponse(fullUser!, AuthenticationMethod.Password),
+      user: this.buildUserResponse(fullUser!, authenticationMethod),
     };
   }
 
@@ -364,13 +382,24 @@ export class AuthService {
       const session = await this.sessionRepo.findSession(row.sessionId);
       if (!session || (session.clientKind === 'native') !== native) throw new UnauthorizedException();
       const method = this.normalizeAuthenticationMethod(row.authenticationMethod);
-      if (!this.isAuthenticationMethodAllowed(method)) {
+      if (session.authenticationMethod !== row.authenticationMethod || !this.isAuthenticationMethodAllowed(method)) {
         await this.sessionRepo.revoke(row.sessionId, row.userId);
         throw new UnauthorizedException();
       }
+
+      const appPassword =
+        method === AuthenticationMethod.AppPassword && session.appPasswordId
+          ? await this.appPasswordService.findUsableById(row.userId, session.appPasswordId)
+          : null;
+      if ((method === AuthenticationMethod.AppPassword && !appPassword) || (method !== AuthenticationMethod.AppPassword && session.appPasswordId)) {
+        await this.sessionRepo.revoke(row.sessionId, row.userId);
+        throw new UnauthorizedException();
+      }
+
       const user = await this.userService.findByIdWithPermissions(row.userId);
       if (!user?.active || !(await this.canActNow(user))) throw new UnauthorizedException();
-      const credentials = await this.sessions.refresh(rawToken, row.userId, user.tokenVersion, row.sessionId);
+      const credentials = await this.sessions.refresh(rawToken, row.userId, user.tokenVersion, row.sessionId, method, appPassword?.expiresAt);
+      if (session.appPasswordId) await this.appPasswordService.markUsed(session.appPasswordId, req.ip);
       return this.deliverCredentials(credentials, reply, native);
     } catch (error) {
       if (!native && error instanceof UnauthorizedException) {
@@ -419,9 +448,21 @@ export class AuthService {
 
   async validateSessionUser(userId: number, tokenVersion: number, authenticationMethod: AuthenticationMethodValue, sessionId?: number) {
     if (!Number.isSafeInteger(sessionId) || !sessionId || sessionId < 1) throw new UnauthorizedException();
-    if (!(await this.sessionRepo.isActive(sessionId, userId, tokenVersion, authenticationMethod))) throw new UnauthorizedException();
+    const session = await this.sessionRepo.findActive(sessionId, userId, tokenVersion, authenticationMethod);
+    if (!session) throw new UnauthorizedException();
+
+    let appPasswordId: number | undefined;
+    if (authenticationMethod === AuthenticationMethod.AppPassword) {
+      if (!session.appPasswordId || !(await this.appPasswordService.findUsableById(userId, session.appPasswordId))) {
+        throw new UnauthorizedException();
+      }
+      appPasswordId = session.appPasswordId;
+    } else if (session.appPasswordId) {
+      throw new UnauthorizedException();
+    }
+
     const user = await this.validateUser(userId, tokenVersion, authenticationMethod);
-    return { ...user, sessionId };
+    return { ...user, sessionId, ...(appPasswordId ? { appPasswordId } : {}) };
   }
 
   async validateUser(userId: number, tokenVersion: number, authenticationMethod: AuthenticationMethodValue) {
@@ -542,6 +583,7 @@ export class AuthService {
     }
 
     const passwordHash = await hash(dto.newPassword, 12);
+    const revokedAt = new Date();
 
     await this.db.transaction(async (tx) => {
       await tx
@@ -555,12 +597,20 @@ export class AuthService {
         })
         .where(eq(schema.users.id, row.userId));
 
-      await tx.update(schema.passwordResetTokens).set({ usedAt: new Date() }).where(eq(schema.passwordResetTokens.id, row.id));
+      await tx.update(schema.passwordResetTokens).set({ usedAt: revokedAt }).where(eq(schema.passwordResetTokens.id, row.id));
 
       await tx
         .update(schema.refreshTokens)
-        .set({ revokedAt: new Date() })
+        .set({ revokedAt })
         .where(and(eq(schema.refreshTokens.userId, row.userId), isNull(schema.refreshTokens.revokedAt)));
+      await tx
+        .update(schema.appPasswords)
+        .set({ revokedAt })
+        .where(and(eq(schema.appPasswords.userId, row.userId), isNull(schema.appPasswords.revokedAt)));
+      await tx
+        .update(schema.authSessions)
+        .set({ revokedAt })
+        .where(and(eq(schema.authSessions.userId, row.userId), isNull(schema.authSessions.revokedAt)));
     });
 
     this.auditEvents.emit(AUDIT_EVENT, {
@@ -591,6 +641,7 @@ export class AuthService {
     if (!valid) throw new UnauthorizedException('Current password is incorrect');
 
     const passwordHash = await hash(dto.newPassword, 12);
+    const revokedAt = new Date();
 
     await this.db.transaction(async (tx) => {
       await tx
@@ -606,8 +657,16 @@ export class AuthService {
 
       await tx
         .update(schema.refreshTokens)
-        .set({ revokedAt: new Date() })
+        .set({ revokedAt })
         .where(and(eq(schema.refreshTokens.userId, userId), isNull(schema.refreshTokens.revokedAt)));
+      await tx
+        .update(schema.appPasswords)
+        .set({ revokedAt })
+        .where(and(eq(schema.appPasswords.userId, userId), isNull(schema.appPasswords.revokedAt)));
+      await tx
+        .update(schema.authSessions)
+        .set({ revokedAt })
+        .where(and(eq(schema.authSessions.userId, userId), isNull(schema.authSessions.revokedAt)));
     });
 
     this.clearRefreshCookie(reply);
@@ -630,7 +689,11 @@ export class AuthService {
 
   private isAuthenticationMethodAllowed(authenticationMethod: AuthenticationMethodValue): boolean {
     if (this.authenticationPolicy.isPasswordLoginEnabled()) return true;
-    return authenticationMethod === AuthenticationMethod.Oidc || authenticationMethod === AuthenticationMethod.MagicLink;
+    return (
+      authenticationMethod === AuthenticationMethod.Oidc ||
+      authenticationMethod === AuthenticationMethod.MagicLink ||
+      authenticationMethod === AuthenticationMethod.AppPassword
+    );
   }
 
   private assertSetupToken(setupToken: string | undefined) {

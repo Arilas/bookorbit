@@ -25,7 +25,7 @@ describe('BookDockGateway', () => {
 
   it('disconnects sockets when user cannot be validated', async () => {
     const { gateway, jwtService, authService } = makeGateway();
-    jwtService.verify.mockReturnValue({ sub: 8, ver: 3 });
+    jwtService.verify.mockReturnValue({ sub: 8, ver: 3, amr: 'app_password', sid: 19 });
     authService.validateSessionUser.mockResolvedValue(null);
     const client = {
       id: 'socket-2',
@@ -37,7 +37,7 @@ describe('BookDockGateway', () => {
 
     await gateway.handleConnection(client);
 
-    expect(authService.validateSessionUser).toHaveBeenCalledWith(8, 3, 'legacy', undefined);
+    expect(authService.validateSessionUser).toHaveBeenCalledWith(8, 3, 'app_password', 19);
     expect(client.disconnect).toHaveBeenCalledTimes(1);
   });
 

@@ -8,6 +8,8 @@ export enum AuditAction {
   AuthPasswordReset = "auth.password.reset",
   AuthPasswordAdminReset = "auth.password.admin_reset",
   AuthSessionRevoke = "auth.session.revoke",
+  AuthAppPasswordCreate = "auth.app_password.create",
+  AuthAppPasswordRevoke = "auth.app_password.revoke",
 
   MagicLinkCreate = "magic_link.create",
   MagicLinkLogin = "magic_link.login",

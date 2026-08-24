@@ -64,6 +64,15 @@ describe('JwtStrategy.validate', () => {
     expect(authService.validateSessionUser).toHaveBeenCalledWith(1, 2, 'oidc', undefined);
   });
 
+  it('passes an app-password method with the numeric auth-session id', async () => {
+    const { strategy, authService } = makeStrategy();
+    authService.validateSessionUser.mockResolvedValue({ id: 1, appPasswordId: 17 });
+
+    await strategy.validate({ sub: 1, ver: 2, amr: 'app_password', sid: 31 });
+
+    expect(authService.validateSessionUser).toHaveBeenCalledWith(1, 2, 'app_password', 31);
+  });
+
   it('throws UnauthorizedException when validateSessionUser returns null', async () => {
     const { strategy, authService } = makeStrategy();
     authService.validateSessionUser.mockResolvedValue(null);

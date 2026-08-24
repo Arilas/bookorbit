@@ -13,7 +13,7 @@ import { searchSettingsNav, visibleSettingsNav, type SettingsNavItem, type Setti
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
-const { isSuperuser, userPermissions, isDemoRestrictedAccount } = usePermissions()
+const { isSuperuser, userPermissions, isDemoRestrictedAccount, authenticationMethod, provisioningMethod } = usePermissions()
 const { showBookRequests } = useBookRequestVisibility()
 const { isMac, modifierKey } = useModifierKey()
 
@@ -29,6 +29,8 @@ const groups = computed(() =>
     permissions: userPermissions.value,
     isDemoRestricted: isDemoRestrictedAccount.value,
     showBookRequests: showBookRequests.value,
+    authenticationMethod: authenticationMethod.value,
+    provisioningMethod: provisioningMethod.value,
   }),
 )
 

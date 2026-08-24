@@ -6,7 +6,7 @@ import {
   type RouteLocationNormalizedLoaded,
   type RouteRecordRaw,
 } from 'vue-router'
-import { Permission } from '@bookorbit/types'
+import { AuthenticationMethod, Permission, ProvisioningMethod } from '@bookorbit/types'
 import { normalizeEmailTab } from '@/features/email/lib/email-tabs'
 import { normalizeMetadataTab, type MetadataTab } from '@/features/settings/lib/metadata-tabs'
 import { normalizeReaderTab, type ReaderTab } from '@/features/settings/lib/reader-tabs'
@@ -51,6 +51,7 @@ function resolveStatisticsTitle(): string {
 
 const ACCOUNT_ROUTES: Record<AccountTab, string> = {
   profile: 'settings-account-profile',
+  'app-passwords': 'settings-account-app-passwords',
   privacy: 'settings-account-privacy',
   notifications: 'settings-notifications',
   restrictions: 'settings-account-restrictions',
@@ -167,6 +168,19 @@ export const routes: RouteRecordRaw[] = [
             component: () => import('@/features/settings/AccountSettings.vue'),
             props: { embedded: true },
             meta: { title: () => t('titles.account.profile') },
+          },
+          {
+            path: 'account/app-passwords',
+            name: 'settings-account-app-passwords',
+            component: () => import('@/features/settings/AppPasswordsSettings.vue'),
+            meta: {
+              forbiddenPermission: Permission.DemoRestricted,
+              forbiddenAuthenticationMethod: AuthenticationMethod.AppPassword,
+              forbiddenProvisioningMethod: ProvisioningMethod.Shared,
+              permissionFallback: 'settings-account-profile',
+              maxWidth: 'max-w-5xl',
+              title: () => t('titles.account.app-passwords'),
+            },
           },
           {
             path: 'account/privacy',

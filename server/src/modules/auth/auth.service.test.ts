@@ -73,6 +73,7 @@ function makeService(dbOverrides?: Record<string, unknown>) {
   const config = {
     get: vi.fn().mockImplementation((key: string) => {
       if (key === 'auth.jwtRefreshExpiresIn') return '7d';
+      if (key === 'auth.appPasswordRefreshExpiresIn') return '90d';
       if (key === 'auth.jwtExpiresIn') return '15m';
       if (key === 'app.nodeEnv') return 'test';
       if (key === 'auth.setupBootstrapToken') return 'bootstrap-token';
@@ -97,7 +98,14 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     sessionId: 1,
   };
   const sessions = { issue: vi.fn().mockResolvedValue(credentials), refresh: vi.fn().mockResolvedValue(credentials) };
-  const sessionRepo = { list: vi.fn(), findSession: vi.fn(), revoke: vi.fn(), isActive: vi.fn() };
+  const sessionRepo = {
+    list: vi.fn(),
+    findRefresh: vi.fn(),
+    findSession: vi.fn(),
+    findActive: vi.fn(),
+    revoke: vi.fn(),
+    isActive: vi.fn(),
+  };
 
   const magicLinkRepo = {
     hasActiveByUserId: vi.fn().mockResolvedValue(true),
@@ -107,6 +115,13 @@ function makeService(dbOverrides?: Record<string, unknown>) {
   const authenticationPolicy = {
     assertPasswordLoginEnabled: vi.fn(),
     isPasswordLoginEnabled: vi.fn().mockReturnValue(true),
+  };
+  const appPasswordService = {
+    verify: vi.fn().mockResolvedValue(null),
+    findUsableById: vi.fn().mockResolvedValue(null),
+    markUsed: vi.fn().mockResolvedValue(undefined),
+    revokeForRefreshReplay: vi.fn().mockResolvedValue(undefined),
+    revokeAllForUser: vi.fn().mockResolvedValue(undefined),
   };
 
   const service = new AuthService(
@@ -118,6 +133,7 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     appSettings as never,
     oidcProviderService as never,
     authenticationPolicy as never,
+    appPasswordService as never,
     sessions as never,
     sessionRepo as never,
     db,
@@ -133,6 +149,7 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     magicLinkRepo,
     oidcProviderService,
     authenticationPolicy,
+    appPasswordService,
     sessions,
     sessionRepo,
   };
@@ -469,6 +486,48 @@ describe('AuthService', () => {
       await expect(service.login({ username: 'jdoe', password: 'wrongpass' }, makeReply())).rejects.toThrow(UnauthorizedException);
     });
 
+    it('does not apply primary-password lockout counters to an invalid app password', async () => {
+      const { service, db, userService, appPasswordService } = makeService();
+      userService.findByUsername.mockResolvedValue({
+        id: 1,
+        username: 'jdoe',
+        active: true,
+        passwordHash: 'mock-hash:primary-password',
+        tokenVersion: 1,
+        failedLoginAttempts: 3,
+        lockedUntil: null,
+      });
+
+      await expect(service.login({ username: 'jdoe', password: 'boap_invalid' }, makeReply(), '127.0.0.1')).rejects.toThrow(UnauthorizedException);
+
+      expect(appPasswordService.verify).toHaveBeenCalledWith(1, 'boap_invalid', '127.0.0.1');
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('issues an app-password auth session without clearing primary-password lockout state', async () => {
+      const { service, db, userService, appPasswordService, authenticationPolicy, sessions } = makeService();
+      const dto = { username: 'jdoe', password: 'boap_selector_secret', clientKind: 'native' as const, deviceLabel: 'KOReader' };
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      userService.findByUsername.mockResolvedValue({
+        id: 1,
+        username: 'jdoe',
+        active: true,
+        passwordHash: 'mock-hash:primary-password',
+        tokenVersion: 4,
+        failedLoginAttempts: 2,
+        lockedUntil: new Date(Date.now() + 60_000),
+      });
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
+      appPasswordService.verify.mockResolvedValue({ id: 17, label: 'KOReader', expiresAt });
+
+      const result = await service.login(dto, makeReply(), '127.0.0.1');
+
+      expect(authenticationPolicy.assertPasswordLoginEnabled).not.toHaveBeenCalled();
+      expect(sessions.issue).toHaveBeenCalledWith(1, 4, 'app_password', dto, undefined, { id: 17, expiresAt });
+      expect(result.user.authenticationMethod).toBe('app_password');
+      expect((db as unknown as Record<string, vi.Mock>).set).not.toHaveBeenCalledWith({ failedLoginAttempts: 0, lockedUntil: null });
+    });
+
     it('rejects login attempts while account is locked', async () => {
       const { service, db, userService } = makeService();
       const lockedUntil = new Date(Date.now() + 60_000);
@@ -614,6 +673,32 @@ describe('AuthService', () => {
     });
   });
 
+  describe('refresh', () => {
+    it('preserves app-password binding and expiry when rotating a native refresh token', async () => {
+      const { service, userService, sessionRepo, appPasswordService, sessions } = makeService();
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      sessionRepo.findRefresh.mockResolvedValue({
+        sessionId: 31,
+        userId: 1,
+        authenticationMethod: 'app_password',
+      });
+      sessionRepo.findSession.mockResolvedValue({
+        id: 31,
+        userId: 1,
+        clientKind: 'native',
+        authenticationMethod: 'app_password',
+        appPasswordId: 17,
+      });
+      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt });
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
+
+      await service.refresh({ cookies: {}, ip: '127.0.0.1' } as never, makeReply(), { refreshToken: 'raw-refresh' });
+
+      expect(sessions.refresh).toHaveBeenCalledWith('raw-refresh', 1, 4, 31, 'app_password', expiresAt);
+      expect(appPasswordService.markUsed).toHaveBeenCalledWith(17, '127.0.0.1');
+    });
+  });
+
   describe('buildUserResponse', () => {
     it('returns wildcard permissions for superuser', () => {
       const { service } = makeService();
@@ -661,7 +746,7 @@ describe('AuthService', () => {
       expect(userService.findByIdWithPermissions).not.toHaveBeenCalled();
     });
 
-    it.each(['oidc', 'magic_link'] as const)('accepts an active %s session in SSO-only mode', async (authenticationMethod) => {
+    it.each(['oidc', 'magic_link', 'app_password'] as const)('accepts an active %s session in SSO-only mode', async (authenticationMethod) => {
       const { service, userService, authenticationPolicy } = makeService();
       authenticationPolicy.isPasswordLoginEnabled.mockReturnValue(false);
       const user = makeFullUser({ tokenVersion: 2 });
@@ -716,6 +801,33 @@ describe('AuthService', () => {
 
       const result = await service.validateUser(1, 2);
       expect(result).toEqual(user);
+    });
+  });
+
+  describe('validateSessionUser', () => {
+    it('derives the app-password attribution only from the active auth session', async () => {
+      const { service, userService, sessionRepo, appPasswordService } = makeService();
+      const user = makeFullUser({ tokenVersion: 2 });
+      userService.findByIdWithPermissions.mockResolvedValue(user);
+      sessionRepo.findActive.mockResolvedValue({ id: 31, userId: 1, appPasswordId: 17 });
+      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt: new Date(Date.now() + 60_000) });
+
+      await expect(service.validateSessionUser(1, 2, 'app_password', 31)).resolves.toEqual({
+        ...user,
+        authenticationMethod: 'app_password',
+        sessionId: 31,
+        appPasswordId: 17,
+      });
+      expect(sessionRepo.findActive).toHaveBeenCalledWith(31, 1, 2, 'app_password');
+      expect(appPasswordService.findUsableById).toHaveBeenCalledWith(1, 17);
+    });
+
+    it('rejects an app-password claim when the active session has no usable credential', async () => {
+      const { service, sessionRepo, appPasswordService } = makeService();
+      sessionRepo.findActive.mockResolvedValue({ id: 31, userId: 1, appPasswordId: 17 });
+      appPasswordService.findUsableById.mockResolvedValue(null);
+
+      await expect(service.validateSessionUser(1, 2, 'app_password', 31)).rejects.toThrow(UnauthorizedException);
     });
   });
 

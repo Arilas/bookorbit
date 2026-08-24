@@ -110,7 +110,7 @@ describe('emitCoverRefreshed', () => {
 describe('handleConnection', () => {
   it('stores validated user on the socket when token is valid', async () => {
     const { gateway, jwtService, authService } = makeGateway();
-    jwtService.verify.mockReturnValue({ sub: 42, ver: 3 });
+    jwtService.verify.mockReturnValue({ sub: 42, ver: 3, amr: 'app_password', sid: 29 });
     authService.validateSessionUser.mockResolvedValue({ id: 42, username: 'reader' });
     const disconnect = vi.fn();
     const join = vi.fn().mockResolvedValue(undefined);
@@ -126,7 +126,7 @@ describe('handleConnection', () => {
     await gateway.handleConnection(client);
 
     expect(jwtService.verify).toHaveBeenCalledWith('valid', { algorithms: ['HS256'] });
-    expect(authService.validateSessionUser).toHaveBeenCalledWith(42, 3, 'legacy', undefined);
+    expect(authService.validateSessionUser).toHaveBeenCalledWith(42, 3, 'app_password', 29);
     expect(client.data.user).toEqual({ id: 42, username: 'reader' });
     expect(join).toHaveBeenCalledWith('user:42');
     expect(disconnect).not.toHaveBeenCalled();

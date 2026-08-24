@@ -44,13 +44,15 @@ import {
   Wrench,
   Zap,
 } from '@lucide/vue'
-import { Permission } from '@bookorbit/types'
+import { AuthenticationMethod, Permission, ProvisioningMethod } from '@bookorbit/types'
 
 export interface SettingsNavContext {
   isSuperuser: boolean
   permissions: readonly string[]
   isDemoRestricted: boolean
   showBookRequests?: boolean
+  authenticationMethod?: AuthenticationMethod
+  provisioningMethod?: ProvisioningMethod
 }
 
 /** Live signals the rail renders beside a row. Resolved by the nav, not stored in this file. */
@@ -99,6 +101,18 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
         descriptionKey: 'settings.nav.descriptions.profile',
         icon: User,
         keywords: 'password email avatar username sessions sign out security',
+      },
+      {
+        id: 'app-passwords',
+        routeName: 'settings-account-app-passwords',
+        labelKey: 'settings.account.tabs.app-passwords',
+        descriptionKey: 'settings.nav.descriptions.appPasswords',
+        icon: KeyRound,
+        keywords: 'application password app device client long session token koreader',
+        isVisible: (context) =>
+          !context.isDemoRestricted &&
+          context.authenticationMethod !== AuthenticationMethod.AppPassword &&
+          context.provisioningMethod !== ProvisioningMethod.Shared,
       },
       {
         id: 'appearance',

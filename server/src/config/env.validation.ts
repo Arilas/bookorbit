@@ -63,6 +63,7 @@ const envSchema = z.object({
     ),
   JWT_EXPIRES_IN: z.string().default('15m'),
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
+  APP_PASSWORD_REFRESH_EXPIRES_IN: z.string().default('90d'),
   SETUP_BOOTSTRAP_TOKEN: z.string().optional(),
   DISABLE_LOCAL_AUTH: booleanEnvFlag('DISABLE_LOCAL_AUTH'),
   APP_DATA_PATH: z.string().default('/data'),
