@@ -37,6 +37,7 @@ import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import type { RequestUser } from '../../common/types/request-user';
 import type { BookRequestRow } from '../../db/schema';
 import { LibraryService } from '../library/library.service';
+import { BookRequestAttributionService } from './book-request-attribution.service';
 import { BookRequestDedupeService, dedupeKeyCandidates, primaryDedupeKey } from './book-request-dedupe.service';
 import { BookRequestGateway } from './book-request.gateway';
 import { BookRequestNotifier } from './book-request-notifier.service';
@@ -150,6 +151,7 @@ export class BookRequestService {
     private readonly automationSettings: RequestAutomationSettingsService,
     private readonly removal: DownloadRemovalService,
     private readonly gateway: BookRequestGateway,
+    private readonly attribution: BookRequestAttributionService,
   ) {}
 
   canManageAll(user: RequestUser): boolean {
@@ -201,7 +203,12 @@ export class BookRequestService {
     throw new ForbiddenException('You cannot fulfil this book request');
   }
 
-  async submit(dto: CreateBookRequestDto, user: RequestUser): Promise<SubmitResult> {
+  async submit(dto: CreateBookRequestDto, actor: RequestUser): Promise<SubmitResult> {
+    // Who this request is *for*, which is the caller unless an integration named somebody else.
+    // Everything below asks about the subject and never about the actor: their permissions, their
+    // libraries, their cap, their notifications. The actor stays the actor in the audit log.
+    const subject = await this.attribution.resolveSubject(actor, dto.userId);
+
     const metadataSources = normalizeMetadataSources(dto.metadataSources);
     const work = {
       title: dto.title.trim(),
@@ -218,7 +225,7 @@ export class BookRequestService {
     // Explicit rather than inferred from the permission. Inferring it would silently turn
     // `BookRequestSelfFulfill` into auto-approval for every ordinary request its holder makes.
     const selfServe = dto.selfServe === true;
-    if (selfServe && !this.canSelfFulfil(user)) {
+    if (selfServe && !this.canSelfFulfil(subject)) {
       throw submitForbidden('SUBMIT_SELF_FULFIL_FORBIDDEN', 'You cannot fulfil your own book requests');
     }
 
@@ -226,9 +233,9 @@ export class BookRequestService {
     // same torrent is exactly what the dedupe claim exists to prevent, so even a self-server is
     // folded - but folded as the person who is going to fulfil it, not as a bystander.
     const existing = await this.dedupe.findActiveRequestFor(work);
-    if (existing) return selfServe ? this.takeOnOrAttach(existing, user) : this.attachTo(existing.id, user);
+    if (existing) return selfServe ? this.takeOnOrAttach(existing, subject) : this.attachTo(existing.id, subject);
 
-    let targetLibraryId = await this.resolveRequestedLibrary(dto.targetLibraryId ?? null, user);
+    let targetLibraryId = await this.resolveRequestedLibrary(dto.targetLibraryId ?? null, subject);
     let targetFolderId = await this.resolveDestinationFolder(dto.targetFolderId ?? null, targetLibraryId);
 
     // The instance default for this medium, which is the last rung: the requester named nowhere,
@@ -244,7 +251,7 @@ export class BookRequestService {
       // filing the book, with nobody reviewing where it lands, so an unreachable default would let
       // them write into a library they cannot even read. They are asked to name one instead.
       if (selfServe && fallback.libraryId !== null) {
-        const reachable = await this.libraryService.findAccessibleLibraryIds(user);
+        const reachable = await this.libraryService.findAccessibleLibraryIds(subject);
         if (!reachable.includes(fallback.libraryId)) {
           throw submitRefusal(
             'SUBMIT_DEFAULT_LIBRARY_UNREACHABLE',
@@ -257,7 +264,7 @@ export class BookRequestService {
       targetFolderId = fallback.folderId;
     }
 
-    const autoApproved = this.canAutoApprove(user);
+    const autoApproved = this.canAutoApprove(subject);
     // A self-serve request is approved by construction: its requester is the person about to fulfil
     // it, so there is no decision left to make and nothing for an approver to see.
     const settledOnCreate = autoApproved || selfServe;
@@ -273,7 +280,8 @@ export class BookRequestService {
       row = await this.createRequest(
         selfServe,
         {
-          userId: user.id,
+          userId: subject.id,
+          createdByUserId: this.attribution.createdByUserIdFor(actor, subject),
           mediaKind: dto.mediaKind,
           status: settledOnCreate ? 'approved' : 'pending',
           selfServe,
@@ -298,7 +306,7 @@ export class BookRequestService {
           targetLibraryId,
           targetFolderId,
           dedupeKey: primaryDedupeKey(work),
-          decidedByUserId: settledOnCreate ? user.id : null,
+          decidedByUserId: settledOnCreate ? subject.id : null,
           decidedAt: settledOnCreate ? new Date() : null,
         },
         // Every other key this work could have hashed to, so a later requester who reaches it a
@@ -311,11 +319,11 @@ export class BookRequestService {
       if (!isUniqueViolation(error)) throw error;
       const winner = await this.dedupe.findActiveRequestFor(work);
       if (!winner) throw error;
-      return selfServe ? this.takeOnOrAttach(winner, user) : this.attachTo(winner.id, user);
+      return selfServe ? this.takeOnOrAttach(winner, subject) : this.attachTo(winner.id, subject);
     }
 
     this.logger.log(
-      `[book_request.create] [end] requestId=${row.id} userId=${user.id} mediaKind=${row.mediaKind} autoApproved=${autoApproved} selfServe=${selfServe} title="${sanitizeLogValue(row.title)}" - book request created`,
+      `[book_request.create] [end] requestId=${row.id} userId=${row.userId} createdByUserId=${row.createdByUserId ?? '-'} mediaKind=${row.mediaKind} autoApproved=${autoApproved} selfServe=${selfServe} title="${sanitizeLogValue(row.title)}" - book request created`,
     );
 
     // An auto-approving user never waits for a decision, so there is nobody to open the picker:
@@ -330,7 +338,7 @@ export class BookRequestService {
     if (!settledOnCreate) {
       await this.notifier.notifyApprovers(NotificationType.BookRequestSubmitted, {
         title: 'New book request',
-        message: `${user.name} requested "${row.title}"`,
+        message: `${subject.name} requested "${row.title}"`,
         actionUrl: '/requests?tab=all',
         meta: { requestId: row.id },
       });
@@ -338,7 +346,7 @@ export class BookRequestService {
 
     const joined = await this.repo.findById(row.id);
     if (!joined) throw new NotFoundException('Book request not found');
-    return { request: await this.toItem(joined, user.id), subscribed: false };
+    return { request: await this.toItem(joined, subject.id), subscribed: false };
   }
 
   /**

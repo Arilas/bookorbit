@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, HttpException, NotFoundException } from '@nestjs/common';
 import { FULFILLABLE_BOOK_REQUEST_STATUSES, NotificationType, Permission, withRequiredPermissions } from '@bookorbit/types';
 
+import { BookRequestAttributionService } from './book-request-attribution.service';
 import { BookRequestNotifier } from './book-request-notifier.service';
 import { BookRequestService } from './book-request.service';
 import type { RequestUser } from '../../common/types/request-user';
@@ -87,6 +88,8 @@ function makeService(
     removal?: Record<string, unknown>;
     automationSettings?: Record<string, unknown>;
     libraryService?: Record<string, unknown>;
+    /** The user a delegated submission names, as `AuthService` would resolve them. */
+    actingUser?: RequestUser | null;
   } = {},
 ) {
   const repo = {
@@ -153,6 +156,10 @@ function makeService(
       gateway.changeVersion++;
     }),
   };
+  // The real one: delegation is a security rule, so a stub here would assert nothing.
+  const auth = { findActingUser: vi.fn().mockResolvedValue(overrides.actingUser ?? null) };
+  const attribution = new BookRequestAttributionService(auth as never);
+
   const service = new BookRequestService(
     repo as never,
     dedupe as never,
@@ -163,9 +170,10 @@ function makeService(
     automationSettings as never,
     removal as never,
     gateway as never,
+    attribution,
   );
 
-  return { service, repo, dedupe, libraryService, notifications, downloads, automation, automationSettings, removal, gateway };
+  return { service, repo, dedupe, libraryService, notifications, downloads, automation, automationSettings, removal, gateway, auth };
 }
 
 const dto = { title: 'Dune', mediaKind: 'ebook' as const, authors: ['Frank Herbert'] };
@@ -579,6 +587,154 @@ describe('BookRequestService.submit', () => {
   });
 });
 
+/**
+ * Filing a request for somebody else, which is what a front end that its own users sign into needs
+ * in order to say who actually asked.
+ *
+ * Every test here is the same question asked once per decision the submission makes: does this
+ * branch ask about the requester, or about whoever holds the token? The answer must always be the
+ * requester, or naming somebody quietly hands them the integration's privileges.
+ */
+describe('BookRequestService.submit on behalf of another user', () => {
+  const bob = () => user({ id: 42, username: 'bob', name: 'Bob' });
+
+  it('records the named user as the requester and the caller as who filed it', async () => {
+    const { service, repo } = makeService({ actingUser: bob() });
+
+    await service.submit({ ...dto, userId: 42 }, moderator());
+
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 42, createdByUserId: 1 }), expect.anything());
+  });
+
+  it('leaves an ordinary request recorded as nobody else having filed it', async () => {
+    const { service, repo, auth } = makeService();
+
+    await service.submit(dto, user());
+
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 1, createdByUserId: null }), expect.anything());
+    expect(auth.findActingUser).not.toHaveBeenCalled();
+  });
+
+  it('treats a caller naming their own id as an ordinary request, with no permission needed', async () => {
+    const { service, repo, auth } = makeService();
+
+    await service.submit({ ...dto, userId: 1 }, user());
+
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 1, createdByUserId: null }), expect.anything());
+    expect(auth.findActingUser).not.toHaveBeenCalled();
+  });
+
+  it('refuses a caller who cannot manage requests, before looking the requester up', async () => {
+    const { service, repo, auth } = makeService({ actingUser: bob() });
+
+    await expect(service.submit({ ...dto, userId: 42 }, user())).rejects.toThrow(ForbiddenException);
+    expect(repo.create).not.toHaveBeenCalled();
+    expect(auth.findActingUser).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The regression that matters most. A fall back to the caller here would read as defensive and
+   * would silently reinstate the mis-attribution the whole feature exists to end.
+   */
+  it('refuses a requester who cannot be resolved rather than filing under the caller', async () => {
+    const { service, repo } = makeService({ actingUser: null });
+
+    await expect(service.submit({ ...dto, userId: 999 }, moderator())).rejects.toThrow(NotFoundException);
+    expect(repo.create).not.toHaveBeenCalled();
+  });
+
+  it('holds the request for a decision when the requester cannot auto-approve, though the caller can', async () => {
+    const { service, repo, automation } = makeService({ actingUser: bob() });
+    const caller = moderator({ permissions: withRequiredPermissions([Permission.ManageBookRequests, Permission.BookRequestAutoApprove]) });
+
+    await service.submit({ ...dto, userId: 42 }, caller);
+
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ status: 'pending', decidedByUserId: null }), expect.anything());
+    expect(automation.considerRequest).not.toHaveBeenCalled();
+  });
+
+  it('auto-approves when the requester can, though the caller cannot', async () => {
+    const autoApprover = user({ id: 42, name: 'Bob', permissions: [Permission.BookRequestAccess, Permission.BookRequestAutoApprove] });
+    const { service, repo, automation } = makeService({ actingUser: autoApprover });
+
+    await service.submit({ ...dto, userId: 42, targetLibraryId: 5 }, moderator());
+
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ status: 'approved', decidedByUserId: 42 }), expect.anything());
+    expect(automation.considerRequest).toHaveBeenCalled();
+  });
+
+  it('refuses self-fulfilment the requester does not hold, though the caller holds it', async () => {
+    const { service, repo } = makeService({ actingUser: bob() });
+    const caller = moderator({ permissions: withRequiredPermissions([Permission.ManageBookRequests, Permission.BookRequestSelfFulfill]) });
+
+    await expect(service.submit({ ...dto, userId: 42, selfServe: true, targetLibraryId: 5 }, caller)).rejects.toThrow(ForbiddenException);
+    expect(repo.create).not.toHaveBeenCalled();
+    expect(repo.createWithinSelfServeCap).not.toHaveBeenCalled();
+  });
+
+  it('resolves the destination against the requester libraries, not the caller libraries', async () => {
+    const { service, libraryService } = makeService({ actingUser: bob() });
+
+    await service.submit({ ...dto, userId: 42, targetLibraryId: 5 }, moderator());
+
+    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(42, 5, false);
+  });
+
+  /**
+   * The cap is enforced inside the insert, keyed on the row it is inserting. Filing under the
+   * caller instead would hand every proxied user a fresh allowance of downloads in flight.
+   */
+  it('counts the downloads-in-flight cap against the requester', async () => {
+    const selfFulfiller = user({ id: 42, name: 'Bob', permissions: [Permission.BookRequestAccess, Permission.BookRequestSelfFulfill] });
+    const { service, repo } = makeService({ actingUser: selfFulfiller });
+
+    await service.submit({ ...dto, userId: 42, selfServe: true, targetLibraryId: 5 }, moderator());
+
+    expect(repo.createWithinSelfServeCap).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 42, selfServe: true }),
+      expect.anything(),
+      expect.any(Number),
+    );
+  });
+
+  /**
+   * The branch a happy-path test never reaches: a proxied request for a book somebody already
+   * asked for folds into the existing row, and the person subscribed to it has to be the requester
+   * or they never hear that their book arrived.
+   */
+  it('subscribes the requester when the work was already requested', async () => {
+    const { service, repo } = makeService({
+      actingUser: bob(),
+      dedupe: { findActiveRequestFor: vi.fn().mockResolvedValue(row({ id: 7, userId: 2 })) },
+    });
+    repo.findById.mockResolvedValue(joined({ id: 7, userId: 2 }));
+
+    const result = await service.submit({ ...dto, userId: 42 }, moderator());
+
+    expect(result.subscribed).toBe(true);
+    expect(repo.addSubscriber).toHaveBeenCalledWith(7, 42);
+  });
+
+  it('names the requester to the approvers, not the account that called', async () => {
+    const { service, notifications } = makeService({ actingUser: bob() });
+
+    await service.submit({ ...dto, userId: 42 }, moderator({ name: 'Bookbot' }));
+
+    expect(notifications.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ type: NotificationType.BookRequestSubmitted, message: expect.stringContaining('Bob') }),
+    );
+    expect(notifications.notify).not.toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('Bookbot') }));
+  });
+
+  it('lets a superuser file for somebody else', async () => {
+    const { service, repo } = makeService({ actingUser: bob() });
+
+    await service.submit({ ...dto, userId: 42 }, user({ id: 3, isSuperuser: true }));
+
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 42, createdByUserId: 3 }), expect.anything());
+  });
+});
+
 describe('BookRequestService.submit language', () => {
   it.each([
     ['spa', 'es'],
@@ -974,6 +1130,18 @@ describe('BookRequestService.submit refusal codes', () => {
     const { service } = makeService();
     const body = await refusal(service.submit({ ...dto, selfServe: true }, user()));
     expect(body.errorCode).toBe('SUBMIT_SELF_FULFIL_FORBIDDEN');
+  });
+
+  it('codes a requester named by a caller who may not name one', async () => {
+    const { service } = makeService({ actingUser: user({ id: 42 }) });
+    const body = await refusal(service.submit({ ...dto, userId: 42 }, user()));
+    expect(body.errorCode).toBe('SUBMIT_ON_BEHALF_FORBIDDEN');
+  });
+
+  it('codes a requester that cannot be resolved', async () => {
+    const { service } = makeService({ actingUser: null });
+    const body = await refusal(service.submit({ ...dto, userId: 999 }, moderator()));
+    expect(body.errorCode).toBe('SUBMIT_ON_BEHALF_UNKNOWN_USER');
   });
 
   it('codes a destination library the caller cannot reach', async () => {

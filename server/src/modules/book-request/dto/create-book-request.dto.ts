@@ -28,6 +28,19 @@ export class BookRequestMetadataSourceDto {
 }
 
 export class CreateBookRequestDto {
+  /**
+   * File this as somebody else, for a front end that its users sign into instead of this one.
+   *
+   * Refused without `manage_book_requests`, and the named user's own permissions decide the rest:
+   * naming them says who asked, never what they may have. Omitted, or set to the caller's own id,
+   * this is an ordinary request and nothing about it changes.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  userId?: number;
+
   @IsString()
   @MaxLength(500)
   title!: string;

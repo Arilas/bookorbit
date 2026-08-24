@@ -6222,7 +6222,9 @@
       "SUBMIT_FOLDER_NOT_IN_LIBRARY": "That folder is not part of the destination library",
       "SUBMIT_DEFAULT_LIBRARY_UNREACHABLE": "Pick a destination library you can reach: this instance's default is not one of yours",
       "SUBMIT_DESTINATION_REQUIRED": "Your requests are approved as soon as you make them, so pick the library the book should land in",
-      "SUBMIT_SELF_SERVE_LIMIT": "Finish or cancel some downloads first: you can have {limit} in flight at once"
+      "SUBMIT_SELF_SERVE_LIMIT": "Finish or cancel some downloads first: you can have {limit} in flight at once",
+      "SUBMIT_ON_BEHALF_FORBIDDEN": "You are not allowed to request books for other people",
+      "SUBMIT_ON_BEHALF_UNKNOWN_USER": "That user cannot have a book request made for them"
     },
     "bulk": {
       "selected": "{count, plural, one {# request selected} other {# requests selected}}",

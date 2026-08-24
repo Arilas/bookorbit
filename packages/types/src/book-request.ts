@@ -218,6 +218,10 @@ export const BOOK_REQUEST_SUBMIT_ERROR_CODES = [
   "SUBMIT_DESTINATION_REQUIRED",
   /** The cap on self-serve downloads in flight is full. Carries `limit`. */
   "SUBMIT_SELF_SERVE_LIMIT",
+  /** Somebody else was named as the requester by a caller who may not file on their behalf. */
+  "SUBMIT_ON_BEHALF_FORBIDDEN",
+  /** The named requester does not exist, or is not an account that could file this itself. */
+  "SUBMIT_ON_BEHALF_UNKNOWN_USER",
 ] as const;
 
 export type BookRequestSubmitErrorCode = (typeof BOOK_REQUEST_SUBMIT_ERROR_CODES)[number];

@@ -61,6 +61,21 @@ export const bookRequests = pgTable(
     targetLibraryId: integer('target_library_id').references(() => libraries.id, { onDelete: 'set null' }),
     targetFolderId: integer('target_folder_id').references(() => libraryFolders.id, { onDelete: 'set null' }),
 
+    /**
+     * The account that filed this on the requester's behalf, when one did.
+     *
+     * Null on every request somebody made themselves, which is nearly all of them. Set only when an
+     * integration holding `manage_book_requests` named a different requester, so the row itself can
+     * answer why somebody has a request they do not remember making.
+     *
+     * Not left to the audit log, which records the same fact against a retention window: a request
+     * outlives its audit row, and the answer has to still be there when it is asked.
+     *
+     * Set null on delete rather than cascade: retiring the integration account must not delete the
+     * requests it filed for other people.
+     */
+    createdByUserId: integer('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+
     decidedByUserId: integer('decided_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
     decisionNote: text('decision_note'),
