@@ -2943,7 +2943,9 @@
             "enabled": "Enabled",
             "allowPrivateAddress": "Allow private addresses",
             "credentialBrief": "Stored encrypted.",
-            "allowPrivateAddressBrief": "Off by default. Only needed for a proxy such as Jackett on your local network."
+            "allowPrivateAddressBrief": "Off by default. Only needed for a proxy such as Jackett on your local network.",
+            "searchByIsbn": "Search by ISBN",
+            "searchByIsbnBrief": "On by default. Turn it off if this source returns the wrong book for an exact ISBN, and it will be searched by title and author instead."
           },
           "color": {
             "label": "Color",

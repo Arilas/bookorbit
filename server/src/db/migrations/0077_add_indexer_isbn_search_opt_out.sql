@@ -1,0 +1,1 @@
+ALTER TABLE "request_indexers" ADD COLUMN "isbn_search_disabled" boolean DEFAULT false NOT NULL;

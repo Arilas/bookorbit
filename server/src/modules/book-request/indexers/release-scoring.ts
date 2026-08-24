@@ -182,26 +182,23 @@ export function toReleaseItem(scored: ScoredRelease, indexerName: string, reques
 }
 
 /**
- * An ISBN in the release name is decisive, because nothing else puts one there by accident. It is
- * also rare, so the fallback carries the weight: title similarity, plus author when both sides
- * name one.
+ * A matching ISBN is decisive, but only for a release that also looks like the requested work at
+ * all. It is decisive because nothing puts an ISBN in a release name by accident; the qualifier is
+ * there because a catalogue puts one in an identifier column on purpose, and a catalogue can be
+ * wrong. Library Genesis prints every ISBN it holds against a row, so one recorded against the
+ * wrong book used to score a full match and lead the picker ahead of the right one, with no other
+ * signal able to outweigh it.
+ *
+ * Title and author agreement is the qualifier because `scoreTitleMatch` already answers exactly
+ * the question being asked: it returns zero for two unrelated titles rather than a small number,
+ * so this only rejects a release that describes some other book. Anything that agrees even loosely
+ * still takes the full points.
  *
  * `scoreTitleMatch` is deliberately generous about a candidate that extends the query, which is
  * right here (a release name carries the author, the year and the format) and is why a sequel can
  * still rank well. Import verification, which compares symmetrically, is the gate that catches it.
  */
 function matchReason(candidate: ReleaseCandidate, request: ScoringRequest): ReleaseScoreReason {
-  const requestedIsbns = [...request.isbns, normalizeMetadataIsbn(request.isbn13), normalizeMetadataIsbn(request.isbn10)].filter(Boolean);
-  if (requestedIsbns.length > 0) {
-    // The stated field first, then the release name. Both go through `extractIsbns`, which is what
-    // makes the stated one safe to read: MyAnonaMouse puts `ASIN:B08G9PRS1K` in the same field, and
-    // an ASIN carries no ten- or thirteen-digit run for the pattern to find.
-    const releaseIsbns = [...extractIsbns(candidate.isbn ?? ''), ...extractIsbns(candidate.title)];
-    if (releaseIsbns.some((isbn) => requestedIsbns.includes(isbn))) {
-      return { code: 'isbnMatch', points: WEIGHTS.match };
-    }
-  }
-
   // The bare work title where the indexer published one, since the release name carries the
   // author, the year and the format flags and only dilutes the comparison.
   const titleText = candidate.bookTitle ?? candidate.title;
@@ -210,6 +207,17 @@ function matchReason(candidate: ReleaseCandidate, request: ScoringRequest): Rele
   const authors = request.authors.filter(Boolean);
   const authorScore =
     authors.length > 0 ? Math.max(...authors.map((author) => scoreTitleMatch(author, authorText) / TITLE_MATCH_SCORES.exact)) : null;
+
+  const requestedIsbns = [...request.isbns, normalizeMetadataIsbn(request.isbn13), normalizeMetadataIsbn(request.isbn10)].filter(Boolean);
+  if (requestedIsbns.length > 0 && (titleScore > 0 || (authorScore ?? 0) > 0)) {
+    // The stated field first, then the release name. Both go through `extractIsbns`, which is what
+    // makes the stated one safe to read: MyAnonaMouse puts `ASIN:B08G9PRS1K` in the same field, and
+    // an ASIN carries no ten- or thirteen-digit run for the pattern to find.
+    const releaseIsbns = [...extractIsbns(candidate.isbn ?? ''), ...extractIsbns(candidate.title)];
+    if (releaseIsbns.some((isbn) => requestedIsbns.includes(isbn))) {
+      return { code: 'isbnMatch', points: WEIGHTS.match };
+    }
+  }
 
   const combined = authorScore === null ? titleScore : titleScore * TITLE_WEIGHT + authorScore * AUTHOR_WEIGHT;
   return {

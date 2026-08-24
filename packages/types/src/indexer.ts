@@ -132,6 +132,11 @@ export interface IndexerAdapterDescriptor {
   mediaKinds: BookRequestMediaKind[];
   usesCategories: boolean;
   seedsBack: boolean;
+  /**
+   * Whether this adapter can search an ISBN at all. The operator decides per source whether it
+   * should, because a catalogue that answers an ISBN badly is worse than one that cannot.
+   */
+  supportsIsbnSearch: boolean;
   defaultCategories: IndexerCategoryMap;
   defaultBaseUrl?: string;
   /** Only a plugin sends one; a built-in has a translated message keyed on its type. */
@@ -219,6 +224,16 @@ export interface IndexerItem {
    * which most trackers answer with their whole catalogue.
    */
   disabledMediaKinds: BookRequestMediaKind[];
+  /**
+   * Whether to stop handing this source an ISBN when the request states one, leaving it the title
+   * and author every other source gets.
+   *
+   * An opt-out for the same reason media kinds are: searching the identifier is the better default
+   * where a catalogue indexes it well. It is worth turning off where one does not, because an ISBN
+   * a catalogue holds against the wrong row returns a confidently wrong book, and no adapter can
+   * tell that from a right one. Ignored by a source whose adapter never searches an ISBN.
+   */
+  isbnSearchDisabled: boolean;
   /** Adapter-specific knobs. Always an object, so the form never guards on null before reading. */
   settings: IndexerSettings;
   /** How the server reaches this source, where the default path does not work. */
@@ -253,6 +268,7 @@ export interface CreateIndexerPayload {
   allowPrivateAddress?: boolean;
   categories?: Partial<IndexerCategoryMap>;
   disabledMediaKinds?: BookRequestMediaKind[];
+  isbnSearchDisabled?: boolean;
   settings?: IndexerSettings;
   networkProfile?: NetworkProfile | null;
 }

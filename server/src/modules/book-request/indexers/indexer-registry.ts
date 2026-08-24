@@ -108,6 +108,7 @@ function describeBuiltIn(adapter: IndexerAdapter): IndexerAdapterDescriptor {
     mediaKinds: [...INDEXER_MEDIA_KINDS[type]],
     usesCategories: INDEXER_USES_CATEGORIES[type],
     seedsBack: INDEXER_SEEDS_BACK[type],
+    supportsIsbnSearch: adapter.supportsIsbnSearch,
     defaultCategories: DEFAULT_INDEXER_CATEGORIES[type],
     ...(INDEXER_DEFAULT_BASE_URLS[type] ? { defaultBaseUrl: INDEXER_DEFAULT_BASE_URLS[type] } : {}),
     // Read off the adapter rather than hardcoded empty, so a built-in that declares settings fields
@@ -134,6 +135,8 @@ function describePlugin(adapter: PluginIndexerAdapter): IndexerAdapterDescriptor
     mediaKinds: [...plugin.mediaKinds],
     usesCategories: plugin.usesCategories,
     seedsBack: plugin.seedsBack,
+    // The adapter's, not the plugin's: a plugin may leave the field off entirely.
+    supportsIsbnSearch: adapter.supportsIsbnSearch,
     defaultCategories: plugin.defaultCategories ?? { ebook: [], audiobook: [], comic: [] },
     ...(plugin.defaultBaseUrl ? { defaultBaseUrl: plugin.defaultBaseUrl } : {}),
     ...(plugin.baseUrlHint ? { baseUrlHint: plugin.baseUrlHint } : {}),

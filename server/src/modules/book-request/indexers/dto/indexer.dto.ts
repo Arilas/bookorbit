@@ -118,6 +118,11 @@ export class CreateIndexerDto {
   @IsIn(BOOK_REQUEST_MEDIA_KINDS, { each: true })
   disabledMediaKinds?: BookRequestMediaKind[];
 
+  /** Accepted for any adapter, and simply unused by one that never searches an ISBN. */
+  @IsOptional()
+  @IsBoolean()
+  isbnSearchDisabled?: boolean;
+
   /**
    * Deliberately opaque here. An adapter loaded at runtime declares its own fields, so no class
    * could enumerate them; `IndexerConfigService` validates the object against the adapter's own
@@ -192,6 +197,11 @@ export class UpdateIndexerDto {
   @ArrayMaxSize(BOOK_REQUEST_MEDIA_KINDS.length)
   @IsIn(BOOK_REQUEST_MEDIA_KINDS, { each: true })
   disabledMediaKinds?: BookRequestMediaKind[];
+
+  /** Accepted for any adapter, and simply unused by one that never searches an ISBN. */
+  @IsOptional()
+  @IsBoolean()
+  isbnSearchDisabled?: boolean;
 
   /**
    * Deliberately opaque here. An adapter loaded at runtime declares its own fields, so no class

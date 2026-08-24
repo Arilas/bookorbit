@@ -65,6 +65,7 @@ export class IndexerConfigService {
         allowPrivateAddress: dto.allowPrivateAddress ?? false,
         categories: mergeCategories(dto.adapterType, dto.categories),
         disabledMediaKinds: normalizeDisabledMediaKinds(dto.disabledMediaKinds),
+        isbnSearchDisabled: dto.isbnSearchDisabled ?? false,
         settings: this.cleanSettings(dto.adapterType, dto.settings),
         networkProfile: dto.networkProfile ?? null,
       });
@@ -97,6 +98,7 @@ export class IndexerConfigService {
     if (dto.allowPrivateAddress !== undefined) patch.allowPrivateAddress = dto.allowPrivateAddress;
     if (dto.categories !== undefined) patch.categories = mergeCategories(adapterType, dto.categories);
     if (dto.disabledMediaKinds !== undefined) patch.disabledMediaKinds = normalizeDisabledMediaKinds(dto.disabledMediaKinds);
+    if (dto.isbnSearchDisabled !== undefined) patch.isbnSearchDisabled = dto.isbnSearchDisabled;
     if (dto.settings !== undefined) patch.settings = this.cleanSettings(adapterType, dto.settings);
     if (dto.networkProfile !== undefined) patch.networkProfile = dto.networkProfile;
     // An omitted credential keeps the stored one, so the settings form never round-trips a secret.
@@ -172,6 +174,7 @@ export class IndexerConfigService {
       allowPrivateAddress: row.allowPrivateAddress,
       categories: resolveCategories(row),
       disabledMediaKinds: normalizeDisabledMediaKinds(row.disabledMediaKinds),
+      isbnSearchDisabled: row.isbnSearchDisabled,
       settings: row.settings ?? null,
       networkProfile: row.networkProfile ?? null,
     };
@@ -325,6 +328,7 @@ function toItem(row: RequestIndexerRow): IndexerItem {
     allowPrivateAddress: row.allowPrivateAddress,
     categories: resolveCategories(row),
     disabledMediaKinds: normalizeDisabledMediaKinds(row.disabledMediaKinds),
+    isbnSearchDisabled: row.isbnSearchDisabled,
     settings: row.settings ?? {},
     networkProfile: row.networkProfile ?? null,
     lastTestedAt: row.lastTestedAt?.toISOString() ?? null,

@@ -36,6 +36,8 @@ export interface IndexerDraft {
    * operator reasons about. Inverted into the stored opt-out on the way to the payload.
    */
   searchedMediaKinds: BookRequestMediaKind[]
+  /** Positive here too, for the same reason: the form asks whether the source is given the ISBN. */
+  searchByIsbn: boolean
   /** Keyed by the adapter's own declared field names, so a plugin's fields round-trip unchanged. */
   settings: Record<string, unknown>
   resolvers: string[]
@@ -152,6 +154,7 @@ export function useIndexerDraft(options: IndexerDraftOptions) {
       allowPrivateAddress: false,
       categories: toCategoryDraft(adapter?.defaultCategories ?? { ebook: [], audiobook: [], comic: [] }),
       searchedMediaKinds: [...BOOK_REQUEST_MEDIA_KINDS],
+      searchByIsbn: true,
       settings: defaultSettings(adapter),
       resolvers: [],
       proxyUrl: '',
@@ -194,6 +197,7 @@ export function useIndexerDraft(options: IndexerDraftOptions) {
       allowPrivateAddress: indexer.allowPrivateAddress,
       categories: toCategoryDraft(indexer.categories),
       searchedMediaKinds: BOOK_REQUEST_MEDIA_KINDS.filter((mediaKind) => !indexer.disabledMediaKinds.includes(mediaKind)),
+      searchByIsbn: !indexer.isbnSearchDisabled,
       settings: normalizeDeclaredSettings(adapter, { ...defaultSettings(adapter), ...indexer.settings }),
       resolvers: [...(indexer.networkProfile?.resolvers ?? [])],
       proxyUrl: indexer.networkProfile?.proxyUrl ?? '',
@@ -351,6 +355,7 @@ export function useIndexerDraft(options: IndexerDraftOptions) {
         comic: parseCategories(current.categories.comic),
       },
       disabledMediaKinds: BOOK_REQUEST_MEDIA_KINDS.filter((mediaKind) => !current.searchedMediaKinds.includes(mediaKind)),
+      isbnSearchDisabled: !current.searchByIsbn,
       settings: current.settings,
       networkProfile: toNetworkProfile(current),
     }

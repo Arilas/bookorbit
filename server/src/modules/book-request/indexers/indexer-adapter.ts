@@ -25,6 +25,12 @@ export interface ResolvedIndexerConfig {
   categories: IndexerCategoryMap;
   /** Media the operator took this source out of, on top of what its adapter declares it carries. */
   disabledMediaKinds: readonly BookRequestMediaKind[];
+  /**
+   * Whether the operator has taken the ISBN away from this source. Applied by withholding it from
+   * the query rather than by asking the adapter to ignore one, so an adapter that searches an ISBN
+   * alongside the title and author is turned off just as completely as one that only searches it.
+   */
+  isbnSearchDisabled: boolean;
   settings: IndexerSettings | null;
   /** How to reach this source, applied by the host rather than chosen by the adapter. */
   networkProfile: NetworkProfile | null;

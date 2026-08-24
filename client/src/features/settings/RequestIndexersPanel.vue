@@ -611,6 +611,14 @@ function handleTestCurrent() {
             </div>
           </fieldset>
 
+          <SettingsToggleField
+            v-if="currentAdapter?.supportsIsbnSearch"
+            v-model="draft.searchByIsbn"
+            :label="t('settings.system.requests.indexers.fields.searchByIsbn')"
+            input-id="indexer-search-by-isbn"
+            :brief="t('settings.system.requests.indexers.fields.searchByIsbnBrief')"
+          />
+
           <div v-if="currentAdapter?.usesCategories" class="grid gap-4 sm:grid-cols-3">
             <SettingsField
               v-for="mediaKind in BOOK_REQUEST_MEDIA_KINDS"

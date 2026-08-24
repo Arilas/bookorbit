@@ -39,6 +39,14 @@ export const requestIndexers = pgTable(
      * medium is already left out of that search, and listing it here changes nothing.
      */
     disabledMediaKinds: jsonb('disabled_media_kinds').$type<BookRequestMediaKind[]>().notNull().default([]),
+    /**
+     * Whether this source is to be searched by title and author even when the request states an
+     * ISBN. An opt-out for the same reason the line above is: indexing the identifier is the better
+     * default, and this exists for a catalogue that holds ISBNs against the wrong rows, where an
+     * exact search returns a confidently wrong book. Meaningless for an adapter that never searches
+     * one, and stored anyway so the answer survives a change of adapter.
+     */
+    isbnSearchDisabled: boolean('isbn_search_disabled').notNull().default(false),
     /** Adapter-specific knobs that do not deserve a column of their own. */
     settings: jsonb('settings').$type<IndexerSettings>(),
     /**

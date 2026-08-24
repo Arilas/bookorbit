@@ -36,6 +36,7 @@ function indexer(overrides: Partial<ResolvedIndexerConfig> = {}): ResolvedIndexe
     allowPrivateAddress: true,
     categories: { ebook: [7020], audiobook: [3030], comic: [7030] },
     disabledMediaKinds: [],
+    isbnSearchDisabled: false,
     settings: null,
     ...overrides,
   };
@@ -192,6 +193,32 @@ describe('IndexerSearchService', () => {
     expect(libgen.search).toHaveBeenCalledWith(expect.objectContaining({ isbn13: null, isbn13s: [] }), expect.anything(), expect.anything());
     expect(result.criteria).toMatchObject({ activeIsbn: null, isbns: ['9780441172719'] });
     expect(result.indexers[0]?.query).toEqual({ kind: 'titleAuthor', value: 'Dune Frank Herbert' });
+  });
+
+  it('withholds the ISBN from a source the operator took it away from', async () => {
+    const libgen = { search: vi.fn().mockResolvedValue([]), supportsIsbnSearch: true };
+    const { service } = makeService([indexer({ adapterType: pluginType('libgen'), isbnSearchDisabled: true })], { libgen });
+
+    const result = await service.search(request({ isbn13: '9780441172719' }));
+
+    expect(libgen.search).toHaveBeenCalledWith(expect.objectContaining({ isbn13: null, isbn13s: [] }), expect.anything(), expect.anything());
+    expect(result.indexers[0]?.query).toEqual({ kind: 'titleAuthor', value: 'Dune Frank Herbert' });
+    // Still the request's ISBN: taking it from one source does not change what was asked for.
+    expect(result.criteria).toMatchObject({ activeIsbn: '9780441172719' });
+  });
+
+  it('leaves a source with the ISBN taken away out of an ISBN-capable pass', async () => {
+    const libgen = { search: vi.fn().mockResolvedValue([]), supportsIsbnSearch: true };
+    const other = { search: vi.fn().mockResolvedValue([]), supportsIsbnSearch: true };
+    const { service } = makeService(
+      [indexer({ adapterType: pluginType('libgen'), isbnSearchDisabled: true }), indexer({ id: 2, name: 'other', adapterType: pluginType('other') })],
+      { libgen, other },
+    );
+
+    const result = await service.search(request({ isbn13: '9780441172719' }), { indexerMode: 'isbn-capable' });
+
+    expect(libgen.search).not.toHaveBeenCalled();
+    expect(result.indexers.map((status) => status.indexerName)).toEqual(['other']);
   });
 
   it('limits fallback passes to ISBN-capable indexers', async () => {

@@ -154,6 +154,29 @@ describe('scoreRelease', () => {
     expect(pointsFor(scored, 'isbnMatch')).toBe(61);
   });
 
+  /**
+   * Library Genesis prints every ISBN it holds against a row, and it holds some against the wrong
+   * one. Such a row used to take a full match and lead the picker ahead of the right book.
+   */
+  it('refuses to let a matching ISBN carry a release about a different book', () => {
+    const scored = scoreRelease(
+      release({ title: 'Cooking for Beginners', bookTitle: 'Cooking for Beginners', author: 'Someone Else', isbn: '9780441013593' }),
+      request({ isbn13: '978-0-441-01359-3' }),
+    );
+
+    expect(pointsFor(scored, 'isbnMatch')).toBeUndefined();
+    expect(pointsFor(scored, 'titleMatch')).toBe(0);
+  });
+
+  it('still takes an ISBN stated beside a title that agrees at all', () => {
+    const scored = scoreRelease(
+      release({ title: 'Dune Messiah', bookTitle: 'Dune Messiah', author: 'Frank Herbert', isbn: '9780441013593' }),
+      request({ isbn13: '978-0-441-01359-3' }),
+    );
+
+    expect(pointsFor(scored, 'isbnMatch')).toBe(61);
+  });
+
   it('rewards a preferred format over a merely acceptable one', () => {
     const preferred = scoreRelease(release({ format: 'epub' }), request({ preferredFormats: ['epub'] }));
     const acceptable = scoreRelease(release({ format: 'epub' }), request({ preferredFormats: ['azw3'] }));

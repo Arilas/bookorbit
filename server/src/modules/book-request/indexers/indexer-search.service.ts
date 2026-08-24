@@ -80,10 +80,7 @@ export class IndexerSearchService {
     // permanent property of the source has no business in a list of search outcomes. Counted, so
     // an empty list can still say why it is empty.
     const compatible = configs.filter((config) => this.carriesMedium(config, query.mediaKind));
-    const searchable =
-      options.indexerMode === 'isbn-capable'
-        ? compatible.filter((config) => this.registry.find(config.adapterType)?.supportsIsbnSearch === true)
-        : compatible;
+    const searchable = options.indexerMode === 'isbn-capable' ? compatible.filter((config) => this.searchesIsbn(config)) : compatible;
     const uncoveredIndexerCount = configs.length - compatible.length;
 
     const started = Date.now();
@@ -196,6 +193,14 @@ export class IndexerSearchService {
     return !adapter || adapter.mediaKinds.includes(mediaKind);
   }
 
+  /**
+   * Whether this source gets the request's ISBN. Both halves have to hold: an adapter that cannot
+   * search one has nothing to do with it, and an operator can take it away from one that can.
+   */
+  private searchesIsbn(config: ResolvedIndexerConfig): boolean {
+    return !config.isbnSearchDisabled && this.registry.find(config.adapterType)?.supportsIsbnSearch === true;
+  }
+
   private async searchAll(configs: ResolvedIndexerConfig[], query: ReleaseQuery): Promise<SearchOutcome[]> {
     const outcomes: SearchOutcome[] = [];
     const queue = [...configs];
@@ -224,11 +229,13 @@ export class IndexerSearchService {
       };
     }
 
+    // Withheld rather than flagged, so an adapter cannot search an identifier it was never given.
     const indexerQuery: IndexerSearchQuery =
-      adapter.supportsIsbnSearch && query.isbn13 ? { kind: 'isbn', value: query.isbn13 } : { kind: 'titleAuthor', value: buildSearchText(query) };
+      this.searchesIsbn(config) && query.isbn13 ? { kind: 'isbn', value: query.isbn13 } : { kind: 'titleAuthor', value: buildSearchText(query) };
+    const indexerScopedQuery: ReleaseQuery = indexerQuery.kind === 'isbn' ? query : { ...query, isbn13: null, isbn13s: [] };
 
     try {
-      const releases = await adapter.search(query, config, AbortSignal.timeout(PER_INDEXER_TIMEOUT_MS));
+      const releases = await adapter.search(indexerScopedQuery, config, AbortSignal.timeout(PER_INDEXER_TIMEOUT_MS));
       return { config, releases, query: indexerQuery };
     } catch (error) {
       const failure: IndexerSearchFailure = error instanceof IndexerSearchException ? error.failure : 'error';
