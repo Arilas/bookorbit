@@ -40,7 +40,7 @@ function request(overrides: Partial<BookRequestItem> = {}): BookRequestItem {
     bookDockFileId: null,
     selfServe: false,
     fulfillerUserId: null,
-    failureReason: null,
+    statusReason: null,
     failureCode: null,
     failureMeta: null,
     subscribers: [],

@@ -45,6 +45,8 @@ export const DOWNLOAD_CLIENT_ERROR_CODES = [
   "DOWNLOAD_CLIENT_URL_PRIVATE",
   "DOWNLOAD_CLIENT_PATH_NOT_ABSOLUTE",
   "DOWNLOAD_CLIENT_MAPPING_REQUIRED",
+  /** The test ran and the client refused or could not be reached. Carries the adapter's reason. */
+  "DOWNLOAD_CLIENT_TEST_FAILED",
   ...REQUEST_CREDENTIAL_ERROR_CODES,
 ] as const;
 export type DownloadClientErrorCode = (typeof DOWNLOAD_CLIENT_ERROR_CODES)[number];
@@ -117,13 +119,24 @@ export interface DownloadClientTestResult {
 }
 
 /**
- * Whether a hardlink from this mapping into the Book Dock can work at all. Different devices
- * mean every import copies instead, which is supported but doubles the space.
+ * Whether a hardlink from this mapping into the Book Dock actually works, established by making
+ * one rather than by comparing device ids: two bind mounts of one filesystem share a device and
+ * still refuse the link. A refusal means every import copies instead, which is supported but
+ * doubles the space.
  */
+export const PATH_MAPPING_HARDLINK_FAILURES = ["download_dir_unwritable", "link_refused"] as const;
+
+/** Why a link could not be made, as a stable code so the settings form can translate it. */
+export type PathMappingHardlinkFailure = (typeof PATH_MAPPING_HARDLINK_FAILURES)[number];
+
 export interface PathMappingHardlinkTestResult {
   localPathExists: boolean;
   bookDockPathExists: boolean;
-  sameFilesystem: boolean;
+  hardlinkWorks: boolean;
+  failure?: PathMappingHardlinkFailure;
+  /** The OS error behind `failure`, EXDEV or EPERM say. Shown verbatim; not translated. */
+  errorCode?: string;
+  /** Set only when the request itself failed, so the form can say something rather than nothing. */
   error?: string;
 }
 

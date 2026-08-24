@@ -337,10 +337,10 @@ export interface BookRequestItem extends BookRequestWorkSnapshot {
    * everywhere else, including on a self-serve row whose requester is its own fulfiller.
    */
   fulfillerUserId: number | null;
-  failureReason: string | null;
+  statusReason: string | null;
   /**
    * Set only where a failure has been classified, which today means automation handing a request
-   * back. Null elsewhere, and the UI falls back to `failureReason` when it is.
+   * back. Null elsewhere, and the UI falls back to `statusReason` when it is.
    */
   failureCode: BookRequestHandbackCode | null;
   failureMeta: BookRequestFailureMeta | null;

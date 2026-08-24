@@ -457,7 +457,7 @@ describe('RequestVerificationService review surface', () => {
 
     expect(finalizeService.finalizeManagedFile).toHaveBeenCalledWith(100, { libraryId: 2, folderId: 3 });
     expect(downloads.update).toHaveBeenCalledWith(11, expect.objectContaining({ status: 'imported' }));
-    expect(requests.update).toHaveBeenCalledWith(7, expect.objectContaining({ status: 'available', matchedBookId: 55, failureReason: null }));
+    expect(requests.update).toHaveBeenCalledWith(7, expect.objectContaining({ status: 'available', matchedBookId: 55, statusReason: null }));
     expect(notifier.notifyBookAvailable).toHaveBeenCalled();
   });
 

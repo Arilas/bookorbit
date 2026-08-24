@@ -154,7 +154,7 @@ export class RequestVerificationService implements OnModuleInit {
       status: 'available',
       matchedBookId: result.bookId ?? null,
       bookDockFileId: null,
-      failureReason: null,
+      statusReason: null,
     });
 
     await this.notifier.notifyBookAvailable(request.id, result.bookId ?? null, {

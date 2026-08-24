@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, ConflictException, HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { BOOK_REQUEST_MEDIA_KINDS, DEFAULT_INDEXER_CATEGORIES, INDEXER_ADAPTER_TYPES, pickUnusedIndexerColor } from '@bookorbit/types';
 import type {
   BookRequestMediaKind,
@@ -12,6 +12,7 @@ import type {
   IndexerTestResult,
 } from '@bookorbit/types';
 
+import { isUniqueViolation } from '../../../common/utils/db-error.utils';
 import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
 import { PrivateAddressException, ensureSafeUrl } from '../../../common/utils/ssrf.utils';
 import type { RequestIndexerRow } from '../../../db/schema';
@@ -20,9 +21,6 @@ import type { ResolvedIndexerConfig } from './indexer-adapter';
 import { IndexerRegistry } from './indexer-registry';
 import { IndexerRepository } from './indexer.repository';
 import type { CreateIndexerDto, UpdateIndexerDto } from './dto/indexer.dto';
-
-/** Postgres unique_violation, raised by the case-insensitive unique index on `name`. */
-const UNIQUE_VIOLATION = '23505';
 
 const MAX_INDEXER_SETTING_STRING_LENGTH = 2_048;
 
@@ -131,11 +129,21 @@ export class IndexerConfigService {
     this.logger.log(`[request_indexer.delete] [end] indexerId=${id} - indexer removed`);
   }
 
+  /**
+   * A test that ran and came back negative answers 502 rather than 200. The stored health stamp
+   * is written either way, so the card still shows what happened; what changes is that a script,
+   * a curl or a log line can no longer read a refused connection as a pass.
+   */
   async test(id: number): Promise<IndexerTestResult> {
     const config = await this.resolveConfig(id);
     const adapter = this.registry.require(config.adapterType);
     const result = await adapter.test(config);
-    await this.repo.recordTestResult(id, result.success, result.success ? null : (result.error ?? 'Unknown error'));
+    const reason = result.success ? null : (result.error ?? 'Unknown error');
+    await this.repo.recordTestResult(id, result.success, reason);
+
+    if (reason !== null) {
+      throw new BadGatewayException({ message: reason, errorCode: 'INDEXER_TEST_FAILED', statusCode: HttpStatus.BAD_GATEWAY });
+    }
     return result;
   }
 
@@ -266,7 +274,7 @@ export class IndexerConfigService {
   }
 
   private translateUniqueViolation(error: unknown): unknown {
-    if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === UNIQUE_VIOLATION) {
+    if (isUniqueViolation(error)) {
       return new ConflictException({ message: 'An indexer with this name already exists', errorCode: 'INDEXER_NAME_TAKEN' });
     }
     return error;

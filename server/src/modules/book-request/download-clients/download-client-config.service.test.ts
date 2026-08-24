@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpStatus, NotFoundException } from '@nestjs/common';
 
 import type { DownloadClientRow } from '../../../db/schema';
 import { DownloadClientConfigService } from './download-client-config.service';
@@ -48,7 +48,7 @@ function makeService(overrides: { repo?: Record<string, unknown>; credentials?: 
   };
   const adapter = { test: vi.fn().mockResolvedValue({ success: true, version: 'v5.0.3' }), forget: vi.fn() };
   const registry = { require: vi.fn().mockReturnValue(adapter), find: vi.fn().mockReturnValue(adapter) };
-  const pathMappings = { testHardlink: vi.fn().mockResolvedValue({ localPathExists: true, bookDockPathExists: true, sameFilesystem: true }) };
+  const pathMappings = { testHardlink: vi.fn().mockResolvedValue({ localPathExists: true, bookDockPathExists: true, hardlinkWorks: true }) };
   const config = { getOrThrow: vi.fn().mockReturnValue('/data/book-dock') };
   const downloads = { countInFlightForClient: vi.fn().mockResolvedValue(0), ...overrides.downloads };
 
@@ -228,7 +228,9 @@ describe('DownloadClientConfigService', () => {
   });
 
   it('reports a duplicate name as a conflict', async () => {
-    const { service } = makeService({ repo: { create: vi.fn().mockRejectedValue(Object.assign(new Error('dup'), { code: '23505' })) } });
+    const { service } = makeService({
+      repo: { create: vi.fn().mockRejectedValue(new Error('Failed query', { cause: Object.assign(new Error('dup'), { code: '23505' }) })) },
+    });
     await expect(service.create(createDto)).rejects.toThrow(ConflictException);
   });
 
@@ -272,12 +274,20 @@ describe('DownloadClientConfigService', () => {
     expect(repo.recordTestResult).toHaveBeenCalledWith(4, true, null);
   });
 
-  it('records why a connection test failed', async () => {
+  it('records why a connection test failed, and reports it as a failure rather than a 200', async () => {
     const { service, repo, registry } = makeService();
     registry.require.mockReturnValue({ test: vi.fn().mockResolvedValue({ success: false, error: 'refused' }) });
 
-    await service.test(4);
+    await expect(service.test(4)).rejects.toMatchObject({ status: HttpStatus.BAD_GATEWAY, response: { message: 'refused' } });
     expect(repo.recordTestResult).toHaveBeenCalledWith(4, false, 'refused');
+  });
+
+  it('answers a passing test normally', async () => {
+    const { service, repo, registry } = makeService();
+    registry.require.mockReturnValue({ test: vi.fn().mockResolvedValue({ success: true }) });
+
+    await expect(service.test(4)).resolves.toEqual({ success: true });
+    expect(repo.recordTestResult).toHaveBeenCalledWith(4, true, null);
   });
 
   it('decrypts credentials only into a value object, never onto the row', async () => {

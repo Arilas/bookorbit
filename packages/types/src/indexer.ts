@@ -185,6 +185,8 @@ export const INDEXER_ERROR_CODES = [
   "INDEXER_URL_PRIVATE",
   "INDEXER_CREDENTIAL_REQUIRED",
   "INDEXER_SETTINGS_INVALID",
+  /** The test ran and the source refused or could not be reached. Carries the adapter's reason. */
+  "INDEXER_TEST_FAILED",
   ...REQUEST_CREDENTIAL_ERROR_CODES,
 ] as const;
 export type IndexerErrorCode = (typeof INDEXER_ERROR_CODES)[number];

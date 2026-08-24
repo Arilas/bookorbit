@@ -160,7 +160,9 @@ describe('IndexerConfigService', () => {
   });
 
   it('reports a duplicate name as a conflict rather than a 500', async () => {
-    const { service } = makeService({ repo: { create: vi.fn().mockRejectedValue(Object.assign(new Error('dupe'), { code: '23505' })) } });
+    const { service } = makeService({
+      repo: { create: vi.fn().mockRejectedValue(new Error('Failed query', { cause: Object.assign(new Error('dupe'), { code: '23505' }) })) },
+    });
 
     await expect(service.create(createDto)).rejects.toThrow(ConflictException);
   });

@@ -32,6 +32,7 @@ import type {
 } from '@bookorbit/types';
 
 import { StatsCache } from '../../common/cache/stats-cache';
+import { isUniqueViolation } from '../../common/utils/db-error.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import type { RequestUser } from '../../common/types/request-user';
 import type { BookRequestRow } from '../../db/schema';
@@ -126,13 +127,6 @@ function normalizeMetadataSources(sources: CreateBookRequestDto['metadataSources
     });
   }
   return normalized;
-}
-
-/** Postgres unique_violation, raised by the partial unique index on `dedupe_key`. */
-const UNIQUE_VIOLATION = '23505';
-
-function isUniqueViolation(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === UNIQUE_VIOLATION;
 }
 
 export interface SubmitResult {
@@ -574,7 +568,7 @@ export class BookRequestService {
       status: 'cancelled',
       decidedByUserId: user.id,
       decidedAt: new Date(),
-      failureReason: outcome.error ? `Cancelled, but the active download could not be stopped: ${outcome.error}` : null,
+      statusReason: outcome.error ? `Cancelled, but the active download could not be stopped: ${outcome.error}` : null,
     });
     if (!updated) throw await this.staleTransition(id, (status) => `A request that is ${status} can no longer be cancelled`);
 

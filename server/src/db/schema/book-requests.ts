@@ -67,9 +67,9 @@ export const bookRequests = pgTable(
 
     matchedBookId: integer('matched_book_id').references(() => books.id, { onDelete: 'set null' }),
     bookDockFileId: integer('book_dock_file_id').references(() => bookDockFiles.id, { onDelete: 'set null' }),
-    failureReason: text('failure_reason'),
+    statusReason: text('status_reason'),
     /**
-     * The classified form of `failureReason`, so the UI can translate it. Null wherever a failure
+     * The classified form of `statusReason`, so the UI can translate it. Null wherever a failure
      * was never classified, which is every path except automation handing a request back.
      */
     failureCode: varchar('failure_code', { length: 50 }),
@@ -110,6 +110,12 @@ export const bookRequests = pgTable(
     // status, because the default list has no status filter on it.
     index('book_requests_created_at_idx').on(t.createdAt),
     index('book_requests_title_idx').on(t.title),
+    // Drives the content-filter exemption, which asks "did this user request this book" once per
+    // candidate row while a restricted reader browses. Partial because only fulfilled requests
+    // carry a matched book, so at library scale the index stays a fraction of the table.
+    index('book_requests_matched_book_user_idx')
+      .on(t.matchedBookId, t.userId)
+      .where(sql`${t.matchedBookId} is not null`),
     // Partial on purpose. The sweeper asks for self-serve rows of a given status and age every ten
     // minutes, which is selective enough to scan a long way at library scale without it, and the
     // predicate keeps every ordinary request out of the index entirely.

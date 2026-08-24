@@ -311,8 +311,9 @@ async function handleHardlinkTest(client: DownloadClientItem, localPath: string)
   if (result.error) hardlinkResults[key] = result.error
   else if (!result.localPathExists) hardlinkResults[key] = t('settings.system.requests.hardlink.localMissing')
   else if (!result.bookDockPathExists) hardlinkResults[key] = t('settings.system.requests.hardlink.dockMissing')
-  else if (result.sameFilesystem) hardlinkResults[key] = t('settings.system.requests.hardlink.same')
-  else hardlinkResults[key] = t('settings.system.requests.hardlink.different')
+  else if (result.hardlinkWorks) hardlinkResults[key] = t('settings.system.requests.hardlink.works')
+  else if (result.failure) hardlinkResults[key] = t(`settings.system.requests.hardlink.${result.failure}`, { code: result.errorCode ?? '' })
+  else hardlinkResults[key] = t('settings.system.requests.hardlink.unavailable')
 }
 
 function hardlinkResultFor(client: DownloadClientItem, localPath: string): string | undefined {

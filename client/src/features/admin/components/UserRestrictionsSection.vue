@@ -25,6 +25,7 @@ const includeTags = defineModel<NamedItem[]>('includeTags', { required: true })
 const excludeTags = defineModel<NamedItem[]>('excludeTags', { required: true })
 const includeGenres = defineModel<NamedItem[]>('includeGenres', { required: true })
 const excludeGenres = defineModel<NamedItem[]>('excludeGenres', { required: true })
+const seeOwnRequestedBooks = defineModel<boolean>('seeOwnRequestedBooks', { required: true })
 
 const { t } = useI18n()
 const { search: searchTags } = useTagSearchWithIds()
@@ -111,6 +112,13 @@ function toggleContentFilters(enabled: boolean) {
           />
           <p class="settings-hint">{{ t('adminFeature.userForm.excludeGenresHint') }}</p>
         </div>
+        <label class="flex cursor-pointer items-start gap-2 focus-within:ring-2 focus-within:ring-ring @lg:col-span-2">
+          <input v-model="seeOwnRequestedBooks" type="checkbox" class="mt-0.5 size-4 shrink-0 rounded border-input accent-primary" />
+          <span>
+            <span class="block text-sm leading-tight text-foreground">{{ t('adminFeature.userForm.seeOwnRequestedBooks') }}</span>
+            <span class="settings-hint block">{{ t('adminFeature.userForm.seeOwnRequestedBooksHint') }}</span>
+          </span>
+        </label>
       </div>
 
       <p v-else class="rounded-lg border border-dashed border-border px-3 py-2.5 text-xs text-muted-foreground">

@@ -313,6 +313,7 @@ export class UserRepository {
           avatarSource: schema.users.avatarSource,
           avatarVersion: schema.users.avatarVersion,
           provisioningMethod: schema.users.provisioningMethod,
+          seeOwnRequestedBooks: schema.users.seeOwnRequestedBooks,
           permissionName: schema.userPermissions.permissionName,
         })
         .from(schema.users)
@@ -359,6 +360,7 @@ export class UserRepository {
         excludeTagIds: tagFilterRows.filter((r) => r.filterType === 'exclude').map((r) => r.tagId),
         includeGenreIds: genreFilterRows.filter((r) => r.filterType === 'include').map((r) => r.genreId),
         excludeGenreIds: genreFilterRows.filter((r) => r.filterType === 'exclude').map((r) => r.genreId),
+        ...(first.seeOwnRequestedBooks ? { exemptRequestsFromUserId: first.id } : {}),
       },
     };
   }
@@ -373,7 +375,7 @@ export class UserRepository {
     return user;
   }
 
-  async update(id: number, data: Partial<Pick<typeof schema.users.$inferInsert, 'name' | 'email' | 'active' | 'settings'>>) {
+  async update(id: number, data: Partial<Pick<typeof schema.users.$inferInsert, 'name' | 'email' | 'active' | 'settings' | 'seeOwnRequestedBooks'>>) {
     const { settings, ...rest } = data;
     const setData: Record<string, unknown> = { ...rest, updatedAt: new Date() };
     if (settings !== undefined) {

@@ -44,7 +44,7 @@ describe('requestOutcome', () => {
   })
 
   it('leaves the body to the caller on a failure, since the reason is the tracker prose', () => {
-    const row = request({ status: 'failed', failureReason: 'Tracker said no' })
+    const row = request({ status: 'failed', statusReason: 'Tracker said no' })
 
     expect(requestOutcome(row, null, formatTime)).toEqual({ kind: 'failure', key: null })
   })

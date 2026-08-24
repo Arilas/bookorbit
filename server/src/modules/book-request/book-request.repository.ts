@@ -36,11 +36,11 @@ type RequestWriteExecutor = Pick<Db, 'insert'>;
 type RequestReadExecutor = Pick<Db, 'select'>;
 
 /**
- * A new `failureReason` clears the classified fields unless the caller supplies them, so a stale
+ * A new `statusReason` clears the classified fields unless the caller supplies them, so a stale
  * code can never translate a failure that is no longer there.
  */
 function withFailureFields(data: Partial<NewBookRequestRow>): Partial<NewBookRequestRow> {
-  return 'failureReason' in data && !('failureCode' in data) ? { ...data, failureCode: null, failureMeta: null } : data;
+  return 'statusReason' in data && !('failureCode' in data) ? { ...data, failureCode: null, failureMeta: null } : data;
 }
 
 /**
@@ -263,9 +263,9 @@ export class BookRequestRepository {
   }
 
   /**
-   * Writing a new `failureReason` clears the classified fields unless the caller supplies them,
+   * Writing a new `statusReason` clears the classified fields unless the caller supplies them,
    * which is the invariant that keeps a stale code from translating a failure that is no longer
-   * there. Enforced here rather than at each call site because most writers of `failureReason`
+   * there. Enforced here rather than at each call site because most writers of `statusReason`
    * have never heard of a code and should not have to.
    */
   async update(id: number, data: Partial<NewBookRequestRow>): Promise<BookRequestRow | undefined> {
@@ -516,7 +516,7 @@ export class BookRequestRepository {
   async cancelAbandoned(id: number, reason: string, code: string): Promise<boolean> {
     const rows = await this.db
       .update(bookRequests)
-      .set({ status: 'cancelled', failureReason: reason, failureCode: code, decidedAt: new Date() })
+      .set({ status: 'cancelled', statusReason: reason, failureCode: code, decidedAt: new Date() })
       .where(and(eq(bookRequests.id, id), inArray(bookRequests.status, [...ABANDONABLE_SELF_SERVE_STATUSES])))
       .returning({ id: bookRequests.id });
     return rows.length > 0;

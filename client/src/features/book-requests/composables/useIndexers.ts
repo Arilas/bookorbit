@@ -130,9 +130,12 @@ export function useIndexers() {
   async function test(id: number): Promise<IndexerTestResult> {
     try {
       const res = await api(`${BASE_PATH}/${id}/test`, { method: 'POST' })
-      if (!res.ok) return { success: false, error: (await toFailure(res)).message ?? undefined }
-      const result = (await res.json()) as IndexerTestResult
-      // The server stamps the row with the outcome, so refresh to show it on the card.
+      // A failed test answers 502 carrying its reason, so both outcomes are read the same way.
+      const result: IndexerTestResult = res.ok
+        ? ((await res.json()) as IndexerTestResult)
+        : { success: false, error: (await toFailure(res)).message ?? undefined }
+      // The server stamps the row either way, so the card is refreshed either way: that stamp is
+      // where the reason is kept once this toast is gone.
       await fetchIndexers({ silent: true })
       return result
     } catch {

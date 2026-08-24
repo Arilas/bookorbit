@@ -53,6 +53,7 @@ export function useUserForm(user: Ref<UserFormTarget | null>, defaultLibraryIds:
   const includeGenreItems = ref<NamedItem[]>([])
   const excludeGenreItems = ref<NamedItem[]>([])
   const contentFiltersEnabled = ref(false)
+  const seeOwnRequestedBooks = ref(false)
 
   const loading = ref(false)
   const error = ref<string | null>(null)
@@ -94,7 +95,7 @@ export function useUserForm(user: Ref<UserFormTarget | null>, defaultLibraryIds:
   }
 
   function filterSignature(): string {
-    return [includeTagItems, excludeTagItems, includeGenreItems, excludeGenreItems]
+    const lists = [includeTagItems, excludeTagItems, includeGenreItems, excludeGenreItems]
       .map((items) =>
         items.value
           .map((item) => item.id)
@@ -102,6 +103,7 @@ export function useUserForm(user: Ref<UserFormTarget | null>, defaultLibraryIds:
           .join('.'),
       )
       .join('|')
+    return `${lists}|exempt:${seeOwnRequestedBooks.value}`
   }
 
   /** Field-level count, so the footer can say how much a Cancel would throw away. */
@@ -161,6 +163,7 @@ export function useUserForm(user: Ref<UserFormTarget | null>, defaultLibraryIds:
     excludeTagItems.value = []
     includeGenreItems.value = []
     excludeGenreItems.value = []
+    seeOwnRequestedBooks.value = false
   }
 
   function reset() {
@@ -177,6 +180,7 @@ export function useUserForm(user: Ref<UserFormTarget | null>, defaultLibraryIds:
     includeGenreItems.value = []
     excludeGenreItems.value = []
     contentFiltersEnabled.value = false
+    seeOwnRequestedBooks.value = false
     error.value = null
     errorKey.value = null
     snapshot.value = null
@@ -207,6 +211,7 @@ export function useUserForm(user: Ref<UserFormTarget | null>, defaultLibraryIds:
       excludeTagItems.value = filters.excludeTags ?? []
       includeGenreItems.value = filters.includeGenres ?? []
       excludeGenreItems.value = filters.excludeGenres ?? []
+      seeOwnRequestedBooks.value = filters.seeOwnRequestedBooks ?? false
       contentFiltersEnabled.value = hasContentFilters.value
     }
 
@@ -265,6 +270,7 @@ export function useUserForm(user: Ref<UserFormTarget | null>, defaultLibraryIds:
           excludeTagIds: excludeTagItems.value.map((item) => item.id),
           includeGenreIds: includeGenreItems.value.map((item) => item.id),
           excludeGenreIds: excludeGenreItems.value.map((item) => item.id),
+          seeOwnRequestedBooks: seeOwnRequestedBooks.value,
         }),
       })
       if (!filtersRes.ok) return fail('updateContentFilters', 'restrictions', await readMessage(filtersRes))
@@ -343,6 +349,7 @@ export function useUserForm(user: Ref<UserFormTarget | null>, defaultLibraryIds:
     includeGenreItems,
     excludeGenreItems,
     contentFiltersEnabled,
+    seeOwnRequestedBooks,
     loading,
     error,
     errorKey,

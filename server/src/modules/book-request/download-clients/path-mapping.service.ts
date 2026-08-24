@@ -1,6 +1,9 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { realpath, stat } from 'fs/promises';
+import { randomBytes } from 'crypto';
+import { link, realpath, stat, unlink, writeFile } from 'fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
+
+import type { PathMappingHardlinkTestResult } from '@bookorbit/types';
 
 import { DownloadClientRepository } from './download-client.repository';
 
@@ -76,20 +79,53 @@ export class PathMappingService {
   }
 
   /**
-   * Whether a hardlink from this local path into the Book Dock can work at all. Comparing device
-   * ids answers that without writing anything, and a different device is a supported (if
-   * space-doubling) configuration rather than an error.
+   * Whether a hardlink from this local path into the Book Dock actually works.
+   *
+   * Device ids cannot answer this. Two bind mounts of one filesystem report the same `st_dev`
+   * while `link(2)` still returns EXDEV, which is the ordinary Docker and Kubernetes layout, so
+   * comparing them promises a hardlink that the import then cannot make. The only honest test is
+   * to make one, so a throwaway file is linked across and both ends are removed again.
+   *
+   * A link that cannot be attempted is reported apart from one that was refused: an unwritable
+   * download directory is a different thing to fix than a filesystem boundary.
    */
-  async testHardlink(
-    localPath: string,
-    bookDockPath: string,
-  ): Promise<{ localPathExists: boolean; bookDockPathExists: boolean; sameFilesystem: boolean }> {
-    const [local, dock] = await Promise.all([safeStatDevice(localPath), safeStatDevice(bookDockPath)]);
-    return {
-      localPathExists: local !== null,
-      bookDockPathExists: dock !== null,
-      sameFilesystem: local !== null && dock !== null && local === dock,
-    };
+  async testHardlink(localPath: string, bookDockPath: string): Promise<PathMappingHardlinkTestResult> {
+    const [localPathExists, bookDockPathExists] = await Promise.all([pathExists(localPath), pathExists(bookDockPath)]);
+    if (!localPathExists || !bookDockPathExists) {
+      return { localPathExists, bookDockPathExists, hardlinkWorks: false };
+    }
+
+    const probeName = `.bookorbit-hardlink-probe-${randomBytes(8).toString('hex')}`;
+    const source = join(localPath, probeName);
+    const target = join(bookDockPath, probeName);
+
+    try {
+      await writeFile(source, '', { flag: 'wx' });
+    } catch (error) {
+      return {
+        localPathExists: true,
+        bookDockPathExists: true,
+        hardlinkWorks: false,
+        failure: 'download_dir_unwritable',
+        errorCode: errorCode(error),
+      };
+    }
+
+    try {
+      await link(source, target);
+      await discard(target);
+      return { localPathExists: true, bookDockPathExists: true, hardlinkWorks: true };
+    } catch (error) {
+      return {
+        localPathExists: true,
+        bookDockPathExists: true,
+        hardlinkWorks: false,
+        failure: 'link_refused',
+        errorCode: errorCode(error),
+      };
+    } finally {
+      await discard(source);
+    }
   }
 }
 
@@ -153,10 +189,21 @@ async function canonicalize(target: string): Promise<string> {
   }
 }
 
-async function safeStatDevice(target: string): Promise<number | null> {
+/** Best effort, because a probe left behind is worse than a cleanup failure nobody sees. */
+async function discard(target: string): Promise<void> {
+  await unlink(target).catch(() => undefined);
+}
+
+function errorCode(error: unknown): string {
+  const code = (error as { code?: unknown })?.code;
+  return typeof code === 'string' ? code : 'unknown error';
+}
+
+async function pathExists(target: string): Promise<boolean> {
   try {
-    return (await stat(target)).dev;
+    await stat(target);
+    return true;
   } catch {
-    return null;
+    return false;
   }
 }

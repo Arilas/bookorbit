@@ -4,6 +4,7 @@ import { NotificationType, Permission } from '@bookorbit/types';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { LibraryService } from '../library/library.service';
 import { NotificationService } from '../notification/notification.service';
+import { ContentFilterRepository } from '../user/content-filter.repository';
 import { BookRequestRepository } from './book-request.repository';
 
 export interface RequestNotification {
@@ -26,6 +27,7 @@ export class BookRequestNotifier {
     private readonly notifications: NotificationService,
     private readonly repo: BookRequestRepository,
     private readonly libraries: LibraryService,
+    private readonly contentFilters: ContentFilterRepository,
   ) {}
 
   /** Everyone who can act on the queue, resolved by permission rather than by enumerating users. */
@@ -61,14 +63,25 @@ export class BookRequestNotifier {
    * exactly who it exists for. Saying so with a link that answers 403 is not deliberate. Anybody
    * who can open the book is sent to the book; everybody else is sent to their request list,
    * which is theirs whatever the destination turned out to be.
+   *
+   * Library access is only the first gate. Content restrictions hide individual books inside a
+   * library somebody can otherwise open, so a restricted reader was still being handed a link to
+   * a book their own queries refuse to return. Somebody exempted from their restrictions for
+   * their own requests can open this one by definition, since this is one. The remaining case,
+   * a restricted reader whose rules happen to admit this book anyway, is sent to the request list
+   * rather than resolved exactly: one extra click beats a link that answers nothing.
    */
   async notifyBookAvailable(requestId: number, bookId: number | null, payload: Omit<RequestNotification, 'actionUrl'>): Promise<void> {
     const userIds = await this.repo.findInterestedUserIds(requestId);
     const libraryId = bookId === null ? null : await this.repo.findBookLibraryId(bookId);
     const reachers = libraryId === null ? new Set<number>() : await this.libraries.findUserIdsWithAccess(libraryId, userIds);
 
+    const restricted = await this.contentFilters.hasAnyContentFilters([...reachers]);
+    const exempt = restricted.size > 0 ? await this.contentFilters.findExemptUserIds([...restricted]) : new Set<number>();
+
     for (const userId of userIds) {
-      const actionUrl = bookId !== null && reachers.has(userId) ? `/book/${bookId}` : '/requests';
+      const canOpen = reachers.has(userId) && (!restricted.has(userId) || exempt.has(userId));
+      const actionUrl = bookId !== null && canOpen ? `/book/${bookId}` : '/requests';
       await this.dispatch(NotificationType.BookRequestAvailable, { ...payload, actionUrl, scope: { kind: 'user', userId } });
     }
   }

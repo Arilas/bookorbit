@@ -77,7 +77,7 @@ export class RequestSeedService {
       // filed does not reopen it as a failure.
       await this.requests.updateIf(requestId, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, {
         status: 'failed',
-        failureReason: `Removed from the download client by ${user.username}`,
+        statusReason: `Removed from the download client by ${user.username}`,
       });
       this.gateway.emitChanged();
     }

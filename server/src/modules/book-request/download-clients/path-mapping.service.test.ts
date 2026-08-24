@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { mkdtemp, mkdir, symlink, writeFile } from 'fs/promises';
+import { chmod, mkdtemp, mkdir, readdir, symlink, writeFile } from 'fs/promises';
 import { realpath } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -124,20 +124,52 @@ describe('PathMappingService.assertWithinRoot', () => {
 });
 
 describe('PathMappingService.testHardlink', () => {
-  it('reports the same filesystem for two directories on one device', async () => {
+  async function twoDirs() {
     const root = await mkdtemp(join(tmpdir(), 'bookorbit-hardlink-'));
     const a = join(root, 'a');
     const b = join(root, 'b');
     await mkdir(a);
     await mkdir(b);
+    return { root, a, b };
+  }
+
+  it('reports a working hardlink for two directories on one filesystem', async () => {
+    const { a, b } = await twoDirs();
 
     const { service } = makeService([]);
-    await expect(service.testHardlink(a, b)).resolves.toEqual({ localPathExists: true, bookDockPathExists: true, sameFilesystem: true });
+    await expect(service.testHardlink(a, b)).resolves.toEqual({ localPathExists: true, bookDockPathExists: true, hardlinkWorks: true });
+  });
+
+  it('leaves nothing behind on either side', async () => {
+    const { a, b } = await twoDirs();
+
+    const { service } = makeService([]);
+    await service.testHardlink(a, b);
+
+    await expect(readdir(a)).resolves.toEqual([]);
+    await expect(readdir(b)).resolves.toEqual([]);
   });
 
   it('reports a missing local path rather than throwing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'bookorbit-hardlink-'));
     const { service } = makeService([]);
-    await expect(service.testHardlink(join(root, 'nope'), root)).resolves.toMatchObject({ localPathExists: false, sameFilesystem: false });
+    await expect(service.testHardlink(join(root, 'nope'), root)).resolves.toMatchObject({ localPathExists: false, hardlinkWorks: false });
+  });
+
+  it('separates a download directory it cannot write to from a refused link', async () => {
+    if (process.getuid?.() === 0) return; // skip when running as root
+    const { a, b } = await twoDirs();
+    await chmod(a, 0o500);
+
+    try {
+      const { service } = makeService([]);
+      const result = await service.testHardlink(a, b);
+
+      expect(result.hardlinkWorks).toBe(false);
+      expect(result.failure).toBe('download_dir_unwritable');
+      expect(result.errorCode).toBe('EACCES');
+    } finally {
+      await chmod(a, 0o700);
+    }
   });
 });

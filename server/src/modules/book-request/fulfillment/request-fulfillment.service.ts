@@ -44,6 +44,7 @@ import type {
   ReleaseUnitSummary,
 } from '@bookorbit/types';
 
+import { isUniqueViolation } from '../../../common/utils/db-error.utils';
 import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
 import type { RequestUser } from '../../../common/types/request-user';
 import type { BookRequestDownloadRow, BookRequestRow } from '../../../db/schema';
@@ -85,9 +86,6 @@ const SUPPORTED_BOOK_FORMATS = new Set<string>(BOOK_FORMATS);
 
 /** Searching costs a hit on every configured tracker, so a refused request does not get one. */
 const UNSEARCHABLE: BookRequestStatus[] = ['rejected', 'cancelled'];
-
-/** Postgres unique_violation, raised by the partial unique index on (client, infohash). */
-const UNIQUE_VIOLATION = '23505';
 
 /** Tracker conditions that pass on their own, so the same release is worth another attempt later. */
 const RETRYABLE_INDEXER_FAILURES: IndexerSearchFailure[] = ['timeout', 'unreachable', 'throttled'];
@@ -301,7 +299,7 @@ export class RequestFulfillmentService {
 
     // Still conditional on the claim this grab took, so a cancellation that landed while the client
     // was being asked is not overwritten by the answer.
-    await this.requests.updateIf(requestId, ['grabbed'], { status: 'grabbed', failureReason: null });
+    await this.requests.updateIf(requestId, ['grabbed'], { status: 'grabbed', statusReason: null });
     // A retry is the one way out of a settled status, and someone who hid the failure still wants
     // the book when it lands. Leaving the dismissal on would hide the arrival too.
     await this.requests.clearDismissals(requestId);
@@ -378,12 +376,12 @@ export class RequestFulfillmentService {
   async setRequestStatus(
     requestId: number,
     status: BookRequestStatus,
-    failureReason?: string | null,
+    statusReason?: string | null,
     failure?: { code: BookRequestHandbackCode; meta?: BookRequestFailureMeta } | null,
   ): Promise<boolean> {
     const updated = await this.requests.updateIf(requestId, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, {
       status,
-      ...(failureReason !== undefined ? { failureReason, failureCode: failure?.code ?? null, failureMeta: failure?.meta ?? null } : {}),
+      ...(statusReason !== undefined ? { statusReason, failureCode: failure?.code ?? null, failureMeta: failure?.meta ?? null } : {}),
     });
     if (!updated) return false;
     this.gateway.emitChanged();
@@ -402,7 +400,7 @@ export class RequestFulfillmentService {
     if (!(await this.downloads.updateIf(download.id, UNSETTLED_BOOK_REQUEST_DOWNLOAD_STATUSES, { status: 'failed', errorMessage: reason }))) {
       return;
     }
-    if (!(await this.requests.updateIf(download.requestId, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, { status: 'failed', failureReason: reason }))) {
+    if (!(await this.requests.updateIf(download.requestId, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, { status: 'failed', statusReason: reason }))) {
       this.logger.log(
         `[book_request.download] [end] requestId=${download.requestId} downloadId=${download.id} - the attempt failed after the request was settled, so the request was left alone`,
       );
@@ -454,7 +452,7 @@ export class RequestFulfillmentService {
       releaseUnits: extra.releaseUnits ?? null,
     });
     if (!held) return;
-    if (!(await this.requests.updateIf(request.id, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, { status: 'needs_review', failureReason: message }))) {
+    if (!(await this.requests.updateIf(request.id, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, { status: 'needs_review', statusReason: message }))) {
       this.gateway.emitChanged();
       return;
     }
@@ -507,13 +505,28 @@ export class RequestFulfillmentService {
     const cached = this.resolvedReleases.get(key);
     if (cached && cached.candidate === release && cached.expiresAt > Date.now()) return cached.grab;
 
-    const grab = await this.resolveRelease(release);
+    const grab = await this.resolveRelease(requestId, release);
     this.rememberResolvedRelease(key, release, grab);
     return grab;
   }
 
-  private async resolveRelease(release: ReleaseCandidate): Promise<ResolvedGrab> {
+  private async resolveRelease(requestId: number, release: ReleaseCandidate): Promise<ResolvedGrab> {
     const indexer = await this.indexers.resolveConfig(release.indexerId);
+    try {
+      return await this.resolveReleaseFor(indexer, release);
+    } catch (error) {
+      // The refusal travels to the caller as a 4xx, and the filter deliberately logs no client
+      // error, so without this line a source that searches fine and only fails on download leaves
+      // nothing behind but a route and a status. Searching already logs its own failures; this is
+      // the other half, and it is the half that names which source refused.
+      this.logger.warn(
+        `[book_request.release_resolve] [fail] requestId=${requestId} indexerId=${indexer.id} indexerName="${sanitizeLogValue(indexer.name)}" errorCode=${errorCodeOf(error)} error="${sanitizeLogValue(error instanceof Error ? error.message : String(error))}" - could not resolve the picked release`,
+      );
+      throw error;
+    }
+  }
+
+  private async resolveReleaseFor(indexer: ResolvedIndexerConfig, release: ReleaseCandidate): Promise<ResolvedGrab> {
     const snapshot = {
       indexerId: release.indexerId,
       indexerName: indexer.name,
@@ -699,6 +712,13 @@ function indexerRefusal(error: IndexerSearchException, release: ReleaseCandidate
  * A refusal an automatic attempt can route around. The code travels to the picker as `errorCode`
  * and to the failover as a scope, while the message stays the source's own sentence.
  */
+/** The stable code off an HttpException body, so the log line says which refusal this was. */
+function errorCodeOf(error: unknown): string {
+  const response = error instanceof HttpException ? error.getResponse() : null;
+  const code = typeof response === 'object' && response !== null ? (response as { errorCode?: unknown }).errorCode : null;
+  return typeof code === 'string' ? code : 'UNKNOWN';
+}
+
 function grabError(errorCode: GrabFailureCode, message: string): BadRequestException {
   return new BadRequestException({ message, errorCode, statusCode: HttpStatus.BAD_REQUEST });
 }
@@ -918,10 +938,6 @@ function isSupportedBookFile(fileName: string): boolean {
 function assertReleaseCanImport(inspection: ReleaseFileInspection): void {
   if (!releaseInspectionBlocksGrab(inspection.status)) return;
   throw grabError('GRAB_RELEASE_REFUSED', 'The release contains no directly supported book file');
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === UNIQUE_VIOLATION;
 }
 
 /**

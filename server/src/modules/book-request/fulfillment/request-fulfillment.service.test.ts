@@ -171,7 +171,7 @@ describe('RequestFulfillmentService.grab', () => {
   it('moves the request to grabbed once the client has it', async () => {
     const { service, requests } = makeService();
     await service.grab(7, { magnet: MAGNET }, user());
-    expect(requests.updateIf).toHaveBeenCalledWith(7, ['grabbed'], { status: 'grabbed', failureReason: null });
+    expect(requests.updateIf).toHaveBeenCalledWith(7, ['grabbed'], { status: 'grabbed', statusReason: null });
   });
 
   /** Someone who hid the failure still wants the book, so the retry puts it back on their list. */
@@ -247,7 +247,9 @@ describe('RequestFulfillmentService.grab', () => {
   });
 
   it('reports a duplicate infohash as a conflict rather than a 500', async () => {
-    const { service } = makeService({ downloads: { create: vi.fn().mockRejectedValue(Object.assign(new Error('dup'), { code: '23505' })) } });
+    const { service } = makeService({
+      downloads: { create: vi.fn().mockRejectedValue(new Error('Failed query', { cause: Object.assign(new Error('dup'), { code: '23505' }) })) },
+    });
     await expect(service.grab(7, { magnet: MAGNET }, user())).rejects.toThrow(ConflictException);
   });
 
@@ -756,7 +758,7 @@ describe('RequestFulfillmentService.failDownload', () => {
     });
     expect(requests.updateIf).toHaveBeenCalledWith(7, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, {
       status: 'failed',
-      failureReason: 'The download client no longer has this torrent',
+      statusReason: 'The download client no longer has this torrent',
     });
     expect(notifier.notifyResponsible).toHaveBeenCalledWith(
       { id: 7, selfServe: false },

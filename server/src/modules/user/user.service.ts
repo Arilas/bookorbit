@@ -495,5 +495,9 @@ export class UserService {
       excludeGenreIds: dto.excludeGenreIds ?? [],
     };
     await this.contentFilterRepo.replaceFilters(targetUserId, filters);
+
+    if (dto.seeOwnRequestedBooks !== undefined) {
+      await this.userRepo.update(targetUserId, { seeOwnRequestedBooks: dto.seeOwnRequestedBooks });
+    }
   }
 }

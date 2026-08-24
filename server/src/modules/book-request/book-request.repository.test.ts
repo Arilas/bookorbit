@@ -29,9 +29,9 @@ describe('BookRequestRepository.update', () => {
     const db = makeDb();
     const repo = new BookRequestRepository(db as never);
 
-    await repo.update(7, { status: 'failed', failureReason: 'the tracker answered 406' });
+    await repo.update(7, { status: 'failed', statusReason: 'the tracker answered 406' });
 
-    expect(written(db)).toEqual({ status: 'failed', failureReason: 'the tracker answered 406', failureCode: null, failureMeta: null });
+    expect(written(db)).toEqual({ status: 'failed', statusReason: 'the tracker answered 406', failureCode: null, failureMeta: null });
   });
 
   /** A grab clearing the reason must clear the code with it, or the UI translates a stale failure. */
@@ -39,9 +39,9 @@ describe('BookRequestRepository.update', () => {
     const db = makeDb();
     const repo = new BookRequestRepository(db as never);
 
-    await repo.update(7, { status: 'grabbed', failureReason: null });
+    await repo.update(7, { status: 'grabbed', statusReason: null });
 
-    expect(written(db)).toEqual({ status: 'grabbed', failureReason: null, failureCode: null, failureMeta: null });
+    expect(written(db)).toEqual({ status: 'grabbed', statusReason: null, failureCode: null, failureMeta: null });
   });
 
   it('keeps a code the caller supplied alongside its reason', async () => {
@@ -50,7 +50,7 @@ describe('BookRequestRepository.update', () => {
 
     await repo.update(7, {
       status: 'approved',
-      failureReason: 'nothing cleared the floor',
+      statusReason: 'nothing cleared the floor',
       failureCode: 'BELOW_SCORE_FLOOR',
       failureMeta: { floor: 80 },
     });
@@ -75,9 +75,9 @@ describe('BookRequestRepository.updateIf', () => {
     const db = makeDb();
     const repo = new BookRequestRepository(db as never);
 
-    await repo.updateIf(7, ['downloading'], { status: 'failed', failureReason: 'the tracker answered 406' });
+    await repo.updateIf(7, ['downloading'], { status: 'failed', statusReason: 'the tracker answered 406' });
 
-    expect(written(db)).toEqual({ status: 'failed', failureReason: 'the tracker answered 406', failureCode: null, failureMeta: null });
+    expect(written(db)).toEqual({ status: 'failed', statusReason: 'the tracker answered 406', failureCode: null, failureMeta: null });
   });
 
   it('resolves to the row it wrote when the status still held', async () => {

@@ -11,7 +11,7 @@ export type RequestOutcomeKind = 'progress' | 'failure' | 'settled' | 'waiting'
 /**
  * What went wrong, in the reader's language where the server classified it.
  *
- * `failureReason` is English prose written at the point of failure, and most of the paths that
+ * `statusReason` is English prose written at the point of failure, and most of the paths that
  * write it have never classified anything. Where a code is present it wins, because the prose was
  * only ever the fallback; where it is absent the prose is all there is, and showing English beats
  * showing nothing.
@@ -20,11 +20,11 @@ export type RequestOutcomeKind = 'progress' | 'failure' | 'settled' | 'waiting'
  * request, testable without standing up i18n.
  */
 export function requestFailureText(
-  request: Pick<BookRequestItem, 'failureReason' | 'failureCode' | 'failureMeta'>,
+  request: Pick<BookRequestItem, 'statusReason' | 'failureCode' | 'failureMeta'>,
   t: (key: string, named: Record<string, unknown>) => string,
 ): string | null {
   if (request.failureCode) return t(`bookRequests.handback.${request.failureCode}`, request.failureMeta ?? {})
-  return request.failureReason
+  return request.statusReason
 }
 
 export interface RequestOutcome {

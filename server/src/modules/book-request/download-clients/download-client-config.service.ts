@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, ConflictException, HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { isAbsolute as isPosixAbsolute } from 'path/posix';
 import type {
@@ -13,6 +13,7 @@ import type {
 } from '@bookorbit/types';
 import { DOWNLOAD_CLIENT_DELIVERY } from '@bookorbit/types';
 
+import { isUniqueViolation } from '../../../common/utils/db-error.utils';
 import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
 import { PrivateAddressException, ensureSafeUrl } from '../../../common/utils/ssrf.utils';
 import type { DownloadClientPathMappingRow, DownloadClientRow } from '../../../db/schema';
@@ -23,9 +24,6 @@ import { DownloadClientRegistry } from './download-client-registry';
 import { DownloadClientRepository, type DownloadClientWithMappings } from './download-client.repository';
 import { ADD_PATH_MAPPING_HINT, PathMappingService } from './path-mapping.service';
 import type { CreateDownloadClientDto, UpdateDownloadClientDto } from './dto/download-client.dto';
-
-/** Postgres unique_violation, raised by the case-insensitive unique index on `name`. */
-const UNIQUE_VIOLATION = '23505';
 
 /** Editing any of these changes how the adapter reaches the client, so its session must be dropped. */
 const CONNECTION_FIELDS = ['baseUrl', 'username', 'password', 'allowPrivateAddress', 'adapterType'] as const satisfies ReadonlyArray<
@@ -174,11 +172,21 @@ export class DownloadClientConfigService {
     this.logger.log(`[download_client.delete] [end] clientId=${id} - download client removed`);
   }
 
+  /**
+   * A test that ran and came back negative answers 502 rather than 200. The stored health stamp
+   * is written either way, so the card still shows what happened; what changes is that a script,
+   * a curl or a log line can no longer read a refused connection as a pass.
+   */
   async test(id: number): Promise<DownloadClientTestResult> {
     const config = await this.resolveConfig(id);
     const adapter = this.registry.require(config.adapterType);
     const result = await adapter.test(config);
-    await this.repo.recordTestResult(id, result.success, result.success ? null : (result.error ?? 'Unknown error'));
+    const reason = result.success ? null : (result.error ?? 'Unknown error');
+    await this.repo.recordTestResult(id, result.success, reason);
+
+    if (reason !== null) {
+      throw new BadGatewayException({ message: reason, errorCode: 'DOWNLOAD_CLIENT_TEST_FAILED', statusCode: HttpStatus.BAD_GATEWAY });
+    }
     return result;
   }
 
@@ -242,7 +250,7 @@ export class DownloadClientConfigService {
   }
 
   private translateUniqueViolation(error: unknown): unknown {
-    if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === UNIQUE_VIOLATION) {
+    if (isUniqueViolation(error)) {
       return new ConflictException({ message: 'A download client with this name already exists', errorCode: 'DOWNLOAD_CLIENT_NAME_TAKEN' });
     }
     return error;

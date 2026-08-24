@@ -57,6 +57,7 @@ const {
   excludeTagItems,
   includeGenreItems,
   excludeGenreItems,
+  seeOwnRequestedBooks,
   contentFiltersEnabled,
   loading,
   error,
@@ -475,6 +476,7 @@ async function handleSubmit() {
             v-model:exclude-tags="excludeTagItems"
             v-model:include-genres="includeGenreItems"
             v-model:exclude-genres="excludeGenreItems"
+            v-model:see-own-requested-books="seeOwnRequestedBooks"
             :is-edit="isEdit"
             :is-superuser-target="isSuperuserTarget"
             :selected="selectedPermissionNames"

@@ -172,7 +172,7 @@ describe('RequestSeedService.removeFromClient', () => {
     });
     expect(requests.updateIf).toHaveBeenCalledWith(7, expect.arrayContaining(['downloading']), {
       status: 'failed',
-      failureReason: expect.stringContaining('ann'),
+      statusReason: expect.stringContaining('ann'),
     });
     expect(gateway.emitChanged).toHaveBeenCalled();
   });

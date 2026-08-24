@@ -2,14 +2,30 @@ import { NotificationType, Permission } from '@bookorbit/types';
 
 import { BookRequestNotifier } from './book-request-notifier.service';
 
-function makeNotifier(interested: number[] = [3, 4], reachers: number[] = interested, libraryId: number | null = 5) {
+function makeNotifier(
+  interested: number[] = [3, 4],
+  reachers: number[] = interested,
+  libraryId: number | null = 5,
+  restricted: number[] = [],
+  exempt: number[] = [],
+) {
   const notifications = { notify: vi.fn().mockResolvedValue(undefined) };
   const repo = {
     findInterestedUserIds: vi.fn().mockResolvedValue(interested),
     findBookLibraryId: vi.fn().mockResolvedValue(libraryId),
   };
   const libraries = { findUserIdsWithAccess: vi.fn().mockResolvedValue(new Set(reachers)) };
-  return { notifier: new BookRequestNotifier(notifications as never, repo as never, libraries as never), notifications, repo, libraries };
+  const contentFilters = {
+    hasAnyContentFilters: vi.fn().mockResolvedValue(new Set(restricted)),
+    findExemptUserIds: vi.fn().mockResolvedValue(new Set(exempt)),
+  };
+  return {
+    notifier: new BookRequestNotifier(notifications as never, repo as never, libraries as never, contentFilters as never),
+    notifications,
+    repo,
+    libraries,
+    contentFilters,
+  };
 }
 
 const payload = { title: 'Book request download failed', message: '"Dune": the tracker went away' };
@@ -91,5 +107,23 @@ describe('BookRequestNotifier.notifyBookAvailable', () => {
     await notifier.notifyBookAvailable(7, 42, available);
 
     expect(notifications.notify).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ actionUrl: '/requests' }));
+  });
+});
+
+describe('BookRequestNotifier.notifyBookAvailable content restrictions', () => {
+  it('sends a restricted recipient to their request list, not to a book their rules hide', async () => {
+    const { notifier, notifications } = makeNotifier([3], [3], 5, [3], []);
+
+    await notifier.notifyBookAvailable(7, 55, payload);
+
+    expect(notifications.notify).toHaveBeenCalledWith(expect.objectContaining({ actionUrl: '/requests', scope: { kind: 'user', userId: 3 } }));
+  });
+
+  it('links a restricted recipient straight to the book when they are exempt for their own requests', async () => {
+    const { notifier, notifications } = makeNotifier([3], [3], 5, [3], [3]);
+
+    await notifier.notifyBookAvailable(7, 55, payload);
+
+    expect(notifications.notify).toHaveBeenCalledWith(expect.objectContaining({ actionUrl: '/book/55', scope: { kind: 'user', userId: 3 } }));
   });
 });

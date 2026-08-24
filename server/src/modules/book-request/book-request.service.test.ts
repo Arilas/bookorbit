@@ -62,7 +62,7 @@ function row(overrides: Record<string, unknown> = {}) {
     bookDockFileId: null,
     selfServe: false,
     fulfillerUserId: null,
-    failureReason: null,
+    statusReason: null,
     dedupeKey: 'work:dune:frankherbert:ebook',
     createdAt: new Date('2026-08-01T00:00:00Z'),
     updatedAt: new Date('2026-08-01T00:00:00Z'),
@@ -129,7 +129,11 @@ function makeService(
     ...overrides.libraryService,
   };
   const notifications = { notify: vi.fn().mockResolvedValue(undefined) };
-  const notifier = new BookRequestNotifier(notifications as never, repo as never, libraryService as never);
+  const contentFilterRepo = {
+    hasAnyContentFilters: vi.fn().mockResolvedValue(new Set<number>()),
+    findExemptUserIds: vi.fn().mockResolvedValue(new Set<number>()),
+  };
+  const notifier = new BookRequestNotifier(notifications as never, repo as never, libraryService as never, contentFilterRepo as never);
   const downloads = { findLatestForRequests: vi.fn().mockResolvedValue(new Map()), failInFlightForRequest: vi.fn().mockResolvedValue(0) };
 
   const automation = { considerRequest: vi.fn() };
@@ -547,7 +551,9 @@ describe('BookRequestService.submit', () => {
     const { service, repo, dedupe } = makeService({
       dedupe: { findActiveRequestFor: vi.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce(winner) },
     });
-    repo.create.mockRejectedValue(Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' }));
+    repo.create.mockRejectedValue(
+      new Error('Failed query', { cause: Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' }) }),
+    );
     repo.findById.mockResolvedValue(joined({ id: 7, userId: 2 }));
 
     const result = await service.submit(dto, user());
@@ -559,9 +565,10 @@ describe('BookRequestService.submit', () => {
 
   it('rethrows a unique violation that no live request explains', async () => {
     const { service, repo } = makeService();
-    repo.create.mockRejectedValue(Object.assign(new Error('duplicate key'), { code: '23505' }));
+    const violation = new Error('Failed query', { cause: Object.assign(new Error('duplicate key'), { code: '23505' }) });
+    repo.create.mockRejectedValue(violation);
 
-    await expect(service.submit(dto, user())).rejects.toThrow('duplicate key');
+    await expect(service.submit(dto, user())).rejects.toBe(violation);
   });
 
   it('rethrows any other database failure untouched', async () => {
@@ -672,16 +679,16 @@ describe('BookRequestService.cancel', () => {
     expect(repo.updateIf).toHaveBeenCalledWith(
       10,
       expect.anything(),
-      expect.objectContaining({ status: 'cancelled', failureReason: expect.stringContaining('connection refused') }),
+      expect.objectContaining({ status: 'cancelled', statusReason: expect.stringContaining('connection refused') }),
     );
   });
 
   it('clears a stale failure reason when the stop went cleanly', async () => {
-    const { service, repo } = makeService({ repo: { findById: vi.fn().mockResolvedValue(joined({ status: 'failed', failureReason: 'no seeds' })) } });
+    const { service, repo } = makeService({ repo: { findById: vi.fn().mockResolvedValue(joined({ status: 'failed', statusReason: 'no seeds' })) } });
 
     await service.cancel(10, user());
 
-    expect(repo.updateIf).toHaveBeenCalledWith(10, expect.anything(), expect.objectContaining({ failureReason: null }));
+    expect(repo.updateIf).toHaveBeenCalledWith(10, expect.anything(), expect.objectContaining({ statusReason: null }));
   });
 });
 
