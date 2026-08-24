@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import 'vue-router'
-import type { Permission } from '@bookorbit/types'
+import type { AuthMethod, Permission, ProvisioningMethod } from '@bookorbit/types'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
 
 declare module 'vue-router' {
@@ -9,6 +9,8 @@ declare module 'vue-router' {
     public?: boolean
     requiredPermission?: Permission
     forbiddenPermission?: Permission
+    forbiddenAuthMethod?: AuthMethod
+    forbiddenProvisioningMethod?: ProvisioningMethod
     permissionFallback?: string
     maxWidth?: string
     title?: string | ((to: RouteLocationNormalizedLoaded) => string)

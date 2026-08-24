@@ -53,6 +53,7 @@ describe('SettingsView shell', () => {
   })
 
   it.each([
+    ['settings-account-app-passwords', 'Dedicated credentials for apps and reading devices.'],
     ['settings-reader-fonts', 'Fonts available while reading.'],
     ['settings-libraries', 'Scan paths, watched folders, and ingest rules.'],
     ['settings-kobo', 'Sync endpoint, store proxy, and shelf mapping.'],

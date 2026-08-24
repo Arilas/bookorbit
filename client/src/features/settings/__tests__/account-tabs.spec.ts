@@ -4,11 +4,11 @@ import { ACCOUNT_TABS, normalizeAccountTab } from '../lib/account-tabs'
 describe('account-tabs', () => {
   describe('ACCOUNT_TABS', () => {
     it('contains the account settings tabs in display order', () => {
-      expect(ACCOUNT_TABS).toEqual(['profile', 'privacy', 'notifications', 'restrictions'])
+      expect(ACCOUNT_TABS).toEqual(['profile', 'app-passwords', 'privacy', 'notifications', 'restrictions'])
     })
 
     it('has length 4', () => {
-      expect(ACCOUNT_TABS.length).toBe(4)
+      expect(ACCOUNT_TABS.length).toBe(5)
     })
   })
 
@@ -39,6 +39,10 @@ describe('account-tabs', () => {
 
     it('returns notifications when given "notifications"', () => {
       expect(normalizeAccountTab('notifications')).toBe('notifications')
+    })
+
+    it('returns app-passwords when given "app-passwords"', () => {
+      expect(normalizeAccountTab('app-passwords')).toBe('app-passwords')
     })
 
     it('returns privacy when given "privacy"', () => {

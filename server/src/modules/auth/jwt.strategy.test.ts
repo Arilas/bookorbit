@@ -52,7 +52,28 @@ describe('JwtStrategy.validate', () => {
 
     const result = await strategy.validate({ sub: 1, ver: 2 });
     expect(result).toEqual(user);
-    expect(authService.validateUser).toHaveBeenCalledWith(1, 2);
+    expect(authService.validateUser).toHaveBeenCalledWith(1, 2, undefined, undefined);
+  });
+
+  it('passes the app-password credential id to user validation', async () => {
+    const { strategy, authService } = makeStrategy();
+    authService.validateUser.mockResolvedValue({ id: 1, username: 'jdoe' });
+
+    await strategy.validate({ sub: 1, ver: 2, am: 'app_password', aid: 17, sid: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10' });
+
+    expect(authService.validateUser).toHaveBeenCalledWith(1, 2, 17, '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10');
+  });
+
+  it.each([
+    { sub: 1, ver: 2, am: 'app_password' },
+    { sub: 1, ver: 2, aid: 17 },
+    { sub: 1, ver: 2, am: 'unknown', aid: 17 },
+    { sub: 1, ver: 2, am: 'app_password', aid: 17, sid: 'not-a-uuid' },
+  ])('rejects malformed authentication-method claims', async (payload) => {
+    const { strategy, authService } = makeStrategy();
+
+    await expect(strategy.validate(payload)).rejects.toThrow(UnauthorizedException);
+    expect(authService.validateUser).not.toHaveBeenCalled();
   });
 
   it('throws UnauthorizedException when validateUser returns null', async () => {

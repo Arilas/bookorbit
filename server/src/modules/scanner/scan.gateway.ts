@@ -23,7 +23,7 @@ import {
   type BookProgressChangedPayload,
 } from '../achievement/achievement-events.service';
 import { ScanJobStore } from './scan-job-store.service';
-import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { disconnectSocketAtTokenExpiry, rejectSocketConnection } from '../../common/utils/ws-auth.utils';
 
 @WebSocketGateway({ namespace: '/scan', cors: { credentials: true } })
 export class ScanGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleInit, OnModuleDestroy {
@@ -65,9 +65,12 @@ export class ScanGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     try {
       const token = client.handshake.auth?.token as string | undefined;
       if (!token) throw new UnauthorizedException('No token provided');
-      const payload = this.jwtService.verify<{ sub: number; ver: number }>(token, { algorithms: ['HS256'] });
-      const user = await this.authService.validateUser(payload.sub, payload.ver);
+      const payload = this.jwtService.verify<{ sub: number; ver: number; aid?: number; sid?: string; exp?: number }>(token, {
+        algorithms: ['HS256'],
+      });
+      const user = await this.authService.validateUser(payload.sub, payload.ver, payload.aid, payload.sid);
       if (!user) throw new UnauthorizedException('User not found or token revoked');
+      disconnectSocketAtTokenExpiry(client, payload.exp);
       (client.data as Record<string, unknown>).user = user;
       await client.join(`user:${user.id}`);
       this.logger.debug(`[scanner.ws_connection] [start] userId=${user.id} socketId=${client.id} - websocket connected`);

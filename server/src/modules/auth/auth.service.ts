@@ -13,7 +13,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { compare, hash } from 'bcryptjs';
-import { createHash, randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import '@fastify/cookie';
 import { and, count, eq, gt, isNull, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -40,6 +40,7 @@ import { OidcDiscoveryService } from './oidc/oidc-discovery.service';
 import { OidcSessionRepository } from './oidc/oidc-session.repository';
 import { MagicLinkRepository } from './magic-link.repository';
 import { AppSettingsService } from '../app-settings/app-settings.service';
+import { AppPasswordService } from './app-password.service';
 
 function parseDurationMs(duration: string): number {
   const match = duration.match(/^(\d+)([smhd])$/);
@@ -61,6 +62,16 @@ const ROTATION_CHAIN_MAX_HOPS = 5;
 const DUMMY_HASH = '$2a$12$LJ3m4ys3Lk0TSwHBbqP8b.3bFfR1oVDMhPzX8KPrPeuMEJBJJPa.G';
 
 class ConcurrentRotationError extends Error {}
+
+type TokenProfile =
+  | { authMethod: 'primary'; appPasswordId: null; appPasswordExpiresAt: null }
+  | { authMethod: 'app_password'; appPasswordId: number; appPasswordExpiresAt: Date };
+
+const PRIMARY_TOKEN_PROFILE: TokenProfile = {
+  authMethod: 'primary',
+  appPasswordId: null,
+  appPasswordExpiresAt: null,
+};
 
 function maskEmail(email: string): string {
   const at = email.indexOf('@');
@@ -92,6 +103,7 @@ export class AuthService {
     private readonly auditEvents: AuditEventsService,
     private readonly magicLinkRepo: MagicLinkRepository,
     private readonly appSettings: AppSettingsService,
+    private readonly appPasswordService: AppPasswordService,
     @Inject(DB) private readonly db: NodePgDatabase<typeof schema>,
   ) {}
 
@@ -232,9 +244,14 @@ export class AuthService {
     // probing usernames still gets the generic failure and learns nothing about which accounts exist.
     const passwordHash = user?.passwordHash ?? DUMMY_HASH;
     const isPasswordValid = await compare(dto.password, passwordHash);
-    if (!user || !user.active || !isPasswordValid) {
+    const isAppPasswordAttempt = dto.password.startsWith('boap_');
+    const appPassword =
+      user && user.active && !isPasswordValid && isAppPasswordAttempt ? await this.appPasswordService.verify(user.id, dto.password, ip) : null;
+    if (!user || !user.active || (!isPasswordValid && !appPassword)) {
       const newlyLockedUntil =
-        user && user.active && !isLockedOut ? await this.recordFailedLoginAttempt(user.id, user.failedLoginAttempts ?? 0, now) : null;
+        user && user.active && !isLockedOut && !isAppPasswordAttempt
+          ? await this.recordFailedLoginAttempt(user.id, user.failedLoginAttempts ?? 0, now)
+          : null;
       const lockedUntil = newlyLockedUntil ?? (isLockedOut ? (user?.lockedUntil ?? null) : null);
       this.logger.warn(
         `[auth.login] [fail]${user ? ` userId=${user.id}` : ''} username=${dto.username} ip=${ip ?? 'unknown'} errorClass=UnauthorizedException error="${lockedUntil ? 'account locked' : 'invalid credentials'}" - login failed`,
@@ -252,7 +269,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    if (isLockedOut && user.lockedUntil) {
+    if (!appPassword && isLockedOut && user.lockedUntil) {
       const retryAfterSeconds = Math.max(1, Math.ceil((user.lockedUntil.getTime() - now.getTime()) / 1000));
       this.logger.warn(
         `[auth.login] [fail] userId=${user.id} username=${dto.username} ip=${ip ?? 'unknown'} errorClass=UnauthorizedException error="account locked" - login failed`,
@@ -272,29 +289,39 @@ export class AuthService {
       });
     }
 
-    if ((user.failedLoginAttempts ?? 0) > 0 || user.lockedUntil) {
+    if (!appPassword && ((user.failedLoginAttempts ?? 0) > 0 || user.lockedUntil)) {
       await this.db.update(schema.users).set({ failedLoginAttempts: 0, lockedUntil: null }).where(eq(schema.users.id, user.id));
     }
 
     const fullUser = await this.userService.findByIdWithPermissions(user.id);
-    const { accessToken, rawRefreshToken } = await this.issueTokenPair(user.id, user.tokenVersion);
-    this.setRefreshCookie(reply, rawRefreshToken);
+    const tokenProfile: TokenProfile = appPassword
+      ? {
+          authMethod: 'app_password',
+          appPasswordId: appPassword.id,
+          appPasswordExpiresAt: appPassword.expiresAt,
+        }
+      : PRIMARY_TOKEN_PROFILE;
+    const { accessToken, rawRefreshToken, refreshExpiresAt } = await this.issueTokenPair(user.id, user.tokenVersion, tokenProfile);
+    this.setRefreshCookie(reply, rawRefreshToken, refreshExpiresAt);
     this.setAccessCookie(reply, accessToken);
 
-    this.logger.log(`[auth.login] [end] userId=${user.id} username=${user.username} ip=${ip ?? 'unknown'} - login completed`);
+    this.logger.log(
+      `[auth.login] [end] userId=${user.id} username=${user.username} authMethod=${tokenProfile.authMethod} ip=${ip ?? 'unknown'} - login completed`,
+    );
 
     this.auditEvents.emit(AUDIT_EVENT, {
       userId: user.id,
       actorUsername: user.username,
       action: AuditAction.AuthLogin,
-      description: `User '${user.username}' logged in`,
+      description: `User '${user.username}' logged in${appPassword ? ` with app password '${appPassword.label}'` : ''}`,
       ip,
+      meta: { authMethod: tokenProfile.authMethod, ...(appPassword ? { appPasswordId: appPassword.id } : {}) },
     });
 
-    return { accessToken, user: this.buildUserResponse(fullUser!) };
+    return { accessToken, user: this.buildUserResponse(fullUser!, tokenProfile.authMethod) };
   }
 
-  buildUserResponse(user: RequestUser) {
+  buildUserResponse(user: RequestUser, authMethod: RequestUser['authMethod'] = user.authMethod ?? 'primary') {
     return {
       id: user.id,
       username: user.username,
@@ -307,15 +334,16 @@ export class AuthService {
       avatarUrl: resolveUserAvatarUrl(user),
       provisioningMethod: user.provisioningMethod,
       permissions: user.isSuperuser ? ['*'] : user.permissions,
+      authMethod,
     };
   }
 
   async issueTokensForUser(userId: number, reply: FastifyReply) {
     const user = await this.userService.findByIdWithPermissions(userId);
     if (!user || !user.active) throw new UnauthorizedException();
-    const { accessToken, rawRefreshToken, refreshExpiresAt } = await this.issueTokenPair(userId, user.tokenVersion);
+    const { accessToken, rawRefreshToken, refreshExpiresAt } = await this.issueTokenPair(userId, user.tokenVersion, PRIMARY_TOKEN_PROFILE);
     await this.oidcSessionRepo.touchActiveByUserId(userId, refreshExpiresAt);
-    this.setRefreshCookie(reply, rawRefreshToken);
+    this.setRefreshCookie(reply, rawRefreshToken, refreshExpiresAt);
     this.setAccessCookie(reply, accessToken);
     return { accessToken, user: this.buildUserResponse(user) };
   }
@@ -334,23 +362,39 @@ export class AuthService {
       throw new UnauthorizedException();
     }
 
+    if (row.revokedAt && row.appPasswordId && !(await this.appPasswordService.findUsableById(row.userId, row.appPasswordId))) {
+      this.clearRefreshCookie(reply);
+      this.clearAccessCookie(reply);
+      throw new UnauthorizedException();
+    }
+
     if (row.revokedAt) {
       if (await this.isRecentRefreshRotationReuse(row)) {
-        return this.issueAccessOnlyForRefreshReuse(row.userId, reply);
+        return this.issueAccessOnlyForRefreshReuse(row, reply);
       }
 
       // Reuse of a revoked token outside a fresh rotation indicates possible theft.
-      // Revoke refresh sessions and bump tokenVersion to invalidate active access tokens.
+      // App-password replay is isolated to that credential. Primary-session replay is
+      // an account-level security event and revokes every credential.
       this.logger.warn(
-        `[auth.refresh] [fail] userId=${row.userId} errorClass=UnauthorizedException error="token revoked - reuse attempt" - refresh failed`,
+        `[auth.refresh] [fail] userId=${row.userId} authMethod=${row.appPasswordId ? 'app_password' : 'primary'} errorClass=UnauthorizedException error="token revoked - reuse attempt" - refresh failed`,
       );
-      await this.db.transaction(async (tx) => {
-        await tx
-          .update(schema.users)
-          .set({ tokenVersion: sql`${schema.users.tokenVersion} + 1` })
-          .where(eq(schema.users.id, row.userId));
-        await tx.delete(schema.refreshTokens).where(eq(schema.refreshTokens.userId, row.userId));
-      });
+      if (row.appPasswordId) {
+        await this.appPasswordService.revokeForRefreshReplay(row.appPasswordId);
+      } else {
+        await this.db.transaction(async (tx) => {
+          const revokedAt = new Date();
+          await tx
+            .update(schema.users)
+            .set({ tokenVersion: sql`${schema.users.tokenVersion} + 1` })
+            .where(eq(schema.users.id, row.userId));
+          await tx.delete(schema.refreshTokens).where(eq(schema.refreshTokens.userId, row.userId));
+          await tx
+            .update(schema.appPasswords)
+            .set({ revokedAt })
+            .where(and(eq(schema.appPasswords.userId, row.userId), isNull(schema.appPasswords.revokedAt)));
+        });
+      }
       this.clearRefreshCookie(reply);
       this.clearAccessCookie(reply);
       throw new UnauthorizedException();
@@ -362,12 +406,17 @@ export class AuthService {
       throw new UnauthorizedException();
     }
 
-    const userForToken = await this.assertUserCanRefresh(row.userId, reply);
+    const { user: userForToken, tokenProfile } = await this.assertUserCanRefresh(row, reply);
 
     // Rotate: revoke old, issue new. Guard against the SPA race where two requests
     // present the same (still-valid) refresh: the loser's UPDATE matches zero rows
     // and we treat it as a benign reuse of an already-rotated token.
-    const { accessToken, rawRefreshToken, refreshExpiresAt, refreshTokenHash } = this.createTokenPair(row.userId, userForToken.tokenVersion);
+    const { accessToken, rawRefreshToken, refreshExpiresAt, refreshTokenHash } = this.createTokenPair(
+      row.userId,
+      userForToken.tokenVersion,
+      tokenProfile,
+      row.sessionFamilyId,
+    );
 
     const rotatedAt = new Date();
     try {
@@ -379,7 +428,13 @@ export class AuthService {
         if ((updateResult.rowCount ?? 0) === 0) {
           throw new ConcurrentRotationError();
         }
-        await tx.insert(schema.refreshTokens).values({ userId: row.userId, tokenHash: refreshTokenHash, expiresAt: refreshExpiresAt });
+        await tx.insert(schema.refreshTokens).values({
+          userId: row.userId,
+          appPasswordId: row.appPasswordId,
+          sessionFamilyId: row.sessionFamilyId,
+          tokenHash: refreshTokenHash,
+          expiresAt: refreshExpiresAt,
+        });
         await tx
           .update(schema.users)
           .set({ lastAuthenticatedAt: rotatedAt, updatedAt: sql`${schema.users.updatedAt}` })
@@ -396,7 +451,7 @@ export class AuthService {
         });
         if (refreshedRow && (await this.isRecentRefreshRotationReuse(refreshedRow))) {
           this.logger.log(`[auth.refresh] [end] userId=${row.userId} reason="rotation-race-lost" - access-only refresh issued`);
-          return this.issueAccessOnlyForRefreshReuse(row.userId, reply);
+          return this.issueAccessOnlyForRefreshReuse(refreshedRow, reply);
         }
         // Concurrent non-rotation revoke = the user (logout) or an admin (disable/security)
         // just killed this specific session. Honor that intent: fail this refresh and clear
@@ -411,9 +466,13 @@ export class AuthService {
       }
       throw err;
     }
-    // touchActive must run outside the transaction (oidc sessions are best-effort sliding TTL).
-    await this.oidcSessionRepo.touchActiveByUserId(row.userId, refreshExpiresAt);
-    this.setRefreshCookie(reply, rawRefreshToken);
+    if (row.appPasswordId) {
+      await this.appPasswordService.markUsed(row.appPasswordId, req.ip);
+    } else {
+      // touchActive must run outside the transaction (oidc sessions are best-effort sliding TTL).
+      await this.oidcSessionRepo.touchActiveByUserId(row.userId, refreshExpiresAt);
+    }
+    this.setRefreshCookie(reply, rawRefreshToken, refreshExpiresAt);
     this.setAccessCookie(reply, accessToken);
 
     return { accessToken };
@@ -421,18 +480,32 @@ export class AuthService {
 
   async logout(req: FastifyRequest, reply: FastifyReply): Promise<{ logoutUrl?: string }> {
     let userId: number | undefined;
+    let appPasswordId: number | null = null;
 
     const rawToken: string | undefined = req.cookies?.refresh_token;
     if (rawToken) {
       const tokenHash = sha256(rawToken);
-      const row = await this.db.query.refreshTokens.findFirst({ where: eq(schema.refreshTokens.tokenHash, tokenHash) });
+      const row = await this.db.transaction(async (tx) => {
+        const revokedAt = new Date();
+        const [revokedRow] = await tx
+          .update(schema.refreshTokens)
+          .set({ revokedAt })
+          .where(eq(schema.refreshTokens.tokenHash, tokenHash))
+          .returning();
+        if (!revokedRow) return null;
+
+        await tx
+          .update(schema.refreshTokens)
+          .set({ revokedAt })
+          .where(and(eq(schema.refreshTokens.sessionFamilyId, revokedRow.sessionFamilyId), isNull(schema.refreshTokens.revokedAt)));
+        return revokedRow;
+      });
       if (row) {
         userId = row.userId;
-        this.logger.log(`[auth.logout] [end] userId=${row.userId} source=refresh_token - logout completed`);
-        await Promise.all([
-          this.userService.incrementTokenVersion(row.userId),
-          this.db.update(schema.refreshTokens).set({ revokedAt: new Date() }).where(eq(schema.refreshTokens.id, row.id)),
-        ]);
+        appPasswordId = row.appPasswordId;
+        this.logger.log(
+          `[auth.logout] [end] userId=${row.userId} authMethod=${appPasswordId ? 'app_password' : 'primary'} source=refresh_token - logout completed`,
+        );
       }
     }
 
@@ -448,11 +521,13 @@ export class AuthService {
           action: AuditAction.AuthLogout,
           description: `User '${loggedOutUser.username}' logged out`,
           ip: req.ip,
+          meta: { authMethod: appPasswordId ? 'app_password' : 'primary', ...(appPasswordId ? { appPasswordId } : {}) },
         });
       }
     }
 
     if (!userId) return {};
+    if (appPasswordId) return {};
 
     const oidcSession = await this.oidcSessionRepo.findActiveByUserId(userId);
     if (!oidcSession) return {};
@@ -494,17 +569,42 @@ export class AuthService {
     }
   }
 
-  async validateUser(userId: number, tokenVersion: number) {
+  async validateUser(userId: number, tokenVersion: number, appPasswordId?: number, sessionFamilyId?: string) {
     const user = await this.userService.findByIdWithPermissions(userId);
     if (!user || !user.active) throw new UnauthorizedException();
     if (user.tokenVersion !== tokenVersion) throw new UnauthorizedException();
+
+    if (sessionFamilyId) {
+      const activeSession = await this.db.query.refreshTokens.findFirst({
+        where: and(
+          eq(schema.refreshTokens.userId, userId),
+          eq(schema.refreshTokens.sessionFamilyId, sessionFamilyId),
+          appPasswordId ? eq(schema.refreshTokens.appPasswordId, appPasswordId) : isNull(schema.refreshTokens.appPasswordId),
+          isNull(schema.refreshTokens.revokedAt),
+          gt(schema.refreshTokens.expiresAt, new Date()),
+        ),
+        columns: { id: true },
+      });
+      if (!activeSession) throw new UnauthorizedException();
+    }
+
+    if (appPasswordId) {
+      const appPassword = await this.appPasswordService.findUsableById(userId, appPasswordId);
+      if (!appPassword) throw new UnauthorizedException();
+      return {
+        ...user,
+        authMethod: 'app_password' as const,
+        appPasswordId,
+        ...(sessionFamilyId ? { sessionFamilyId } : {}),
+      };
+    }
 
     if (user.provisioningMethod === 'shared') {
       const hasActive = await this.magicLinkRepo.hasActiveByUserId(userId);
       if (!hasActive) throw new UnauthorizedException();
     }
 
-    return user;
+    return { ...user, authMethod: 'primary' as const, ...(sessionFamilyId ? { sessionFamilyId } : {}) };
   }
 
   async revokeAllUserSessions(userId: number) {
@@ -522,18 +622,40 @@ export class AuthService {
 
   async getSessions(userId: number) {
     const rows = await this.db.query.refreshTokens.findMany({
-      where: and(eq(schema.refreshTokens.userId, userId), isNull(schema.refreshTokens.revokedAt), gt(schema.refreshTokens.expiresAt, new Date())),
+      where: and(
+        eq(schema.refreshTokens.userId, userId),
+        isNull(schema.refreshTokens.appPasswordId),
+        isNull(schema.refreshTokens.revokedAt),
+        gt(schema.refreshTokens.expiresAt, new Date()),
+      ),
     });
     return rows.map(({ id, createdAt, expiresAt }) => ({ id, createdAt, expiresAt }));
   }
 
   async revokeSession(userId: number, sessionId: number) {
-    const row = await this.db.query.refreshTokens.findFirst({
-      where: eq(schema.refreshTokens.id, sessionId),
+    const revoked = await this.db.transaction(async (tx) => {
+      const revokedAt = new Date();
+      const [revokedRow] = await tx
+        .update(schema.refreshTokens)
+        .set({ revokedAt })
+        .where(and(eq(schema.refreshTokens.id, sessionId), eq(schema.refreshTokens.userId, userId)))
+        .returning();
+      if (!revokedRow) return null;
+
+      await tx
+        .update(schema.refreshTokens)
+        .set({ revokedAt })
+        .where(and(eq(schema.refreshTokens.sessionFamilyId, revokedRow.sessionFamilyId), isNull(schema.refreshTokens.revokedAt)));
+      return revokedRow;
     });
-    if (!row) throw new NotFoundException('Session not found');
-    if (row.userId !== userId) throw new ForbiddenException('You do not have access to this session');
-    await this.db.update(schema.refreshTokens).set({ revokedAt: new Date() }).where(eq(schema.refreshTokens.id, sessionId));
+    if (revoked) return;
+
+    const existing = await this.db.query.refreshTokens.findFirst({
+      where: eq(schema.refreshTokens.id, sessionId),
+      columns: { userId: true },
+    });
+    if (!existing) throw new NotFoundException('Session not found');
+    throw new ForbiddenException('You do not have access to this session');
   }
 
   async forgotPassword(dto: ForgotPasswordDto, ip?: string): Promise<void> {
@@ -594,6 +716,7 @@ export class AuthService {
     }
 
     const passwordHash = await hash(dto.newPassword, 12);
+    const revokedAt = new Date();
 
     await this.db.transaction(async (tx) => {
       await tx
@@ -607,12 +730,16 @@ export class AuthService {
         })
         .where(eq(schema.users.id, row.userId));
 
-      await tx.update(schema.passwordResetTokens).set({ usedAt: new Date() }).where(eq(schema.passwordResetTokens.id, row.id));
+      await tx.update(schema.passwordResetTokens).set({ usedAt: revokedAt }).where(eq(schema.passwordResetTokens.id, row.id));
 
       await tx
         .update(schema.refreshTokens)
-        .set({ revokedAt: new Date() })
+        .set({ revokedAt })
         .where(and(eq(schema.refreshTokens.userId, row.userId), isNull(schema.refreshTokens.revokedAt)));
+      await tx
+        .update(schema.appPasswords)
+        .set({ revokedAt })
+        .where(and(eq(schema.appPasswords.userId, row.userId), isNull(schema.appPasswords.revokedAt)));
     });
 
     this.auditEvents.emit(AUDIT_EVENT, {
@@ -642,6 +769,7 @@ export class AuthService {
     if (!valid) throw new UnauthorizedException('Current password is incorrect');
 
     const passwordHash = await hash(dto.newPassword, 12);
+    const revokedAt = new Date();
 
     await this.db.transaction(async (tx) => {
       await tx
@@ -657,8 +785,12 @@ export class AuthService {
 
       await tx
         .update(schema.refreshTokens)
-        .set({ revokedAt: new Date() })
+        .set({ revokedAt })
         .where(and(eq(schema.refreshTokens.userId, userId), isNull(schema.refreshTokens.revokedAt)));
+      await tx
+        .update(schema.appPasswords)
+        .set({ revokedAt })
+        .where(and(eq(schema.appPasswords.userId, userId), isNull(schema.appPasswords.revokedAt)));
     });
 
     this.clearRefreshCookie(reply);
@@ -673,16 +805,28 @@ export class AuthService {
     });
   }
 
-  getRefreshTokenExpiryDate(baseDate = new Date()) {
-    return new Date(baseDate.getTime() + parseDurationMs(this.config.get<string>('auth.jwtRefreshExpiresIn') ?? '7d'));
+  getRefreshTokenExpiryDate(baseDate = new Date(), tokenProfile: TokenProfile = PRIMARY_TOKEN_PROFILE) {
+    const configuredDuration =
+      tokenProfile.authMethod === 'app_password'
+        ? (this.config.get<string>('auth.appPasswordRefreshExpiresIn') ?? '90d')
+        : (this.config.get<string>('auth.jwtRefreshExpiresIn') ?? '7d');
+    const configuredExpiry = new Date(baseDate.getTime() + parseDurationMs(configuredDuration));
+    if (tokenProfile.authMethod === 'primary') return configuredExpiry;
+    return tokenProfile.appPasswordExpiresAt < configuredExpiry ? tokenProfile.appPasswordExpiresAt : configuredExpiry;
   }
 
-  private async issueTokenPair(userId: number, tokenVersion: number) {
-    const pair = this.createTokenPair(userId, tokenVersion);
+  private async issueTokenPair(userId: number, tokenVersion: number, tokenProfile: TokenProfile = PRIMARY_TOKEN_PROFILE) {
+    const pair = this.createTokenPair(userId, tokenVersion, tokenProfile);
     const authenticatedAt = new Date();
 
     await this.db.transaction(async (tx) => {
-      await tx.insert(schema.refreshTokens).values({ userId, tokenHash: pair.refreshTokenHash, expiresAt: pair.refreshExpiresAt });
+      await tx.insert(schema.refreshTokens).values({
+        userId,
+        appPasswordId: tokenProfile.appPasswordId,
+        sessionFamilyId: pair.refreshSessionFamilyId,
+        tokenHash: pair.refreshTokenHash,
+        expiresAt: pair.refreshExpiresAt,
+      });
       await tx
         .update(schema.users)
         .set({ lastLoginAt: authenticatedAt, lastAuthenticatedAt: authenticatedAt, updatedAt: sql`${schema.users.updatedAt}` })
@@ -692,14 +836,29 @@ export class AuthService {
     return pair;
   }
 
-  private createTokenPair(userId: number, tokenVersion: number) {
-    const accessToken = this.jwtService.sign({ sub: userId, ver: tokenVersion });
+  private createTokenPair(
+    userId: number,
+    tokenVersion: number,
+    tokenProfile: TokenProfile = PRIMARY_TOKEN_PROFILE,
+    sessionFamilyId: string = randomUUID(),
+  ) {
+    const payload =
+      tokenProfile.authMethod === 'app_password'
+        ? { sub: userId, ver: tokenVersion, am: 'app_password' as const, aid: tokenProfile.appPasswordId, sid: sessionFamilyId }
+        : { sub: userId, ver: tokenVersion, sid: sessionFamilyId };
+    const accessToken = this.jwtService.sign(payload);
 
     const rawRefreshToken = randomBytes(32).toString('hex');
     const tokenHash = sha256(rawRefreshToken);
-    const expiresAt = this.getRefreshTokenExpiryDate();
+    const expiresAt = this.getRefreshTokenExpiryDate(new Date(), tokenProfile);
 
-    return { accessToken, rawRefreshToken, refreshExpiresAt: expiresAt, refreshTokenHash: tokenHash };
+    return {
+      accessToken,
+      rawRefreshToken,
+      refreshExpiresAt: expiresAt,
+      refreshTokenHash: tokenHash,
+      refreshSessionFamilyId: sessionFamilyId,
+    };
   }
 
   private getRefreshRotationGraceMs(): number {
@@ -727,7 +886,7 @@ export class AuthService {
       const next: typeof schema.refreshTokens.$inferSelect | undefined = await this.db.query.refreshTokens.findFirst({
         where: eq(schema.refreshTokens.tokenHash, nextHash),
       });
-      if (!next || next.userId !== row.userId || next.expiresAt < new Date()) return false;
+      if (!next || next.userId !== row.userId || next.appPasswordId !== row.appPasswordId || next.expiresAt < new Date()) return false;
       if (!next.revokedAt) return true;
       // Revoked-but-rotated link: keep walking. Revoked-without-rotation means logout/security revoke.
       if (!next.rotatedAt || !next.replacedByTokenHash) return false;
@@ -736,7 +895,8 @@ export class AuthService {
     return false;
   }
 
-  private async assertUserCanRefresh(userId: number, reply: FastifyReply) {
+  private async assertUserCanRefresh(row: typeof schema.refreshTokens.$inferSelect, reply: FastifyReply) {
+    const userId = row.userId;
     const userForToken = await this.db.query.users.findFirst({ where: eq(schema.users.id, userId) });
     if (!userForToken) throw new UnauthorizedException();
     if (!userForToken.active) {
@@ -755,18 +915,52 @@ export class AuthService {
         throw new UnauthorizedException();
       }
     }
-    return userForToken;
+
+    if (!row.appPasswordId) {
+      return { user: userForToken, tokenProfile: PRIMARY_TOKEN_PROFILE };
+    }
+
+    const appPassword = await this.appPasswordService.findUsableById(userId, row.appPasswordId);
+    if (!appPassword) {
+      this.logger.warn(
+        `[auth.refresh] [fail] userId=${userId} appPasswordId=${row.appPasswordId} errorClass=UnauthorizedException error="app password unavailable" - refresh failed`,
+      );
+      this.clearRefreshCookie(reply);
+      this.clearAccessCookie(reply);
+      throw new UnauthorizedException();
+    }
+
+    return {
+      user: userForToken,
+      tokenProfile: {
+        authMethod: 'app_password',
+        appPasswordId: appPassword.id,
+        appPasswordExpiresAt: appPassword.expiresAt,
+      } satisfies TokenProfile,
+    };
   }
 
-  private async issueAccessOnlyForRefreshReuse(userId: number, reply: FastifyReply) {
-    const userForToken = await this.assertUserCanRefresh(userId, reply);
-    const accessToken = this.jwtService.sign({ sub: userId, ver: userForToken.tokenVersion });
+  private async issueAccessOnlyForRefreshReuse(row: typeof schema.refreshTokens.$inferSelect, reply: FastifyReply) {
+    const { user: userForToken, tokenProfile } = await this.assertUserCanRefresh(row, reply);
+    const payload =
+      tokenProfile.authMethod === 'app_password'
+        ? {
+            sub: row.userId,
+            ver: userForToken.tokenVersion,
+            am: 'app_password' as const,
+            aid: tokenProfile.appPasswordId,
+            sid: row.sessionFamilyId,
+          }
+        : { sub: row.userId, ver: userForToken.tokenVersion, sid: row.sessionFamilyId };
+    const accessToken = this.jwtService.sign(payload);
     await this.db
       .update(schema.users)
       .set({ lastAuthenticatedAt: new Date(), updatedAt: sql`${schema.users.updatedAt}` })
-      .where(eq(schema.users.id, userId));
+      .where(eq(schema.users.id, row.userId));
     this.setAccessCookie(reply, accessToken);
-    this.logger.log(`[auth.refresh] [end] userId=${userId} reason="rotation-race" - access-only refresh issued`);
+    this.logger.log(
+      `[auth.refresh] [end] userId=${row.userId} authMethod=${tokenProfile.authMethod} reason="rotation-race" - access-only refresh issued`,
+    );
     return { accessToken };
   }
 
@@ -797,9 +991,8 @@ export class AuthService {
     return lockedUntil;
   }
 
-  private setRefreshCookie(reply: FastifyReply, rawToken: string) {
-    const ttlSeconds = parseDurationMs(this.config.get<string>('auth.jwtRefreshExpiresIn') ?? '7d') / 1000;
-
+  private setRefreshCookie(reply: FastifyReply, rawToken: string, expiresAt: Date) {
+    const ttlSeconds = Math.max(0, Math.ceil((expiresAt.getTime() - Date.now()) / 1000));
     reply.setCookie('refresh_token', rawToken, {
       httpOnly: true,
       sameSite: 'strict',

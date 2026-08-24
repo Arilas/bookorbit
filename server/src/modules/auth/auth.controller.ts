@@ -23,6 +23,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Auditable } from '../../common/decorators/auditable.decorator';
 import { ForbidPermission } from '../../common/decorators/forbid-permission.decorator';
 import { Public } from '../../common/decorators/public.decorator';
+import { RequirePrimaryAuthentication } from '../../common/decorators/require-primary-authentication.decorator';
 import type { RequestUser } from '../../common/types/request-user';
 import { AuthService } from './auth.service';
 import { MagicLinkService } from './magic-link.service';
@@ -100,11 +101,13 @@ export class AuthController {
   }
 
   @Get('sessions')
+  @RequirePrimaryAuthentication()
   getSessions(@CurrentUser() user: RequestUser) {
     return this.authService.getSessions(user.id);
   }
 
   @Delete('sessions/:id')
+  @RequirePrimaryAuthentication()
   @HttpCode(HttpStatus.NO_CONTENT)
   @Auditable({
     action: AuditAction.AuthSessionRevoke,
@@ -133,6 +136,7 @@ export class AuthController {
   }
 
   @Post('change-password')
+  @RequirePrimaryAuthentication()
   @HttpCode(HttpStatus.NO_CONTENT)
   @AllowDefaultPassword()
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot edit account settings')
@@ -172,6 +176,7 @@ export class AuthController {
 
   @Throttle({ default: { limit: 5, ttl: ONE_MINUTE_MS } })
   @Post('oidc/:slug/link-state')
+  @RequirePrimaryAuthentication()
   @HttpCode(HttpStatus.OK)
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot edit account settings')
   oidcGenerateLinkState(@CurrentUser() user: RequestUser, @Param('slug') slug: string) {
@@ -180,17 +185,20 @@ export class AuthController {
 
   @Throttle({ default: { limit: 5, ttl: ONE_MINUTE_MS } })
   @Post('oidc/:slug/preview-state')
+  @RequirePrimaryAuthentication()
   @HttpCode(HttpStatus.OK)
   oidcGeneratePreviewState(@Param('slug') slug: string) {
     return this.oidcService.generatePreviewState(slug);
   }
 
   @Get('oidc/identities')
+  @RequirePrimaryAuthentication()
   oidcGetIdentities(@CurrentUser() user: RequestUser) {
     return this.oidcService.getLinkedIdentities(user.id);
   }
 
   @Delete('oidc/identities/:providerId')
+  @RequirePrimaryAuthentication()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot edit account settings')
   oidcUnlinkIdentity(@CurrentUser() user: RequestUser, @Param('providerId', ParseIntPipe) providerId: number, @Body() dto: OidcUnlinkDto) {
@@ -198,12 +206,14 @@ export class AuthController {
   }
 
   @Post('magic-links')
+  @RequirePrimaryAuthentication()
   @Throttle({ default: { limit: 5, ttl: ONE_MINUTE_MS } })
   createMagicLink(@CurrentUser() user: RequestUser, @Body() dto: CreateMagicLinkDto) {
     return this.magicLinkService.createToken(user, dto);
   }
 
   @Get('magic-links')
+  @RequirePrimaryAuthentication()
   listMagicLinks(@CurrentUser() user: RequestUser) {
     if (!user.isSuperuser) {
       throw new ForbiddenException('Only superusers can view magic links');
@@ -212,12 +222,14 @@ export class AuthController {
   }
 
   @Patch('magic-links/:id')
+  @RequirePrimaryAuthentication()
   @HttpCode(HttpStatus.OK)
   updateMagicLink(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number, @Body() dto: UpdateMagicLinkDto) {
     return this.magicLinkService.setActive(user, id, dto.isActive);
   }
 
   @Delete('magic-links/:id')
+  @RequirePrimaryAuthentication()
   @HttpCode(HttpStatus.NO_CONTENT)
   revokeMagicLink(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number) {
     return this.magicLinkService.revokeToken(user, id);

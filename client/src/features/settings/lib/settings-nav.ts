@@ -37,12 +37,14 @@ import {
   Wrench,
   Zap,
 } from '@lucide/vue'
-import { Permission } from '@bookorbit/types'
+import { Permission, ProvisioningMethod, type AuthMethod } from '@bookorbit/types'
 
 export interface SettingsNavContext {
   isSuperuser: boolean
   permissions: readonly string[]
   isDemoRestricted: boolean
+  authMethod?: AuthMethod
+  provisioningMethod?: ProvisioningMethod
 }
 
 export interface SettingsNavItem {
@@ -85,6 +87,16 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
         descriptionKey: 'settings.nav.descriptions.profile',
         icon: User,
         keywords: 'password email avatar username sessions sign out security',
+      },
+      {
+        id: 'app-passwords',
+        routeName: 'settings-account-app-passwords',
+        labelKey: 'settings.account.tabs.app-passwords',
+        descriptionKey: 'settings.nav.descriptions.appPasswords',
+        icon: KeyRound,
+        keywords: 'application password app device client long session token koreader',
+        isVisible: (context) =>
+          !context.isDemoRestricted && context.authMethod !== 'app_password' && context.provisioningMethod !== ProvisioningMethod.Shared,
       },
       {
         id: 'appearance',

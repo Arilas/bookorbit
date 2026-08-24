@@ -11,6 +11,8 @@ vi.mock('bcryptjs', () => ({
 import { AuthService } from './auth.service';
 
 function makeDb(overrides?: Record<string, unknown>) {
+  const returning = vi.fn().mockResolvedValue([]);
+  const where = vi.fn().mockImplementation(() => Object.assign(Promise.resolve({ rowCount: 1 }), { returning }));
   const db: Record<string, unknown> = {
     query: {
       appSettings: { findFirst: vi.fn() },
@@ -23,12 +25,12 @@ function makeDb(overrides?: Record<string, unknown>) {
     insert: vi.fn().mockReturnThis(),
     values: vi.fn().mockReturnThis(),
     onConflictDoNothing: vi.fn().mockReturnThis(),
-    returning: vi.fn().mockResolvedValue([]),
+    returning,
     select: vi.fn().mockReturnThis(),
     from: vi.fn().mockResolvedValue([{ total: 0 }]),
     update: vi.fn().mockReturnThis(),
     set: vi.fn().mockReturnThis(),
-    where: vi.fn().mockResolvedValue({ rowCount: 1 }),
+    where,
     delete: vi.fn().mockReturnThis(),
     transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
   };
@@ -79,6 +81,7 @@ function makeService(dbOverrides?: Record<string, unknown>) {
   const config = {
     get: vi.fn().mockImplementation((key: string) => {
       if (key === 'auth.jwtRefreshExpiresIn') return '7d';
+      if (key === 'auth.appPasswordRefreshExpiresIn') return '90d';
       if (key === 'auth.jwtExpiresIn') return '15m';
       if (key === 'app.nodeEnv') return 'test';
       if (key === 'auth.setupBootstrapToken') return 'bootstrap-token';
@@ -109,6 +112,14 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     countActiveByUserId: vi.fn().mockResolvedValue(0),
   };
 
+  const appPasswordService = {
+    verify: vi.fn().mockResolvedValue(null),
+    findUsableById: vi.fn().mockResolvedValue(null),
+    markUsed: vi.fn().mockResolvedValue(undefined),
+    revokeForRefreshReplay: vi.fn().mockResolvedValue(undefined),
+    revokeAllForUser: vi.fn().mockResolvedValue(undefined),
+  };
+
   const service = new AuthService(
     userService as never,
     jwtService as never,
@@ -119,10 +130,23 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     { emit: vi.fn() } as never,
     magicLinkRepo as never,
     appSettings as never,
+    appPasswordService as never,
     db,
   );
 
-  return { service, db, userService, jwtService, config, systemMailService, appSettings, oidcSessionRepo, oidcDiscovery, magicLinkRepo };
+  return {
+    service,
+    db,
+    userService,
+    jwtService,
+    config,
+    systemMailService,
+    appSettings,
+    oidcSessionRepo,
+    oidcDiscovery,
+    magicLinkRepo,
+    appPasswordService,
+  };
 }
 
 describe('AuthService', () => {
@@ -419,6 +443,58 @@ describe('AuthService', () => {
       });
 
       await expect(service.login({ username: 'jdoe', password: 'wrongpass' }, makeReply())).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('does not apply primary-password lockout counters to invalid app-password attempts', async () => {
+      const { service, db, userService, appPasswordService } = makeService();
+      userService.findByUsername.mockResolvedValue({
+        id: 1,
+        username: 'jdoe',
+        active: true,
+        passwordHash: 'mock-hash:primary-password',
+        tokenVersion: 1,
+        failedLoginAttempts: 3,
+        lockedUntil: null,
+      });
+
+      await expect(service.login({ username: 'jdoe', password: 'boap_invalid' }, makeReply(), '127.0.0.1')).rejects.toThrow(UnauthorizedException);
+
+      expect(appPasswordService.verify).toHaveBeenCalledWith(1, 'boap_invalid', '127.0.0.1');
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it('issues an app-bound access token and longer refresh session for a valid app password', async () => {
+      const { service, db, userService, jwtService, appPasswordService } = makeService();
+      const reply = makeReply();
+      const credentialExpiresAt = new Date(Date.now() + 300 * 24 * 60 * 60 * 1000);
+      userService.findByUsername.mockResolvedValue({
+        id: 1,
+        username: 'jdoe',
+        active: true,
+        passwordHash: 'mock-hash:primary-password',
+        tokenVersion: 4,
+        failedLoginAttempts: 2,
+        lockedUntil: new Date(Date.now() + 60_000),
+      });
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
+      appPasswordService.verify.mockResolvedValue({ id: 17, label: 'KOReader', expiresAt: credentialExpiresAt });
+
+      const result = await service.login({ username: 'jdoe', password: 'boap_selector_secret' }, reply, '127.0.0.1');
+
+      expect(result.user.authMethod).toBe('app_password');
+      expect(jwtService.sign).toHaveBeenCalledWith(expect.objectContaining({ sub: 1, ver: 4, am: 'app_password', aid: 17, sid: expect.any(String) }));
+      expect((db as unknown as { values: vi.Mock }).values).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 1,
+          appPasswordId: 17,
+          tokenHash: expect.any(String),
+          expiresAt: expect.any(Date),
+        }),
+      );
+      const refreshCookie = (reply as unknown as { setCookie: vi.Mock }).setCookie.mock.calls.find(([name]) => name === 'refresh_token');
+      expect(refreshCookie?.[2].maxAge).toBeGreaterThan(89 * 24 * 60 * 60);
+      expect(refreshCookie?.[2].maxAge).toBeLessThanOrEqual(90 * 24 * 60 * 60);
+      expect((db as unknown as Record<string, vi.Mock>).set).not.toHaveBeenCalledWith({ failedLoginAttempts: 0, lockedUntil: null });
     });
 
     it('rejects login attempts while account is locked', async () => {
@@ -1086,6 +1162,75 @@ describe('AuthService', () => {
       expect(oidcSessionRepo.touchActiveByUserId).toHaveBeenCalledWith(5, expect.any(Date));
       expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalled();
     });
+
+    it('preserves the app-password binding and longer window across refresh rotation', async () => {
+      const { service, db, jwtService, oidcSessionRepo, appPasswordService } = makeService();
+      const reply = makeReply();
+      const appPasswordExpiresAt = new Date(Date.now() + 300 * 24 * 60 * 60 * 1000);
+      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
+        id: 11,
+        userId: 5,
+        appPasswordId: 17,
+        sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
+        id: 5,
+        tokenVersion: 2,
+        active: true,
+        provisioningMethod: 'local',
+      });
+      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt: appPasswordExpiresAt });
+      const request = makeRequest({ refresh_token: 'app-token' }) as unknown as { ip: string };
+      request.ip = '127.0.0.1';
+
+      await expect(service.refresh(request as never, reply)).resolves.toEqual({ accessToken: 'signed-jwt' });
+
+      expect(jwtService.sign).toHaveBeenCalledWith({
+        sub: 5,
+        ver: 2,
+        am: 'app_password',
+        aid: 17,
+        sid: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
+      });
+      expect((db as unknown as { values: vi.Mock }).values).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 5,
+          appPasswordId: 17,
+          sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
+          expiresAt: expect.any(Date),
+        }),
+      );
+      expect(appPasswordService.markUsed).toHaveBeenCalledWith(17, '127.0.0.1');
+      expect(oidcSessionRepo.touchActiveByUserId).not.toHaveBeenCalled();
+      const refreshCookie = (reply as unknown as { setCookie: vi.Mock }).setCookie.mock.calls.find(([name]) => name === 'refresh_token');
+      expect(refreshCookie?.[2].maxAge).toBeGreaterThan(89 * 24 * 60 * 60);
+      expect(refreshCookie?.[2].maxAge).toBeLessThanOrEqual(90 * 24 * 60 * 60);
+    });
+
+    it('isolates refresh replay response to the affected app password', async () => {
+      const { service, db, appPasswordService, userService } = makeService();
+      const reply = makeReply();
+      const row = {
+        id: 11,
+        userId: 5,
+        appPasswordId: 17,
+        revokedAt: new Date(Date.now() - 60_000),
+        rotatedAt: new Date(Date.now() - 60_000),
+        replacedByTokenHash: 'replacement-hash',
+        expiresAt: new Date(Date.now() + 60_000),
+      };
+      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue(row);
+      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt: new Date(Date.now() + 60_000) });
+
+      await expect(service.refresh(makeRequest({ refresh_token: 'replayed-app-token' }), reply)).rejects.toThrow(UnauthorizedException);
+
+      expect(appPasswordService.revokeForRefreshReplay).toHaveBeenCalledWith(17);
+      expect(appPasswordService.revokeAllForUser).not.toHaveBeenCalled();
+      expect(userService.incrementTokenVersion).not.toHaveBeenCalled();
+      expect(db.delete).not.toHaveBeenCalled();
+    });
   });
 
   describe('validateUser', () => {
@@ -1116,7 +1261,22 @@ describe('AuthService', () => {
       userService.findByIdWithPermissions.mockResolvedValue(user);
 
       const result = await service.validateUser(1, 2);
-      expect(result).toEqual(user);
+      expect(result).toEqual({ ...user, authMethod: 'primary' });
+    });
+
+    it('requires a live refresh-token family for session-bound access tokens', async () => {
+      const { service, db, userService } = makeService();
+      const user = makeFullUser({ tokenVersion: 2 });
+      userService.findByIdWithPermissions.mockResolvedValue(user);
+      const findSession = (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst;
+      findSession.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 44 });
+
+      await expect(service.validateUser(1, 2, undefined, '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10')).rejects.toThrow(UnauthorizedException);
+      await expect(service.validateUser(1, 2, undefined, '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10')).resolves.toEqual({
+        ...user,
+        authMethod: 'primary',
+        sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
+      });
     });
 
     it('throws UnauthorizedException for shared user with no active magic links', async () => {
@@ -1134,7 +1294,24 @@ describe('AuthService', () => {
       magicLinkRepo.hasActiveByUserId.mockResolvedValue(true);
 
       const result = await service.validateUser(1, 2);
-      expect(result).toEqual(user);
+      expect(result).toEqual({ ...user, authMethod: 'primary' });
+    });
+
+    it('returns app-password authentication context for a usable credential', async () => {
+      const { service, userService, appPasswordService } = makeService();
+      const user = makeFullUser({ tokenVersion: 2 });
+      userService.findByIdWithPermissions.mockResolvedValue(user);
+      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt: new Date(Date.now() + 60_000) });
+
+      await expect(service.validateUser(1, 2, 17)).resolves.toEqual({ ...user, authMethod: 'app_password', appPasswordId: 17 });
+    });
+
+    it('rejects an access token after its app password is revoked or expired', async () => {
+      const { service, userService, appPasswordService } = makeService();
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 2 }));
+      appPasswordService.findUsableById.mockResolvedValue(null);
+
+      await expect(service.validateUser(1, 2, 17)).rejects.toThrow(UnauthorizedException);
     });
   });
 
@@ -1489,7 +1666,9 @@ describe('AuthService', () => {
 
     it('revokes OIDC session and returns empty object when OIDC is disabled', async () => {
       const { service, db, userService, appSettings, oidcSessionRepo } = makeService();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({ id: 1, userId: 5 });
+      (db as unknown as { returning: vi.Mock }).returning.mockResolvedValue([
+        { id: 1, userId: 5, appPasswordId: null, sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10' },
+      ]);
       userService.incrementTokenVersion.mockResolvedValue(undefined);
       appSettings.getOidcConfig.mockResolvedValue({ enabled: false });
       oidcSessionRepo.findActiveByUserId.mockResolvedValue({
@@ -1503,7 +1682,9 @@ describe('AuthService', () => {
 
     it('revokes OIDC session even when there is no id token hint', async () => {
       const { service, db, userService, oidcSessionRepo } = makeService();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({ id: 1, userId: 6 });
+      (db as unknown as { returning: vi.Mock }).returning.mockResolvedValue([
+        { id: 1, userId: 6, appPasswordId: null, sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10' },
+      ]);
       userService.incrementTokenVersion.mockResolvedValue(undefined);
       oidcSessionRepo.findActiveByUserId.mockResolvedValue({
         idTokenHint: null,
@@ -1516,7 +1697,9 @@ describe('AuthService', () => {
 
     it('returns logout URL when OIDC end-session endpoint is available', async () => {
       const { service, db, userService, oidcSessionRepo, oidcDiscovery } = makeService();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({ id: 1, userId: 7 });
+      (db as unknown as { returning: vi.Mock }).returning.mockResolvedValue([
+        { id: 1, userId: 7, appPasswordId: null, sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10' },
+      ]);
       userService.incrementTokenVersion.mockResolvedValue(undefined);
       (db.query as never as Record<string, Record<string, vi.Mock>>).oidcProviders.findFirst.mockResolvedValue({
         id: 1,
@@ -1548,7 +1731,9 @@ describe('AuthService', () => {
 
     it('revokes OIDC session and returns empty object when end-session endpoint is missing', async () => {
       const { service, db, userService, oidcSessionRepo, oidcDiscovery } = makeService();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({ id: 1, userId: 8 });
+      (db as unknown as { returning: vi.Mock }).returning.mockResolvedValue([
+        { id: 1, userId: 8, appPasswordId: null, sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10' },
+      ]);
       userService.incrementTokenVersion.mockResolvedValue(undefined);
       (db.query as never as Record<string, Record<string, vi.Mock>>).oidcProviders.findFirst.mockResolvedValue({
         id: 1,

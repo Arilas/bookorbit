@@ -17,4 +17,7 @@ export interface RequestUser {
   provisioningMethod: string;
   permissions: Permission[];
   contentFilters: ContentFilterRules;
+  authMethod?: 'primary' | 'app_password';
+  appPasswordId?: number;
+  sessionFamilyId?: string;
 }

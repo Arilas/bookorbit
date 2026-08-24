@@ -725,7 +725,13 @@ describe('Authorization matrix (e2e)', () => {
         (route) => !route.isPublic && route.libraryAccess.length > 0 && isSupportedMethod(route.httpMethod),
       );
       expect(guardedRoutes.map(routeLabel).sort()).toEqual(
-        ['GET /libraries/:id', 'POST /libraries/:id/books', 'GET /libraries/:id/stats', 'POST /libraries/:id/write-metadata-to-files'].sort(),
+        [
+          'GET /libraries/:id',
+          'GET /libraries/:id/stats',
+          'GET /scanner/libraries/:id/scan-history',
+          'POST /libraries/:id/books',
+          'POST /libraries/:id/write-metadata-to-files',
+        ].sort(),
       );
 
       for (const route of guardedRoutes) {

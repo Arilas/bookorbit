@@ -14,7 +14,7 @@ interface SearchHit {
 
 const { t } = useI18n()
 const route = useRoute()
-const { isSuperuser, userPermissions, isDemoRestrictedAccount } = usePermissions()
+const { isSuperuser, userPermissions, isDemoRestrictedAccount, authMethod, provisioningMethod } = usePermissions()
 
 const query = ref('')
 const searchInput = ref<HTMLInputElement | null>(null)
@@ -24,6 +24,8 @@ const groups = computed(() =>
     isSuperuser: isSuperuser.value,
     permissions: userPermissions.value,
     isDemoRestricted: isDemoRestrictedAccount.value,
+    authMethod: authMethod.value,
+    provisioningMethod: provisioningMethod.value,
   }),
 )
 

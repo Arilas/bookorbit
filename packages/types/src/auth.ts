@@ -11,6 +11,13 @@ export enum OidcErrorCode {
   PROVIDER_ERROR = "oidc_provider_error",
 }
 
+export const AuthMethod = {
+  Primary: "primary",
+  AppPassword: "app_password",
+} as const;
+
+export type AuthMethod = (typeof AuthMethod)[keyof typeof AuthMethod];
+
 export const ProvisioningMethod = {
   Local: "local",
   Manual: "manual",
@@ -49,6 +56,7 @@ export interface AuthUser {
   avatarUrl?: string | null;
   provisioningMethod: ProvisioningMethod;
   permissions: string[];
+  authMethod?: AuthMethod;
 }
 
 export interface OidcPublicConfig {
@@ -153,6 +161,28 @@ export interface Session {
   id: number;
   createdAt: string;
   expiresAt: string;
+}
+
+export interface AppPassword {
+  id: number;
+  label: string;
+  hint: string;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+  activeSessions: number;
+  status: "active" | "expired";
+}
+
+export interface CreateAppPasswordRequest {
+  label: string;
+  expiresAt: string;
+}
+
+export interface CreateAppPasswordResponse {
+  appPassword: AppPassword;
+  password: string;
 }
 
 export interface MagicLinkToken {

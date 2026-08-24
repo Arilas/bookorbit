@@ -33,3 +33,15 @@ export function rejectSocketConnection(client: Socket, cause: unknown): void {
   }
   client.disconnect();
 }
+
+/** Disconnects an accepted socket when the access token used for its handshake expires. */
+export function disconnectSocketAtTokenExpiry(client: Socket, expiresAtSeconds?: number): void {
+  if (!Number.isFinite(expiresAtSeconds)) return;
+  const delayMs = Math.max(0, expiresAtSeconds! * 1000 - Date.now());
+  const timeout = setTimeout(() => {
+    client.emit(WS_UNAUTHORIZED_EVENT, { reason: 'invalid_token' });
+    client.disconnect(true);
+  }, delayMs);
+  timeout.unref();
+  client.once('disconnect', () => clearTimeout(timeout));
+}

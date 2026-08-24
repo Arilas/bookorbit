@@ -480,6 +480,7 @@
       "subtitleAll": "Manage your profile and notification preferences.",
       "tabs": {
         "profile": "Profile",
+        "app-passwords": "App Passwords",
         "privacy": "Privacy & Sharing",
         "notifications": "Notifications",
         "restrictions": "Restrictions"
@@ -600,6 +601,78 @@
         "profile": "Profile",
         "preferences": "Preferences",
         "security": "Security & access"
+      }
+    },
+    "appPasswords": {
+      "title": "App Passwords",
+      "subtitle": "Create separate credentials for apps and devices that need long-lived sessions.",
+      "listTitle": "Application credentials",
+      "neverUsed": "Never used",
+      "passwordHint": "Password ending in {hint}",
+      "guidance": {
+        "title": "Use one password per app or device",
+        "description": "A separate credential makes last-used activity meaningful and lets you revoke one device without interrupting the others. App passwords use your library permissions but cannot manage account security or server administration."
+      },
+      "empty": {
+        "title": "No app passwords yet",
+        "description": "Create a dedicated credential when connecting KOReader or another BookOrbit app."
+      },
+      "status": {
+        "active": "Active",
+        "expired": "Expired"
+      },
+      "columns": {
+        "app": "App or device",
+        "status": "Status",
+        "created": "Created",
+        "expires": "Expires",
+        "lastUsed": "Last used",
+        "sessions": "Sessions",
+        "actions": "Actions"
+      },
+      "create": {
+        "title": "Create app password",
+        "description": "BookOrbit will generate a password for this app or device.",
+        "action": "Create app password",
+        "creating": "Creating...",
+        "label": "App or device name",
+        "labelPlaceholder": "KOReader on Kobo Libra 2",
+        "labelHint": "Choose a name that identifies exactly where this password will be used.",
+        "expiration": "Expiration",
+        "expirationHint": "The credential stops working after this period. Existing sessions are revoked when it expires.",
+        "expirationDays": {
+          "30": "30 days",
+          "90": "90 days",
+          "180": "180 days",
+          "365": "1 year"
+        },
+        "deviceGuidance": "Create another password for each additional app or device instead of reusing this one."
+      },
+      "created": {
+        "title": "App password created",
+        "description": "Use this password to sign in from {label}.",
+        "oneTimeWarning": "Copy this password now. BookOrbit cannot show it again after you close this window.",
+        "passwordLabel": "Generated password",
+        "copy": "Copy",
+        "copied": "Copied!",
+        "usageHint": "Use your normal BookOrbit username with this generated password.",
+        "done": "Done"
+      },
+      "revoke": {
+        "title": "Revoke app password?",
+        "description": "Revoke \"{label}\"? New sign-ins will stop immediately. {count, plural, =0 {No active app sessions are connected.} one {One active app session will be signed out.} other {# active app sessions will be signed out.}}",
+        "action": "Revoke",
+        "revoking": "Revoking..."
+      },
+      "feedback": {
+        "created": "App password created",
+        "revoked": "App password revoked"
+      },
+      "errors": {
+        "load": "Failed to load app passwords",
+        "create": "Failed to create app password",
+        "revoke": "Failed to revoke app password",
+        "copy": "Failed to copy app password"
       }
     },
     "magicLinks": {
@@ -2802,6 +2875,7 @@
       },
       "descriptions": {
         "profile": "Your name, email, password, and active sessions.",
+        "appPasswords": "Dedicated credentials for apps and reading devices.",
         "appearanceTheme": "Theme, accent colour, background, and corner radius.",
         "appearanceBookCovers": "Cover shadows, spine effects, and placeholder art.",
         "appearanceIcons": "Choose the icon style used across the app.",
@@ -3465,6 +3539,8 @@
       "AuthPasswordReset": "Reset password",
       "AuthPasswordAdminReset": "Reset user password",
       "AuthSessionRevoke": "Revoke session",
+      "AuthAppPasswordCreate": "Create app password",
+      "AuthAppPasswordRevoke": "Revoke app password",
       "MagicLinkCreate": "Create magic link",
       "MagicLinkLogin": "Sign in with magic link",
       "MagicLinkRevoke": "Revoke magic link",
@@ -7878,6 +7954,7 @@
     },
     "account": {
       "profile": "Account",
+      "app-passwords": "App Passwords",
       "privacy": "Privacy & Sharing",
       "notifications": "Notifications",
       "restrictions": "Content Restrictions"

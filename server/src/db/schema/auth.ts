@@ -12,6 +12,7 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  uuid,
   varchar,
 } from 'drizzle-orm/pg-core';
 
@@ -83,6 +84,30 @@ export const userPermissions = pgTable(
   (t) => [primaryKey({ columns: [t.userId, t.permissionName] })],
 );
 
+export const appPasswords = pgTable(
+  'app_passwords',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    label: varchar('label', { length: 100 }).notNull(),
+    selector: varchar('selector', { length: 32 }).notNull().unique(),
+    secretHash: varchar('secret_hash', { length: 64 }).notNull().unique(),
+    secretHint: varchar('secret_hint', { length: 32 }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    lastUsedIp: varchar('last_used_ip', { length: 45 }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('app_passwords_user_id_idx').on(t.userId),
+    index('app_passwords_expires_at_idx').on(t.expiresAt),
+    check('app_passwords_expires_after_created_chk', sql`${t.expiresAt} > ${t.createdAt}`),
+  ],
+);
+
 export const libraryAccessLevelEnum = pgEnum('library_access_level', ['viewer', 'editor', 'owner']);
 
 export const userLibraryAccess = pgTable(
@@ -106,6 +131,8 @@ export const refreshTokens = pgTable(
     userId: integer('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    appPasswordId: integer('app_password_id').references(() => appPasswords.id, { onDelete: 'cascade' }),
+    sessionFamilyId: uuid('session_family_id').notNull().defaultRandom(),
     tokenHash: varchar('token_hash', { length: 255 }).notNull().unique(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
@@ -115,6 +142,8 @@ export const refreshTokens = pgTable(
   },
   (t) => [
     index('refresh_tokens_user_id_idx').on(t.userId),
+    index('refresh_tokens_app_password_id_idx').on(t.appPasswordId),
+    index('refresh_tokens_session_family_id_idx').on(t.sessionFamilyId),
     index('refresh_tokens_expires_at_idx').on(t.expiresAt),
     check('refresh_tokens_expires_after_created_chk', sql`${t.expiresAt} > ${t.createdAt}`),
   ],
@@ -153,6 +182,7 @@ export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 
 export type RefreshToken = typeof refreshTokens.$inferSelect;
+export type AppPassword = typeof appPasswords.$inferSelect;
 export type AppSetting = typeof appSettings.$inferSelect;
 
 export const magicAccessTokens = pgTable(

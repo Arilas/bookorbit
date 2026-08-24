@@ -12,13 +12,15 @@ withDefaults(defineProps<{ isRail?: boolean }>(), { isRail: false })
 
 const { t } = useI18n()
 const route = useRoute()
-const { isSuperuser, userPermissions, isDemoRestrictedAccount } = usePermissions()
+const { isSuperuser, userPermissions, isDemoRestrictedAccount, authMethod, provisioningMethod } = usePermissions()
 
 const groups = computed(() =>
   visibleSettingsNav({
     isSuperuser: isSuperuser.value,
     permissions: userPermissions.value,
     isDemoRestricted: isDemoRestrictedAccount.value,
+    authMethod: authMethod.value,
+    provisioningMethod: provisioningMethod.value,
   }),
 )
 

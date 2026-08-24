@@ -11,6 +11,9 @@ import { EmailModule } from '../email/email.module';
 import { UserModule } from '../user/user.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { AppPasswordController } from './app-password.controller';
+import { AppPasswordRepository } from './app-password.repository';
+import { AppPasswordService } from './app-password.service';
 import { JwtStrategy } from './jwt.strategy';
 import { MagicLinkRepository } from './magic-link.repository';
 import { MagicLinkService } from './magic-link.service';
@@ -42,9 +45,11 @@ import { OidcTokenValidatorService } from './oidc/oidc-token-validator.service';
     AuditModule,
     EmailModule,
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, AppPasswordController],
   providers: [
     AuthService,
+    AppPasswordRepository,
+    AppPasswordService,
     JwtStrategy,
     MagicLinkRepository,
     MagicLinkService,

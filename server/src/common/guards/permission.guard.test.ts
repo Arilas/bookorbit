@@ -155,6 +155,37 @@ describe('PermissionGuard', () => {
     expect(guard.canActivate(makeContext(makeUser()))).toBe(true);
   });
 
+  it('rejects app-password sessions on administrative permission routes', () => {
+    const reflector = {
+      getAllAndOverride: vi.fn((key: string) => {
+        if (key === IS_PUBLIC_KEY) return false;
+        if (key === PERMISSION_KEY) return Permission.ManageUsers;
+        return undefined;
+      }),
+    };
+    const permissionService = { userHas: vi.fn().mockReturnValue(true), userHasExplicit: vi.fn().mockReturnValue(false) };
+    const guard = new PermissionGuard(reflector as never, permissionService as never);
+
+    expect(() => guard.canActivate(makeContext(makeUser({ authMethod: 'app_password', isSuperuser: true })))).toThrow(
+      'Primary authentication required for administrative operations',
+    );
+    expect(permissionService.userHas).not.toHaveBeenCalled();
+  });
+
+  it('allows app-password sessions to use granted library permissions', () => {
+    const reflector = {
+      getAllAndOverride: vi.fn((key: string) => {
+        if (key === IS_PUBLIC_KEY) return false;
+        if (key === PERMISSION_KEY) return Permission.LibraryDownload;
+        return undefined;
+      }),
+    };
+    const permissionService = { userHas: vi.fn().mockReturnValue(true), userHasExplicit: vi.fn().mockReturnValue(false) };
+    const guard = new PermissionGuard(reflector as never, permissionService as never);
+
+    expect(guard.canActivate(makeContext(makeUser({ authMethod: 'app_password' })))).toBe(true);
+  });
+
   it('requires every permission attached to a route', () => {
     const reflector = {
       getAllAndOverride: vi.fn((key: string) => {

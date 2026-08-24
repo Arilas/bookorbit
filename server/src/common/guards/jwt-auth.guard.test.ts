@@ -2,6 +2,7 @@ import { ExecutionContext, ForbiddenException, UnauthorizedException } from '@ne
 
 import { ALLOW_DEFAULT_PASSWORD_KEY } from '../decorators/allow-default-password.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { REQUIRE_PRIMARY_AUTHENTICATION_KEY } from '../decorators/require-primary-authentication.decorator';
 import type { RequestUser } from '../types/request-user';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
@@ -87,5 +88,24 @@ describe('JwtAuthGuard', () => {
 
     const result = guard.handleRequest(undefined, user, undefined, makeContext());
     expect(result).toBe(user);
+  });
+
+  it('rejects app-password sessions on primary-authentication routes', () => {
+    const reflector = {
+      getAllAndOverride: vi.fn((key: string) => key === REQUIRE_PRIMARY_AUTHENTICATION_KEY),
+    };
+    const guard = new JwtAuthGuard(reflector as never);
+
+    expect(() => guard.handleRequest(undefined, makeUser({ authMethod: 'app_password', appPasswordId: 9 }), undefined, makeContext())).toThrow(
+      'Primary authentication required',
+    );
+  });
+
+  it('allows app-password sessions on ordinary authenticated routes', () => {
+    const reflector = { getAllAndOverride: vi.fn(() => false) };
+    const guard = new JwtAuthGuard(reflector as never);
+    const user = makeUser({ authMethod: 'app_password', appPasswordId: 9 });
+
+    expect(guard.handleRequest(undefined, user, undefined, makeContext())).toBe(user);
   });
 });

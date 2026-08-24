@@ -8,6 +8,18 @@ import { PERMISSION_KEY } from '../decorators/require-permission.decorator';
 import { PermissionService } from '../services/permission.service';
 import { RequestUser } from '../types/request-user';
 
+const PRIMARY_AUTH_ONLY_PERMISSIONS = new Set<Permission>([
+  Permission.ManageLibraries,
+  Permission.ManageMetadataConfig,
+  Permission.ManageIcons,
+  Permission.ManageAppSettings,
+  Permission.ManageBookDock,
+  Permission.ManageUsers,
+  Permission.ManageEmail,
+  Permission.ViewUserActivity,
+  Permission.ViewAuditLog,
+]);
+
 @Injectable()
 export class PermissionGuard implements CanActivate {
   constructor(
@@ -35,6 +47,9 @@ export class PermissionGuard implements CanActivate {
     if (!required) return true;
 
     const permissions = Array.isArray(required) ? required : [required];
+    if (user.authMethod === 'app_password' && permissions.some((permission) => PRIMARY_AUTH_ONLY_PERMISSIONS.has(permission))) {
+      throw new ForbiddenException('Primary authentication required for administrative operations');
+    }
     const missing = permissions.find((permission) => !this.permissionService.userHas(user, permission));
     if (missing) {
       throw new ForbiddenException(`Missing permission: ${missing}`);

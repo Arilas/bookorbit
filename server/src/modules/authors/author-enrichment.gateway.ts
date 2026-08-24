@@ -11,7 +11,7 @@ import { AuthService } from '../auth/auth.service';
 import { AuthorEnrichmentRepository } from './author-enrichment.repository';
 import { AuthorEnrichmentSessionService } from './author-enrichment-session.service';
 import { AuthorEnrichmentConfigService } from './author-enrichment-config.service';
-import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { disconnectSocketAtTokenExpiry, rejectSocketConnection } from '../../common/utils/ws-auth.utils';
 
 export const AUTHOR_ENRICHMENT_STATUS_EVENT = 'author-enrichment:status';
 
@@ -47,9 +47,12 @@ export class AuthorEnrichmentGateway implements OnGatewayInit, OnGatewayConnecti
       const token = client.handshake.auth?.token as string | undefined;
       if (!token) throw new UnauthorizedException('No token provided');
 
-      const payload = this.jwtService.verify<{ sub: number; ver: number }>(token, { algorithms: ['HS256'] });
-      const user = await this.authService.validateUser(payload.sub, payload.ver);
+      const payload = this.jwtService.verify<{ sub: number; ver: number; aid?: number; sid?: string; exp?: number }>(token, {
+        algorithms: ['HS256'],
+      });
+      const user = await this.authService.validateUser(payload.sub, payload.ver, payload.aid, payload.sid);
       if (!user) throw new UnauthorizedException('User not found or token revoked');
+      disconnectSocketAtTokenExpiry(client, payload.exp);
 
       this.assertCanViewStatus(user);
       this.logger.debug(`[${event}] [start] userId=${user.id} socketId=${client.id} - websocket connected`);

@@ -8,6 +8,8 @@ const permState = {
   isSuperuser: false,
   permissions: [] as string[],
   demoRestricted: false,
+  authMethod: 'primary' as 'primary' | 'app_password',
+  provisioningMethod: 'local' as 'local' | 'shared',
 }
 
 vi.mock('vue-router', () => ({
@@ -19,13 +21,24 @@ vi.mock('@/features/auth/composables/usePermissions', () => ({
     isSuperuser: computed(() => permState.isSuperuser),
     userPermissions: computed(() => permState.permissions),
     isDemoRestrictedAccount: computed(() => permState.demoRestricted),
+    authMethod: computed(() => permState.authMethod),
+    provisioningMethod: computed(() => permState.provisioningMethod),
   }),
 }))
 
-function mountSidebar(opts?: { rail?: boolean; su?: boolean; perms?: string[]; demo?: boolean }) {
+function mountSidebar(opts?: {
+  rail?: boolean
+  su?: boolean
+  perms?: string[]
+  demo?: boolean
+  authMethod?: 'primary' | 'app_password'
+  provisioningMethod?: 'local' | 'shared'
+}) {
   permState.isSuperuser = opts?.su ?? false
   permState.permissions = opts?.perms ?? []
   permState.demoRestricted = opts?.demo ?? false
+  permState.authMethod = opts?.authMethod ?? 'primary'
+  permState.provisioningMethod = opts?.provisioningMethod ?? 'local'
   return mount(SettingsSidebar, {
     props: { isRail: opts?.rail ?? false },
     global: {
@@ -96,5 +109,21 @@ describe('SettingsSidebar', () => {
     expect(labels({ su: true })).toContain('Notifications')
     expect(labels({ perms: [Permission.NotificationAccess], demo: true })).not.toContain('Notifications')
     expect(labels({ su: true, demo: true })).not.toContain('Notifications')
+  })
+
+  it('hides app passwords in collapsed rail mode for an app-password-authenticated session', () => {
+    const labels = mountSidebar({ rail: true, authMethod: 'app_password' })
+      .findAll('[data-testid="settings-sidebar-rail-item"]')
+      .map((node) => node.text())
+
+    expect(labels).not.toContain('App Passwords')
+  })
+
+  it('hides app passwords in collapsed rail mode for a shared account', () => {
+    const labels = mountSidebar({ rail: true, provisioningMethod: 'shared' })
+      .findAll('[data-testid="settings-sidebar-rail-item"]')
+      .map((node) => node.text())
+
+    expect(labels).not.toContain('App Passwords')
   })
 })

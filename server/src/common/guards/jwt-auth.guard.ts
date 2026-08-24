@@ -4,6 +4,7 @@ import { AuthGuard } from '@nestjs/passport';
 
 import { ALLOW_DEFAULT_PASSWORD_KEY } from '../decorators/allow-default-password.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { REQUIRE_PRIMARY_AUTHENTICATION_KEY } from '../decorators/require-primary-authentication.decorator';
 import { RequestUser } from '../types/request-user';
 
 @Injectable()
@@ -21,6 +22,14 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
   handleRequest<T extends RequestUser>(err: unknown, user: T, _info: unknown, context: ExecutionContext): T {
     if (err || !user) {
       throw new UnauthorizedException();
+    }
+
+    const requiresPrimaryAuthentication = this.reflector.getAllAndOverride<boolean>(REQUIRE_PRIMARY_AUTHENTICATION_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (requiresPrimaryAuthentication && user.authMethod === 'app_password') {
+      throw new ForbiddenException('Primary authentication required');
     }
 
     if (user.isDefaultPassword) {

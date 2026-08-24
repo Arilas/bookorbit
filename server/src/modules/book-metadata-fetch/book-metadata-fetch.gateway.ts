@@ -9,7 +9,7 @@ import { AuthService } from '../auth/auth.service';
 import { BookMetadataFetchQueueRepository } from './book-metadata-fetch-queue.repository';
 import { BookMetadataFetchConfigService } from './book-metadata-fetch-config.service';
 import { BookMetadataFetchSessionService } from './book-metadata-fetch-session.service';
-import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { disconnectSocketAtTokenExpiry, rejectSocketConnection } from '../../common/utils/ws-auth.utils';
 
 export const BOOK_METADATA_FETCH_STATUS_EVENT = 'book-metadata-fetch:status';
 
@@ -31,9 +31,12 @@ export class BookMetadataFetchGateway implements OnGatewayConnection, OnGatewayD
       const token = client.handshake.auth?.token as string | undefined;
       if (!token) throw new UnauthorizedException('No token provided');
 
-      const payload = this.jwtService.verify<{ sub: number; ver: number }>(token, { algorithms: ['HS256'] });
-      const user = await this.authService.validateUser(payload.sub, payload.ver);
+      const payload = this.jwtService.verify<{ sub: number; ver: number; aid?: number; sid?: string; exp?: number }>(token, {
+        algorithms: ['HS256'],
+      });
+      const user = await this.authService.validateUser(payload.sub, payload.ver, payload.aid, payload.sid);
       if (!user) throw new UnauthorizedException('User not found or token revoked');
+      disconnectSocketAtTokenExpiry(client, payload.exp);
 
       this.assertCanViewStatus(user);
       (client.data as { user?: RequestUser }).user = user;

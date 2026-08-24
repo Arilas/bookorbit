@@ -82,6 +82,18 @@ describe('visibleSettingsNav', () => {
     expect(superuserDemo?.items.map((item) => item.id)).not.toContain('notifications')
   })
 
+  it('keeps app-password management available only to primary non-demo sessions', () => {
+    const primaryIds = visibleSettingsNav({ ...NOBODY, authMethod: 'primary' })[0]?.items.map((item) => item.id)
+    const appPasswordIds = visibleSettingsNav({ ...NOBODY, authMethod: 'app_password' })[0]?.items.map((item) => item.id)
+    const demoIds = visibleSettingsNav({ ...NOBODY, authMethod: 'primary', isDemoRestricted: true })[0]?.items.map((item) => item.id)
+    const sharedIds = visibleSettingsNav({ ...NOBODY, authMethod: 'primary', provisioningMethod: 'shared' })[0]?.items.map((item) => item.id)
+
+    expect(primaryIds).toContain('app-passwords')
+    expect(appPasswordIds).not.toContain('app-passwords')
+    expect(demoIds).not.toContain('app-passwords')
+    expect(sharedIds).not.toContain('app-passwords')
+  })
+
   it('only exposes the metadata pages the permission allows', () => {
     const library = visibleSettingsNav({ ...NOBODY, permissions: ['manage_libraries'] }).find((group) => group.id === 'library')
     const ids = library?.items.map((item) => item.id) ?? []

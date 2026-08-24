@@ -4,7 +4,7 @@ import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway, WebSocketSe
 import { Server, Socket } from 'socket.io';
 
 import { AuthService } from '../auth/auth.service';
-import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { disconnectSocketAtTokenExpiry, rejectSocketConnection } from '../../common/utils/ws-auth.utils';
 
 @WebSocketGateway({ namespace: '/book-dock', cors: { origin: process.env.CLIENT_URL ?? 'http://localhost:5173' } })
 export class BookDockGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -20,10 +20,13 @@ export class BookDockGateway implements OnGatewayConnection, OnGatewayDisconnect
     try {
       const token = client.handshake.auth?.token as string | undefined;
       if (!token) throw new UnauthorizedException('No token provided');
-      const payload = this.jwtService.verify<{ sub: number; ver: number }>(token, { algorithms: ['HS256'] });
-      const user = await this.authService.validateUser(payload.sub, payload.ver);
+      const payload = this.jwtService.verify<{ sub: number; ver: number; aid?: number; sid?: string; exp?: number }>(token, {
+        algorithms: ['HS256'],
+      });
+      const user = await this.authService.validateUser(payload.sub, payload.ver, payload.aid, payload.sid);
       if (!user) throw new UnauthorizedException('User not found or token revoked');
       (client.data as Record<string, unknown>).user = user;
+      disconnectSocketAtTokenExpiry(client, payload.exp);
       this.logger.debug(`WS connected: user=${user.id} socket=${client.id}`);
     } catch (err) {
       this.logger.warn(`WS rejected: ${(err as Error).message} socket=${client.id}`);
