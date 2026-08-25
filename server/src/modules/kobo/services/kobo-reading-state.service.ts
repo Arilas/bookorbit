@@ -460,6 +460,7 @@ export class KoboReadingStateService {
       .values({
         userId,
         bookFileId: primaryFile.fileId,
+        appPasswordId: null,
         percentage,
         cfi: nextCfi,
         pageNumber: null,
@@ -475,6 +476,7 @@ export class KoboReadingStateService {
       .onConflictDoUpdate({
         target: [schema.readingProgress.bookFileId, schema.readingProgress.userId],
         set: {
+          appPasswordId: null,
           percentage,
           cfi: nextCfi,
           pageNumber: null,

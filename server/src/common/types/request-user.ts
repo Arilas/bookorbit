@@ -19,5 +19,6 @@ export interface RequestUser {
   contentFilters: ContentFilterRules;
   authMethod?: 'primary' | 'app_password';
   appPasswordId?: number;
+  appPasswordLabel?: string;
   sessionFamilyId?: string;
 }

@@ -2,7 +2,13 @@ import { ConflictException, Injectable, Logger, NotFoundException } from '@nestj
 import { hash as bcryptHash } from 'bcryptjs';
 import { createHash } from 'crypto';
 
-import { DEFAULT_KOREADER_DEVICE_PATTERN, type KoreaderBookSyncInfo, type KoreaderDeviceInfo, type KoreaderSyncStatus } from '@bookorbit/types';
+import {
+  DEFAULT_KOREADER_DEVICE_PATTERN,
+  toReadingSessionSourceDescriptor,
+  type KoreaderBookSyncInfo,
+  type KoreaderDeviceInfo,
+  type KoreaderSyncStatus,
+} from '@bookorbit/types';
 import { StatsCache } from '../../common/cache/stats-cache';
 import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
@@ -497,12 +503,15 @@ export class KoreaderService {
         }
       }
 
+      const sourceDevice = readingProg.appPasswordLabel ?? 'web';
+      const sourceDeviceId = readingProg.appPasswordId ? `bookorbit-app-password-${readingProg.appPasswordId}` : 'bookorbit-web';
+
       return {
         document: documentHash,
         percentage: toKoreaderPercentage(readingProg.percentage),
         progress: xpointer,
-        device: 'web',
-        device_id: 'bookorbit-web',
+        device: sourceDevice,
+        device_id: sourceDeviceId,
         timestamp: Math.floor(readerTime / 1000),
       };
     }
@@ -723,6 +732,9 @@ export class KoreaderService {
     const canonicalPercentage = isKoreaderLatest ? toBookorbitPercentage(liveDevice.percentage ?? 0) : (readingProgress?.percentage ?? 0);
     const canonicalTime = isKoreaderLatest ? Math.max(liveDeviceTime, readerTime) : readerTime;
     const canonicalChapterIndex = isKoreaderLatest ? (liveDevice.chapterIndex ?? null) : null;
+    const canonicalSourceAttribution = isKoreaderLatest
+      ? toReadingSessionSourceDescriptor('koreader')
+      : toReadingSessionSourceDescriptor('web', readingProgress?.appPasswordId, readingProgress?.appPasswordLabel);
 
     const lastWriteTime = await this.repo.getLastFileWriteTime(bookFileId);
     const fileModifiedSinceLastSync =
@@ -739,6 +751,7 @@ export class KoreaderService {
       canonicalChapterIndex,
       canonicalChapterTitle: canonicalChapterIndex != null ? (chapters.find((c) => c.chapterIndex === canonicalChapterIndex)?.title ?? null) : null,
       canonicalSource: isKoreaderLatest ? 'koreader' : 'web_reader',
+      canonicalSourceAttribution,
       canonicalUpdatedAt: new Date(canonicalTime).toISOString(),
       devices: deviceProgress.map((dp) => ({
         device: dp.device,

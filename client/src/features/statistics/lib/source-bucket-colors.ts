@@ -1,13 +1,10 @@
 import { oklchToHex, readCssColor } from '@/lib/echarts'
-import type { ReadingSessionSourceBucket } from '@bookorbit/types'
+import { getAppPasswordSourceHue, SOURCE_BUCKET_COLOR_TOKENS } from '@/lib/reading-source'
+import type { ReadingSessionSourceBucket, ReadingSessionSourceDescriptor } from '@bookorbit/types'
 
 // The 3 reading-source buckets reuse the existing pill tokens (light + dark variants
 // live in client/src/assets/theme/tokens.css). bookorbit shares the "web" hue.
-export const SOURCE_BUCKET_COLOR_TOKENS: Record<ReadingSessionSourceBucket, string> = {
-  bookorbit: '--pill-web',
-  koreader: '--pill-koreader',
-  kobo: '--pill-kobo',
-}
+export { SOURCE_BUCKET_COLOR_TOKENS } from '@/lib/reading-source'
 
 const cache = new Map<string, Record<ReadingSessionSourceBucket, string>>()
 
@@ -44,4 +41,14 @@ export function resolveSourceBucketColors(themeKey: string): Record<ReadingSessi
   }
   cache.set(themeKey, colors)
   return colors
+}
+
+export function resolveReadingSourceColor(
+  source: Pick<ReadingSessionSourceDescriptor, 'key' | 'bucket' | 'kind' | 'appPasswordId'>,
+  themeKey: string,
+): string {
+  if (source.kind === 'built_in') return resolveSourceBucketColors(themeKey)[source.bucket]
+
+  const dark = themeKey.split(':', 1)[0] === 'dark'
+  return oklchToHex(dark ? 0.75 : 0.55, dark ? 0.16 : 0.18, getAppPasswordSourceHue(source))
 }

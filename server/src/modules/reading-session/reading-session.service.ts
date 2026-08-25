@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 
+import { toReadingSessionSourceDescriptor } from '@bookorbit/types';
 import type { BookReadingSession, BookReadingSessionListResponse, ReadingSessionSource, UserSettings } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
@@ -51,6 +52,7 @@ export class ReadingSessionService {
       // Client sends active reading time (excludes idle/hidden periods); cap it at the wall-clock
       // span to prevent the client from reporting more time than physically elapsed.
       const durationSeconds = Math.min(dto.durationSeconds, wallClockSeconds);
+      const appPasswordId = source === 'web' && user.authMethod === 'app_password' ? (user.appPasswordId ?? null) : null;
 
       const result = await this.repo.saveSession(
         user.id,
@@ -63,6 +65,7 @@ export class ReadingSessionService {
         dto.endProgress ?? null,
         source,
         this.resolveUserTimeZone(user),
+        appPasswordId,
       );
 
       this.logger.log(
@@ -73,7 +76,8 @@ export class ReadingSessionService {
         const meaningfulActivity = durationSeconds >= 300 || (dto.progressDelta ?? 0) >= 1;
         if (meaningfulActivity && file && dto.endProgress != null) {
           await this.bookService.autoUpdateReadStatusForProgress(user.id, file, dto.endProgress, {
-            origin: source === 'koreader' ? 'koreader' : 'bookorbit',
+            origin: source === 'koreader' ? 'koreader' : source === 'kobo' ? 'kobo' : 'bookorbit',
+            ...(appPasswordId !== null && user.appPasswordLabel ? { externalProvider: user.appPasswordLabel } : {}),
             occurredOn: endedAt.toISOString().slice(0, 10),
             meaningfulActivity: true,
           });
@@ -143,8 +147,10 @@ export class ReadingSessionService {
         progressDelta = Math.round(Math.max(-100, Math.min(100, endProgress - previous)) * 100) / 100;
       }
 
+      const appPasswordId = user.authMethod === 'app_password' ? (user.appPasswordId ?? null) : null;
       const created = await this.repo.insertManualSession({
         userId: user.id,
+        appPasswordId,
         bookId,
         libraryId: context.libraryId,
         bookFileId,
@@ -175,6 +181,7 @@ export class ReadingSessionService {
         endProgress,
         format,
         source: 'manual',
+        sourceAttribution: toReadingSessionSourceDescriptor('manual', appPasswordId, user.appPasswordLabel),
       };
     } catch (error) {
       const errorClass = error instanceof Error ? error.constructor.name : 'UnknownError';

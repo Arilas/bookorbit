@@ -291,6 +291,11 @@ export class BookService {
     return user.isSuperuser || user.permissions.includes(permissionName);
   }
 
+  private appPasswordReadingActivity(user: RequestUser): AutoReadingActivity {
+    if (user.authMethod !== 'app_password' || !user.appPasswordLabel) return {};
+    return { origin: 'bookorbit', externalProvider: user.appPasswordLabel };
+  }
+
   private async checkBookPassesContentFilters(bookId: number, contentFilters: ContentFilterRules): Promise<boolean> {
     return this.bookRepo.checkBookPassesContentFilters(bookId, contentFilters);
   }
@@ -2022,7 +2027,7 @@ export class BookService {
 
   async getProgress(userId: number, fileId: number, user: RequestUser) {
     await this.verifyFileAccess(fileId, user);
-    return this.bookRepo.findProgress(userId, fileId);
+    return this.bookRepo.findProgressWithAppAttribution(userId, fileId);
   }
 
   async getBookProgress(userId: number, bookId: number, user: RequestUser) {
@@ -2038,13 +2043,14 @@ export class BookService {
       koboLocationValue: row.koboLocationValue ?? null,
       koboContentSourceProgressPercent: row.koboContentSourceProgressPercent ?? null,
       koreaderProgress: row.koreaderProgress ?? null,
+      appName: row.appName ?? null,
       updatedAt: row.updatedAt ?? null,
     }));
   }
 
   async getAudioProgress(userId: number, bookId: number, user: RequestUser) {
     await this.verifyBookAccess(bookId, user);
-    return this.bookRepo.findAudioProgress(userId, bookId);
+    return this.bookRepo.findAudioProgressWithAppAttribution(userId, bookId);
   }
 
   async saveAudioProgress(userId: number, bookId: number, dto: UpsertAudioProgressDto, user: RequestUser) {
@@ -2056,14 +2062,19 @@ export class BookService {
       throw new BadRequestException(`currentFileId ${dto.currentFileId} does not belong to book ${bookId}`);
     }
     const previous = await this.bookRepo.findAudioProgress(userId, bookId);
-    await this.bookRepo.upsertAudioProgress(userId, bookId, dto.currentFileId, dto.positionSeconds, dto.percentage);
-    const strongRereadEvidence = previous != null && previous.percentage - dto.percentage >= 10;
-    await this.autoUpdateReadStatusForProgress(
+    await this.bookRepo.upsertAudioProgress(
       userId,
-      { bookId, libraryId },
+      bookId,
+      dto.currentFileId,
+      dto.positionSeconds,
       dto.percentage,
-      strongRereadEvidence ? { origin: 'bookorbit', strongRereadEvidence: true } : {},
+      user.authMethod === 'app_password' ? (user.appPasswordId ?? null) : null,
     );
+    const strongRereadEvidence = previous != null && previous.percentage - dto.percentage >= 10;
+    await this.autoUpdateReadStatusForProgress(userId, { bookId, libraryId }, dto.percentage, {
+      ...this.appPasswordReadingActivity(user),
+      ...(strongRereadEvidence ? { origin: 'bookorbit' as const, strongRereadEvidence: true } : {}),
+    });
   }
 
   async autoUpdateReadStatusForProgress(
@@ -2120,6 +2131,7 @@ export class BookService {
       dto.koboLocationValue ?? null,
       dto.koboContentSourceProgressPercent ?? null,
       dto.koreaderProgress ?? null,
+      user.authMethod === 'app_password' ? (user.appPasswordId ?? null) : null,
     );
     if (file.format === 'epub' && this.hasPermission(user, Permission.KoboSync) && (await this.bookRepo.isKoboTwoWayProgressSyncEnabled(userId))) {
       await this.bookRepo.syncKoboReadingStateFromProgress(
@@ -2133,12 +2145,10 @@ export class BookService {
       );
     }
     const strongRereadEvidence = previous != null && previous.percentage - dto.percentage >= 10;
-    await this.autoUpdateReadStatusForProgress(
-      userId,
-      file,
-      dto.percentage,
-      strongRereadEvidence ? { origin: 'bookorbit', strongRereadEvidence: true } : {},
-    );
+    await this.autoUpdateReadStatusForProgress(userId, file, dto.percentage, {
+      ...this.appPasswordReadingActivity(user),
+      ...(strongRereadEvidence ? { origin: 'bookorbit' as const, strongRereadEvidence: true } : {}),
+    });
   }
 
   async clearFileProgress(userId: number, fileId: number, user: RequestUser): Promise<void> {

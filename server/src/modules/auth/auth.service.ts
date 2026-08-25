@@ -595,6 +595,7 @@ export class AuthService {
         ...user,
         authMethod: 'app_password' as const,
         appPasswordId,
+        appPasswordLabel: appPassword.label,
         ...(sessionFamilyId ? { sessionFamilyId } : {}),
       };
     }

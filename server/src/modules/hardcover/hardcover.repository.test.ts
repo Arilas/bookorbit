@@ -410,6 +410,7 @@ describe('HardcoverRepository', () => {
       expect.objectContaining({
         userId: 7,
         bookFileId: 500,
+        appPasswordId: null,
         percentage: 100,
       }),
     );
@@ -417,7 +418,7 @@ describe('HardcoverRepository', () => {
       expect.objectContaining({
         target: [schema.readingProgress.bookFileId, schema.readingProgress.userId],
         setWhere: expect.anything(),
-        set: expect.objectContaining({ percentage: 100 }),
+        set: expect.objectContaining({ appPasswordId: null, percentage: 100 }),
       }),
     );
     expect(progressInsert.returning).toHaveBeenCalledWith({ bookFileId: schema.readingProgress.bookFileId });

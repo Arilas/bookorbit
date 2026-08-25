@@ -4,7 +4,7 @@ import type { ReadStatus, ReadStatusSource, ReadingAttemptOrigin, ReadingAttempt
 
 import { bookFiles, books } from './books';
 import { libraries } from './libraries';
-import { users } from './auth';
+import { appPasswords, users } from './auth';
 
 export const userBookStatus = pgTable(
   'user_book_status',
@@ -57,7 +57,7 @@ export const readingAttempts = pgTable(
     endedOn: date('ended_on', { mode: 'string' }),
     outcome: varchar('outcome', { length: 20 }).$type<ReadingAttemptOutcome>(),
     origin: varchar('origin', { length: 20 }).$type<ReadingAttemptOrigin>().notNull(),
-    externalProvider: varchar('external_provider', { length: 40 }),
+    externalProvider: varchar('external_provider', { length: 100 }),
     externalId: varchar('external_id', { length: 255 }),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -149,6 +149,7 @@ export const readingProgress = pgTable(
     userId: integer('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    appPasswordId: integer('app_password_id').references(() => appPasswords.id, { onDelete: 'set null' }),
     percentage: real('percentage').notNull().default(0),
     // EPUB: CFI string pinpoints exact location
     cfi: varchar('cfi', { length: 2000 }),
@@ -183,6 +184,7 @@ export const readingProgress = pgTable(
   (t) => [
     primaryKey({ columns: [t.bookFileId, t.userId] }),
     index('reading_progress_user_id_idx').on(t.userId),
+    index('reading_progress_app_password_user_idx').on(t.appPasswordId, t.userId),
     index('reading_progress_user_last_read_at_idx').on(t.userId, t.lastReadAt),
     check('reading_progress_percentage_range_chk', sql`${t.percentage} >= 0 and ${t.percentage} <= 100`),
     check('reading_progress_page_number_nonnegative_chk', sql`${t.pageNumber} is null or ${t.pageNumber} >= 0`),
@@ -204,6 +206,7 @@ export const readingSessions = pgTable(
     userId: integer('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    appPasswordId: integer('app_password_id').references(() => appPasswords.id, { onDelete: 'set null' }),
     // Nullable: manual sessions are book-level and have no file.
     bookFileId: integer('book_file_id').references(() => bookFiles.id, { onDelete: 'cascade' }),
     bookId: integer('book_id')
@@ -224,6 +227,7 @@ export const readingSessions = pgTable(
   },
   (t) => [
     uniqueIndex('rs_user_session_id_uidx').on(t.userId, t.sessionId),
+    index('rs_app_password_user_started_at_idx').on(t.appPasswordId, t.userId, t.startedAt),
     index('rs_user_started_at_idx').on(t.userId, t.startedAt),
     index('rs_book_file_started_at_idx').on(t.bookFileId, t.startedAt),
     index('rs_user_book_file_idx').on(t.userId, t.bookFileId),
@@ -276,6 +280,7 @@ export const audiobookProgress = pgTable(
     userId: integer('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    appPasswordId: integer('app_password_id').references(() => appPasswords.id, { onDelete: 'set null' }),
     bookId: integer('book_id')
       .notNull()
       .references(() => books.id, { onDelete: 'cascade' }),
@@ -292,6 +297,7 @@ export const audiobookProgress = pgTable(
   (t) => [
     primaryKey({ columns: [t.userId, t.bookId] }),
     index('abp_user_id_idx').on(t.userId),
+    index('abp_app_password_user_idx').on(t.appPasswordId, t.userId),
     index('audiobook_progress_book_id_idx').on(t.bookId),
     index('audiobook_progress_current_file_id_idx').on(t.currentFileId),
     check('audiobook_progress_percentage_range_chk', sql`${t.percentage} >= 0 and ${t.percentage} <= 100`),

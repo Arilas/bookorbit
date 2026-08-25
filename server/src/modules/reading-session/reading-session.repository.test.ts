@@ -98,7 +98,7 @@ describe('ReadingSessionRepository', () => {
     expect(dailyValues).not.toHaveBeenCalled();
   });
 
-  it('persists session with bookId and explicit source, then upserts daily stats', async () => {
+  it('persists an explicit integration source without App Password attribution, then upserts daily stats', async () => {
     const { repo, sessionValues, sessionConflict, dailyValues, dailyConflictUpdate, tx } = makeDbHarness({
       fileRow: { bookId: 9, libraryId: 3 },
       insertedIds: [{ id: 99 }],
@@ -114,12 +114,15 @@ describe('ReadingSessionRepository', () => {
       null,
       42.5,
       'kobo',
+      'UTC',
+      44,
     );
 
     expect(result).toEqual({ kind: 'saved' });
     expect(sessionValues).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 2,
+        appPasswordId: null,
         bookFileId: 4,
         bookId: 9,
         sessionId: 'new-session',
@@ -198,6 +201,7 @@ describe('ReadingSessionRepository - insertManualSession', () => {
 
     const result = await repo.insertManualSession({
       userId: 5,
+      appPasswordId: 88,
       bookId: 10,
       libraryId: 3,
       bookFileId: null,
@@ -214,6 +218,7 @@ describe('ReadingSessionRepository - insertManualSession', () => {
     expect(sessionValues).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 5,
+        appPasswordId: 88,
         bookId: 10,
         bookFileId: null,
         sessionId: 'manual:abc',
@@ -354,6 +359,13 @@ describe('ReadingSessionRepository - listByBook', () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0]?.startedAt).toBe(now.toISOString());
     expect(result.items[0]?.source).toBe('web');
+    expect(result.items[0]?.sourceAttribution).toEqual({
+      key: 'bookorbit',
+      label: 'BookOrbit',
+      bucket: 'bookorbit',
+      kind: 'built_in',
+      appPasswordId: null,
+    });
   });
 
   it('fires six select queries', async () => {
@@ -437,6 +449,7 @@ describe('ReadingSessionRepository - listByBook', () => {
 
     expect(result.items[0]?.format).toBeNull();
     expect(result.items[0]?.source).toBeNull();
+    expect(result.items[0]?.sourceAttribution.label).toBe('BookOrbit');
   });
 
   it('applies dateFrom and dateTo when provided', async () => {
@@ -470,8 +483,68 @@ describe('ReadingSessionRepository - listByBook', () => {
 
     // web + manual + null collapse into bookorbit; koreader has no rows and is omitted.
     expect(result.stats.bySource).toEqual([
-      { bucket: 'bookorbit', totalSeconds: 180, totalSessions: 3 },
-      { bucket: 'kobo', totalSeconds: 200, totalSessions: 2 },
+      {
+        key: 'bookorbit',
+        label: 'BookOrbit',
+        bucket: 'bookorbit',
+        kind: 'built_in',
+        appPasswordId: null,
+        totalSeconds: 180,
+        totalSessions: 3,
+      },
+      {
+        key: 'kobo',
+        label: 'Kobo',
+        bucket: 'kobo',
+        kind: 'built_in',
+        appPasswordId: null,
+        totalSeconds: 200,
+        totalSessions: 2,
+      },
+    ]);
+  });
+
+  it('keeps App Password sources distinct by id while explicit integration sources win', async () => {
+    const now = new Date('2026-04-15T10:00:00.000Z');
+    const { db } = makeListDb({
+      rows: [
+        {
+          id: 1,
+          startedAt: now,
+          endedAt: now,
+          durationSeconds: 60,
+          progressDelta: null,
+          endProgress: null,
+          format: 'epub',
+          source: 'web',
+          appPasswordId: 11,
+          appPasswordLabel: 'iPhone app',
+        },
+      ],
+      count: [{ total: 4 }],
+      stats: [{ totalSessions: 4, totalSeconds: 245, avgDurationSeconds: 61, firstSessionAt: now, lastSessionAt: now }],
+      bySource: [
+        { source: 'web', appPasswordId: 11, appPasswordLabel: 'iPhone app', totalSeconds: 100, totalSessions: 1 },
+        { source: 'manual', appPasswordId: 11, appPasswordLabel: 'iPhone app', totalSeconds: 50, totalSessions: 1 },
+        { source: 'web', appPasswordId: 12, appPasswordLabel: 'iPhone app', totalSeconds: 25, totalSessions: 1 },
+        { source: 'koreader', appPasswordId: 11, appPasswordLabel: 'iPhone app', totalSeconds: 70, totalSessions: 1 },
+      ],
+    });
+    const repo = new ReadingSessionRepository(db as never);
+
+    const result = await repo.listByBook(1, 2, 1, 25, 'startedAt', 'desc');
+
+    expect(result.items[0]?.sourceAttribution).toEqual({
+      key: 'app-password:11',
+      label: 'iPhone app',
+      bucket: 'bookorbit',
+      kind: 'app_password',
+      appPasswordId: 11,
+    });
+    expect(result.stats.bySource).toEqual([
+      expect.objectContaining({ key: 'app-password:11', label: 'iPhone app', totalSeconds: 150, totalSessions: 2 }),
+      expect.objectContaining({ key: 'app-password:12', label: 'iPhone app', totalSeconds: 25, totalSessions: 1 }),
+      expect.objectContaining({ key: 'koreader', label: 'KOReader', totalSeconds: 70, totalSessions: 1 }),
     ]);
   });
 

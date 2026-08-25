@@ -210,6 +210,37 @@ describe('DetailsTab cover surface', () => {
     expect(spineLayers[0]!.attributes('style')).toContain('translateY(-50%)')
   })
 
+  it('shows the App Password name that last wrote reading progress', async () => {
+    mocks.api.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/metadata-score/weights')) return response({})
+      if (url.includes('/audio-progress')) return response(null)
+      if (url.includes('/collections/membership')) return response([])
+      if (url.includes('/kobo-state')) {
+        return response({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshots: [] })
+      }
+      if (url.includes('/koreader/books/')) return response(null)
+      if (url.endsWith('/books/12/progress')) {
+        return response([
+          {
+            fileId: 101,
+            percentage: 42,
+            cfi: null,
+            pageNumber: null,
+            updatedAt: '2026-08-25T12:00:00.000Z',
+            appName: 'iPhone app',
+          },
+        ])
+      }
+      return response({})
+    })
+
+    const wrapper = mountDetails(makeBook())
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('iPhone app')
+  })
+
   it('shrinks natural-bottom detail cover surfaces to the loaded cover ratio', async () => {
     bookCoverDisplayMode.value = 'natural-bottom'
 

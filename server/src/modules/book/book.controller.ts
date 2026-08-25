@@ -462,6 +462,7 @@ export class BookController {
         cfi: null,
         pageNumber: null,
         percentage: 0,
+        appName: null,
         koboLocationSource: null,
         koboLocationType: null,
         koboLocationValue: null,

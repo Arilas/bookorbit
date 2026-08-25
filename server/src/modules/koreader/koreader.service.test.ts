@@ -982,6 +982,28 @@ describe('KoreaderService', () => {
       });
     });
 
+    it('returns the App Password name for progress written by a named app', async () => {
+      const readerTime = new Date('2026-02-01T11:00:00.000Z');
+      mockRepo.resolveBookFileByHash.mockResolvedValue({ id: 10, bookId: 20, libraryId: 1 });
+      mockRepo.getLatestDeviceProgress.mockResolvedValue(null);
+      mockRepo.getReadingProgress.mockResolvedValue({
+        percentage: 73.21,
+        cfi: null,
+        appPasswordId: 17,
+        appPasswordLabel: 'iPhone app',
+        updatedAt: readerTime,
+      });
+
+      await expect(service.getProgress(7, 'doc-hash')).resolves.toEqual({
+        document: 'doc-hash',
+        percentage: 0.7321,
+        progress: null,
+        device: 'iPhone app',
+        device_id: 'bookorbit-app-password-17',
+        timestamp: Math.floor(readerTime.getTime() / 1000),
+      });
+    });
+
     it('converts CFI to DocFragment XPointer using chapter service (no file I/O)', async () => {
       const readerTime = new Date('2026-02-01T11:00:00.000Z');
       mockRepo.resolveBookFileByHash.mockResolvedValue({ id: 10, bookId: 20, libraryId: 1 });
@@ -1580,6 +1602,13 @@ describe('KoreaderService', () => {
         canonicalChapterIndex: 2,
         canonicalChapterTitle: 'Chapter 3',
         canonicalSource: 'koreader',
+        canonicalSourceAttribution: {
+          key: 'koreader',
+          label: 'KOReader',
+          bucket: 'koreader',
+          kind: 'built_in',
+          appPasswordId: null,
+        },
         canonicalUpdatedAt: '2026-03-01T10:00:00.000Z',
         devices: [
           {
@@ -1647,6 +1676,13 @@ describe('KoreaderService', () => {
         canonicalChapterIndex: null,
         canonicalChapterTitle: null,
         canonicalSource: 'web_reader',
+        canonicalSourceAttribution: {
+          key: 'bookorbit',
+          label: 'BookOrbit',
+          bucket: 'bookorbit',
+          kind: 'built_in',
+          appPasswordId: null,
+        },
         canonicalUpdatedAt: '2026-03-01T11:00:00.000Z',
         devices: [
           {
@@ -1660,6 +1696,32 @@ describe('KoreaderService', () => {
         ],
         fileModifiedSinceLastSync: false,
         heldByReset: [],
+      });
+    });
+
+    it('attributes newer web progress to the App Password that wrote it', async () => {
+      mockRepo.findBookFileIdByBookId.mockResolvedValue(31);
+      mockRepo.getBookProgressForDashboard.mockResolvedValue({
+        deviceProgress: [],
+        readingProgress: {
+          percentage: 64.3,
+          appPasswordId: 17,
+          appPasswordLabel: 'iPhone app',
+          updatedAt: new Date('2026-03-01T11:00:00.000Z'),
+        },
+      });
+      mockRepo.getChapters.mockResolvedValue([]);
+      mockRepo.getLastFileWriteTime.mockResolvedValue(null);
+
+      const result = await service.getBookProgress(7, 99);
+
+      expect(result?.canonicalSource).toBe('web_reader');
+      expect(result?.canonicalSourceAttribution).toEqual({
+        key: 'app-password:17',
+        label: 'iPhone app',
+        bucket: 'bookorbit',
+        kind: 'app_password',
+        appPasswordId: 17,
       });
     });
 

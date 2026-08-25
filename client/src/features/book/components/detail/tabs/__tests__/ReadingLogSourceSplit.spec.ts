@@ -4,6 +4,12 @@ import type { BookReadingSourceSlice } from '@bookorbit/types'
 
 import ReadingLogSourceSplit from '../ReadingLogSourceSplit.vue'
 
+const descriptors = {
+  bookorbit: { key: 'bookorbit', label: 'BookOrbit', bucket: 'bookorbit', kind: 'built_in', appPasswordId: null },
+  koreader: { key: 'koreader', label: 'KOReader', bucket: 'koreader', kind: 'built_in', appPasswordId: null },
+  kobo: { key: 'kobo', label: 'Kobo', bucket: 'kobo', kind: 'built_in', appPasswordId: null },
+} as const
+
 function makeStats(bySource: BookReadingSourceSlice[]) {
   return {
     totalSessions: 0,
@@ -33,7 +39,7 @@ describe('ReadingLogSourceSplit', () => {
 
   it('renders nothing when the book was read from a single source', () => {
     const wrapper = mount(ReadingLogSourceSplit, {
-      props: { stats: makeStats([{ bucket: 'koreader', totalSeconds: 100, totalSessions: 2 }]) },
+      props: { stats: makeStats([{ ...descriptors.koreader, totalSeconds: 100, totalSessions: 2 }]) },
     })
     expect(wrapper.find('div').exists()).toBe(false)
   })
@@ -42,9 +48,9 @@ describe('ReadingLogSourceSplit', () => {
     const wrapper = mount(ReadingLogSourceSplit, {
       props: {
         stats: makeStats([
-          { bucket: 'bookorbit', totalSeconds: 3600, totalSessions: 4 },
-          { bucket: 'koreader', totalSeconds: 120, totalSessions: 1 },
-          { bucket: 'kobo', totalSeconds: 30, totalSessions: 1 },
+          { ...descriptors.bookorbit, totalSeconds: 3600, totalSessions: 4 },
+          { ...descriptors.koreader, totalSeconds: 120, totalSessions: 1 },
+          { ...descriptors.kobo, totalSeconds: 30, totalSessions: 1 },
         ]),
       },
     })
@@ -69,8 +75,8 @@ describe('ReadingLogSourceSplit', () => {
     const wrapper = mount(ReadingLogSourceSplit, {
       props: {
         stats: makeStats([
-          { bucket: 'bookorbit', totalSeconds: 0, totalSessions: 1 },
-          { bucket: 'kobo', totalSeconds: 0, totalSessions: 1 },
+          { ...descriptors.bookorbit, totalSeconds: 0, totalSessions: 1 },
+          { ...descriptors.kobo, totalSeconds: 0, totalSessions: 1 },
         ]),
       },
     })
@@ -81,8 +87,8 @@ describe('ReadingLogSourceSplit', () => {
     const wrapper = mount(ReadingLogSourceSplit, {
       props: {
         stats: makeStats([
-          { bucket: 'bookorbit', totalSeconds: 300, totalSessions: 2 },
-          { bucket: 'kobo', totalSeconds: 100, totalSessions: 1 },
+          { ...descriptors.bookorbit, totalSeconds: 300, totalSessions: 2 },
+          { ...descriptors.kobo, totalSeconds: 100, totalSessions: 1 },
         ]),
       },
     })
@@ -91,5 +97,58 @@ describe('ReadingLogSourceSplit', () => {
     expect(segments).toHaveLength(2)
     expect(segments[0]!.attributes('style')).toContain('width: 75%')
     expect(segments[1]!.attributes('style')).toContain('width: 25%')
+  })
+
+  it('renders App Password names as distinct source slices', () => {
+    const wrapper = mount(ReadingLogSourceSplit, {
+      props: {
+        stats: makeStats([
+          { ...descriptors.bookorbit, totalSeconds: 100, totalSessions: 1 },
+          {
+            key: 'app-password:9',
+            label: 'iPhone app',
+            bucket: 'bookorbit',
+            kind: 'app_password',
+            appPasswordId: 9,
+            totalSeconds: 100,
+            totalSessions: 1,
+          },
+        ]),
+      },
+    })
+
+    expect(wrapper.text()).toContain('BookOrbit')
+    expect(wrapper.text()).toContain('iPhone app')
+    expect(wrapper.text()).toContain('50%')
+  })
+
+  it('disambiguates duplicate App Password names by credential id', () => {
+    const wrapper = mount(ReadingLogSourceSplit, {
+      props: {
+        stats: makeStats([
+          {
+            key: 'app-password:9',
+            label: 'Phone',
+            bucket: 'bookorbit',
+            kind: 'app_password',
+            appPasswordId: 9,
+            totalSeconds: 100,
+            totalSessions: 1,
+          },
+          {
+            key: 'app-password:12',
+            label: 'Phone',
+            bucket: 'bookorbit',
+            kind: 'app_password',
+            appPasswordId: 12,
+            totalSeconds: 100,
+            totalSessions: 1,
+          },
+        ]),
+      },
+    })
+
+    expect(wrapper.text()).toContain('Phone (#9)')
+    expect(wrapper.text()).toContain('Phone (#12)')
   })
 })

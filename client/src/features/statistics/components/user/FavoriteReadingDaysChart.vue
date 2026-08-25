@@ -3,10 +3,10 @@ import { computed, ref, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
 import { CalendarDays } from '@lucide/vue'
-import type { ReadingSessionSourceBucket } from '@bookorbit/types'
 
 import { useThemeStore } from '@/stores/theme'
-import { DEFAULT_BREAKDOWN_DIMENSION, getBreakdownSeries, type BreakdownDimension } from '../../lib/breakdown'
+import { DEFAULT_BREAKDOWN_DIMENSION, getBreakdownSeries, getReadingSecondsForSource, type BreakdownDimension } from '../../lib/breakdown'
+import { escapeHtml } from '../../lib/escape-html'
 import { useUserFavoriteReadingDays } from '../../composables/useUserFavoriteReadingDays'
 import BreakdownSelect from '../BreakdownSelect.vue'
 import ChartCard from '../ChartCard.vue'
@@ -46,14 +46,16 @@ watchEffect(() => {
   const weekdayCounts = weekdayOccurrencesInWindow(DAYS_WINDOW)
   const denominatorFor = (dayOfWeek: number) => Math.max(1, weekdayCounts[dayOfWeek] ?? 1)
   const formatKeys = [...new Set(data.value.flatMap((item) => Object.keys(item.byFormat)))].sort()
-  const seriesMeta = getBreakdownSeries(dimension.value, `${themeStore.resolvedTheme}:${themeStore.accent}`, formatKeys)
+  const sourceDescriptors = data.value.flatMap((item) => item.bySource)
+  const seriesMeta = getBreakdownSeries(dimension.value, `${themeStore.resolvedTheme}:${themeStore.accent}`, formatKeys, sourceDescriptors)
 
   const series = seriesMeta.map((meta) => ({
+    id: meta.key,
     type: 'bar',
     name: meta.label,
     stack: 'days',
     data: data.value.map((item, dayOfWeek) => {
-      const seconds = (dimension.value === 'source' ? item.bySource?.[meta.key as ReadingSessionSourceBucket] : item.byFormat?.[meta.key]) ?? 0
+      const seconds = dimension.value === 'source' ? getReadingSecondsForSource(item.bySource, meta.key) : (item.byFormat[meta.key] ?? 0)
       return Number((seconds / 60 / denominatorFor(dayOfWeek)).toFixed(1))
     }),
     barMaxWidth: 30,
@@ -78,7 +80,7 @@ watchEffect(() => {
         const header = `${first.axisValue}<br/><strong>${avgTotal}</strong> avg ${avgMinuteLabel}<br/>${totalMinutes} total ${totalMinuteLabel}<br/>${events} ${eventLabel}`
         const rows = params
           .filter((p) => p.data > 0)
-          .map((p) => `${p.marker} ${p.seriesName}: ${p.data} avg min`)
+          .map((p) => `${p.marker} ${escapeHtml(p.seriesName)}: ${p.data} avg min`)
           .join('<br/>')
         return rows ? `${header}<br/>${rows}` : header
       },

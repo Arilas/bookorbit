@@ -337,6 +337,7 @@ describe('KoboReadingStateService', () => {
       expect.objectContaining({
         userId: 1,
         bookFileId: 55,
+        appPasswordId: null,
         percentage: 42.5,
         cfi: null,
         pageNumber: null,
@@ -345,6 +346,9 @@ describe('KoboReadingStateService', () => {
         koboLocationValue: 'kobo.25.1',
         koboContentSourceProgressPercent: 12.25,
       }),
+    );
+    expect(progressInsert.onConflictDoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ set: expect.objectContaining({ appPasswordId: null }) }),
     );
     expect(db.execute).toHaveBeenCalledTimes(1);
   });

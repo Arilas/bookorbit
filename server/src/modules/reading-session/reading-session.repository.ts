@@ -8,8 +8,9 @@ import type {
   BookReadingSessionStats,
   BookReadingSourceSlice,
   ReadingSessionSource,
+  ReadingSessionSourceDescriptor,
 } from '@bookorbit/types';
-import { READING_SESSION_SOURCE_BUCKETS, emptySourceBucketRecord, toReadingSessionSourceBucket } from '@bookorbit/types';
+import { toReadingSessionSourceDescriptor } from '@bookorbit/types';
 import {
   aggregateReadingSessionDailyStats,
   getDayRangeForDateKeys,
@@ -20,12 +21,22 @@ import {
 import { toDateKeyInTimeZone } from '../../common/utils/timezone.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { bookFiles, books, readingSessions, userReadingDailyStats } from '../../db/schema';
+import { appPasswords, bookFiles, books, readingSessions, userReadingDailyStats } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 const MIN_READING_SESSION_SECONDS = 10;
+
+function compareSourceDescriptors(a: ReadingSessionSourceDescriptor, b: ReadingSessionSourceDescriptor): number {
+  const bucketOrder = { bookorbit: 0, koreader: 1, kobo: 2 } as const;
+  return (
+    bucketOrder[a.bucket] - bucketOrder[b.bucket] ||
+    Number(a.kind === 'app_password') - Number(b.kind === 'app_password') ||
+    a.label.localeCompare(b.label) ||
+    (a.appPasswordId ?? 0) - (b.appPasswordId ?? 0)
+  );
+}
 
 export type SaveReadingSessionResult =
   | { kind: 'saved' }
@@ -36,6 +47,7 @@ export type SaveReadingSessionResult =
 
 export interface InsertManualSessionParams {
   userId: number;
+  appPasswordId: number | null;
   bookId: number;
   libraryId: number;
   bookFileId: number | null;
@@ -63,6 +75,7 @@ export class ReadingSessionRepository {
     endProgress: number | null,
     source: ReadingSessionSource = 'web',
     timeZone = 'UTC',
+    appPasswordId: number | null = null,
   ): Promise<SaveReadingSessionResult> {
     if (durationSeconds < MIN_READING_SESSION_SECONDS) {
       return { kind: 'skipped', reason: 'duration_below_minimum' };
@@ -80,12 +93,14 @@ export class ReadingSessionRepository {
     }
 
     const { bookId, libraryId } = fileRow;
+    const attributedAppPasswordId = source === 'web' ? appPasswordId : null;
 
     return this.db.transaction(async (tx): Promise<SaveReadingSessionResult> => {
       const inserted = await tx
         .insert(readingSessions)
         .values({
           userId,
+          appPasswordId: attributedAppPasswordId,
           bookFileId,
           bookId,
           attemptId: sql`(select id from reading_attempts where user_id = ${userId} and book_id = ${bookId} and outcome is null and deleted_at is null limit 1)`,
@@ -111,13 +126,27 @@ export class ReadingSessionRepository {
   }
 
   async insertManualSession(params: InsertManualSessionParams): Promise<{ id: number }> {
-    const { userId, bookId, libraryId, bookFileId, sessionId, startedAt, endedAt, durationSeconds, progressDelta, endProgress, timeZone } = params;
+    const {
+      userId,
+      appPasswordId,
+      bookId,
+      libraryId,
+      bookFileId,
+      sessionId,
+      startedAt,
+      endedAt,
+      durationSeconds,
+      progressDelta,
+      endProgress,
+      timeZone,
+    } = params;
 
     return this.db.transaction(async (tx) => {
       const [inserted] = await tx
         .insert(readingSessions)
         .values({
           userId,
+          appPasswordId,
           bookId,
           bookFileId,
           attemptId: sql`(select id from reading_attempts where user_id = ${userId} and book_id = ${bookId} and outcome is null and deleted_at is null limit 1)`,
@@ -227,9 +256,12 @@ export class ReadingSessionRepository {
           endProgress: readingSessions.endProgress,
           format: sql<string | null>`nullif(${bookFiles.format}, '')`,
           source: readingSessions.source,
+          appPasswordId: readingSessions.appPasswordId,
+          appPasswordLabel: appPasswords.label,
         })
         .from(readingSessions)
         .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
+        .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
         .where(whereClause)
         .orderBy(orderExpr)
         .limit(pageSize)
@@ -267,13 +299,16 @@ export class ReadingSessionRepository {
       this.db
         .select({
           source: readingSessions.source,
+          appPasswordId: readingSessions.appPasswordId,
+          appPasswordLabel: appPasswords.label,
           totalSeconds: sql<number>`coalesce(sum(${readingSessions.durationSeconds}), 0)::int`,
           totalSessions: count(),
         })
         .from(readingSessions)
         .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
+        .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
         .where(whereClause)
-        .groupBy(readingSessions.source),
+        .groupBy(readingSessions.source, readingSessions.appPasswordId, appPasswords.label),
 
       this.findLatestEndProgress(userId, bookId),
     ]);
@@ -281,18 +316,22 @@ export class ReadingSessionRepository {
     const total = countRows[0]?.total ?? 0;
     const statsRow = statsRows[0];
 
-    const bucketSeconds = emptySourceBucketRecord();
-    const bucketSessions = emptySourceBucketRecord();
+    const sourceTotals = new Map<string, BookReadingSourceSlice>();
     for (const row of sourceRows) {
-      const bucket = toReadingSessionSourceBucket(row.source);
-      bucketSeconds[bucket] += row.totalSeconds;
-      bucketSessions[bucket] += row.totalSessions;
+      const descriptor = toReadingSessionSourceDescriptor(row.source, row.appPasswordId, row.appPasswordLabel);
+      const existing = sourceTotals.get(descriptor.key);
+      if (existing) {
+        existing.totalSeconds += row.totalSeconds;
+        existing.totalSessions += row.totalSessions;
+      } else {
+        sourceTotals.set(descriptor.key, {
+          ...descriptor,
+          totalSeconds: row.totalSeconds,
+          totalSessions: row.totalSessions,
+        });
+      }
     }
-    const bySource: BookReadingSourceSlice[] = READING_SESSION_SOURCE_BUCKETS.filter((bucket) => bucketSessions[bucket] > 0).map((bucket) => ({
-      bucket,
-      totalSeconds: bucketSeconds[bucket],
-      totalSessions: bucketSessions[bucket],
-    }));
+    const bySource = [...sourceTotals.values()].sort(compareSourceDescriptors);
 
     const dailySummary = aggregateReadingSessionDailyStats(
       summaryRows.map((row) => ({
@@ -344,6 +383,7 @@ export class ReadingSessionRepository {
       endProgress: r.endProgress ?? null,
       format: r.format ?? null,
       source: r.source ?? null,
+      sourceAttribution: toReadingSessionSourceDescriptor(r.source, r.appPasswordId, r.appPasswordLabel),
     }));
 
     return { items, total, page, pageSize, stats };

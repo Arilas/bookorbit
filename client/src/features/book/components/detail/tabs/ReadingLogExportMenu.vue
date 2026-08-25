@@ -34,8 +34,10 @@ function downloadFile(content: string, filename: string, mimeType: string) {
 }
 
 function csvEscape(value: string): string {
-  if (/[",\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`
-  return value
+  const isNumeric = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value)
+  const safeValue = !isNumeric && /^[=+\-@]/.test(value.trimStart()) ? `'${value}` : value
+  if (/[",\r\n]/.test(safeValue)) return `"${safeValue.replace(/"/g, '""')}"`
+  return safeValue
 }
 
 function pacePercentPerHour(session: BookReadingSession): string {
@@ -48,7 +50,7 @@ async function exportCsv() {
   exporting.value = true
   try {
     const items = await props.exportAll()
-    const header = 'startedAt,endedAt,durationSeconds,progressDelta,endProgress,pacePercentPerHour,format,source'
+    const header = 'startedAt,endedAt,durationSeconds,progressDelta,endProgress,pacePercentPerHour,format,source,sourceKey,sourceName'
     const rows = items.map((s) =>
       [
         s.startedAt,
@@ -59,6 +61,8 @@ async function exportCsv() {
         pacePercentPerHour(s),
         s.format ?? '',
         s.source ?? '',
+        s.sourceAttribution.key,
+        s.sourceAttribution.label,
       ]
         .map(csvEscape)
         .join(','),

@@ -127,12 +127,14 @@ function makeService(overrides: { bookMetadataLockService?: unknown } = {}) {
     findFileById: vi.fn(),
     findLibraryIdByBookId: vi.fn(),
     findProgress: vi.fn(),
+    findProgressWithAppAttribution: vi.fn(),
     findProgressByBook: vi.fn(),
     upsertProgress: vi.fn(),
     syncKoboReadingStateFromProgress: vi.fn(),
     isKoboTwoWayProgressSyncEnabled: vi.fn().mockResolvedValue(false),
     clearFileProgress: vi.fn(),
     findAudioProgress: vi.fn(),
+    findAudioProgressWithAppAttribution: vi.fn(),
     upsertAudioProgress: vi.fn(),
     bulkSetRating: vi.fn(),
     bulkUpdateMetadataFields: vi.fn(),
@@ -2313,11 +2315,11 @@ describe('BookService', () => {
       const progressRow = { fileId: 5, positionSeconds: 1234, updatedAt: new Date().toISOString() };
 
       bookRepo.findLibraryIdByBookId = vi.fn().mockResolvedValue(1);
-      bookRepo.findAudioProgress = vi.fn().mockResolvedValue(progressRow);
+      bookRepo.findAudioProgressWithAppAttribution = vi.fn().mockResolvedValue(progressRow);
 
       const result = await service.getAudioProgress(user.id, 10, user);
       expect(result).toBe(progressRow);
-      expect(bookRepo.findAudioProgress).toHaveBeenCalledWith(user.id, 10);
+      expect(bookRepo.findAudioProgressWithAppAttribution).toHaveBeenCalledWith(user.id, 10);
     });
 
     it('throws NotFoundException when book does not exist', async () => {
@@ -2345,6 +2347,7 @@ describe('BookService', () => {
           koboLocationValue: null,
           koboContentSourceProgressPercent: null,
           koreaderProgress: null,
+          appName: null,
           updatedAt: null,
         },
         {
@@ -2357,6 +2360,7 @@ describe('BookService', () => {
           koboLocationValue: 'kobo.25.1',
           koboContentSourceProgressPercent: 22,
           koreaderProgress: '/body/DocFragment[2]/body/p[1]/text()[1].0',
+          appName: 'iPhone app',
           updatedAt: new Date('2026-01-04T00:00:00.000Z'),
         },
       ]);
@@ -2375,6 +2379,7 @@ describe('BookService', () => {
           koboLocationValue: null,
           koboContentSourceProgressPercent: null,
           koreaderProgress: null,
+          appName: null,
           updatedAt: null,
         },
         {
@@ -2387,6 +2392,7 @@ describe('BookService', () => {
           koboLocationValue: 'kobo.25.1',
           koboContentSourceProgressPercent: 22,
           koreaderProgress: '/body/DocFragment[2]/body/p[1]/text()[1].0',
+          appName: 'iPhone app',
           updatedAt: new Date('2026-01-04T00:00:00.000Z'),
         },
       ]);
@@ -2405,7 +2411,7 @@ describe('BookService', () => {
 
       await service.saveProgress(user.id, 7, { percentage: 25, positionSeconds: 900 } as never, user);
 
-      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 7, null, null, 25, 900, null, null, null, null, null);
+      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 7, null, null, 25, 900, null, null, null, null, null, null);
     });
 
     it('passes null positionSeconds when not provided in DTO', async () => {
@@ -2419,7 +2425,7 @@ describe('BookService', () => {
 
       await service.saveProgress(user.id, 8, { percentage: 50 } as never, user);
 
-      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 8, null, null, 50, null, null, null, null, null, null);
+      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 8, null, null, 50, null, null, null, null, null, null, null);
       expect(libraryService.findOne).toHaveBeenCalledWith(2);
       expect(userBookStatusService.autoUpdate).toHaveBeenCalledWith(user.id, 11, 50, 3, 97);
     });
@@ -2437,10 +2443,32 @@ describe('BookService', () => {
 
       await expect(service.saveProgress(user.id, 8, { percentage: 50 } as never, user)).resolves.toBeUndefined();
 
-      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 8, null, null, 50, null, null, null, null, null, null);
+      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 8, null, null, 50, null, null, null, null, null, null, null);
       expect(userBookStatusService.autoUpdate).toHaveBeenCalledWith(user.id, 11, 50, 3, 97);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[book.progress_status_update] [fail] userId=1 bookId=11 libraryId=2'));
       warnSpy.mockRestore();
+    });
+
+    it('attributes progress to the authenticating app password', async () => {
+      const { service, bookRepo, libraryService, userBookStatusService } = makeService();
+      const user = makeUser({ authMethod: 'app_password', appPasswordId: 88, appPasswordLabel: 'iPhone app' });
+
+      bookRepo.findFileById.mockResolvedValue({ id: 8, bookId: 11, libraryId: 2, absolutePath: '/books/b.epub', format: 'epub' });
+      bookRepo.upsertProgress.mockResolvedValue(undefined);
+      libraryService.verifyUserAccess.mockResolvedValue(undefined);
+      libraryService.findOne = vi.fn().mockResolvedValue({ readingThreshold: 3, markAsFinishedPercentComplete: 97 });
+
+      await service.saveProgress(user.id, 8, { percentage: 50 } as never, user);
+
+      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 8, null, null, 50, null, null, null, null, null, null, 88);
+      expect(userBookStatusService.autoUpdate).toHaveBeenCalledWith(
+        user.id,
+        11,
+        50,
+        3,
+        97,
+        expect.objectContaining({ origin: 'bookorbit', externalProvider: 'iPhone app' }),
+      );
     });
 
     it('mirrors EPUB percentage to Kobo state for users with Kobo sync permission', async () => {
@@ -2550,9 +2578,37 @@ describe('BookService', () => {
         user,
       );
 
-      expect(bookRepo.upsertAudioProgress).toHaveBeenCalledWith(user.id, 10, 7, 120, 33);
+      expect(bookRepo.upsertAudioProgress).toHaveBeenCalledWith(user.id, 10, 7, 120, 33, null);
       expect(libraryService.findOne).toHaveBeenCalledWith(1);
       expect(userBookStatusService.autoUpdate).toHaveBeenCalledWith(user.id, 10, 33, 4, 90);
+    });
+
+    it('attributes audio progress to the authenticating app password', async () => {
+      const { service, bookRepo, libraryService, userBookStatusService } = makeService();
+      const user = makeUser({ id: 21, authMethod: 'app_password', appPasswordId: 88, appPasswordLabel: 'iPhone app' });
+
+      bookRepo.findLibraryIdByBookId.mockResolvedValue(1);
+      bookRepo.findFileById.mockResolvedValue({
+        id: 7,
+        absolutePath: '/books/audiobook-1.mp3',
+        format: 'mp3',
+        bookId: 10,
+        libraryId: 1,
+      });
+      libraryService.verifyUserAccess.mockResolvedValue(undefined);
+      libraryService.findOne = vi.fn().mockResolvedValue({ readingThreshold: 4, markAsFinishedPercentComplete: 90 });
+
+      await service.saveAudioProgress(user.id, 10, { percentage: 33, currentFileId: 7, positionSeconds: 120 }, user);
+
+      expect(bookRepo.upsertAudioProgress).toHaveBeenCalledWith(user.id, 10, 7, 120, 33, 88);
+      expect(userBookStatusService.autoUpdate).toHaveBeenCalledWith(
+        user.id,
+        10,
+        33,
+        4,
+        90,
+        expect.objectContaining({ origin: 'bookorbit', externalProvider: 'iPhone app' }),
+      );
     });
 
     it('throws BadRequestException when current file belongs to a different book', async () => {
@@ -3086,11 +3142,11 @@ describe('BookService', () => {
       const { service, bookRepo } = makeService();
       const user = makeUser({ id: 77 });
       vi.spyOn(service, 'verifyFileAccess').mockResolvedValue({ id: 1 } as never);
-      bookRepo.findProgress.mockResolvedValue({ percentage: 12 });
+      bookRepo.findProgressWithAppAttribution.mockResolvedValue({ percentage: 12, appName: 'iPhone app' });
 
-      await expect(service.getProgress(user.id, 1, user)).resolves.toEqual({ percentage: 12 });
+      await expect(service.getProgress(user.id, 1, user)).resolves.toEqual({ percentage: 12, appName: 'iPhone app' });
 
-      expect(bookRepo.findProgress).toHaveBeenCalledWith(77, 1);
+      expect(bookRepo.findProgressWithAppAttribution).toHaveBeenCalledWith(77, 1);
     });
 
     describe('updatePersonalNote', () => {

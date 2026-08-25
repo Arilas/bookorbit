@@ -1,4 +1,5 @@
 import type { HighlightOfTheDayWidgetData, ReadingGoalWidgetData, ReadingStreakWidgetData } from "./dashboard";
+import type { ReadingSessionSourceDescriptor } from "./reading-session-source-bucket";
 
 export interface KoreaderCredentials {
   username: string;
@@ -76,6 +77,7 @@ export interface KoreaderBookSyncInfo {
   canonicalChapterIndex: number | null;
   canonicalChapterTitle: string | null;
   canonicalSource: "koreader" | "web_reader";
+  canonicalSourceAttribution: ReadingSessionSourceDescriptor;
   canonicalUpdatedAt: string;
   devices: KoreaderBookProgress[];
   fileModifiedSinceLastSync: boolean;

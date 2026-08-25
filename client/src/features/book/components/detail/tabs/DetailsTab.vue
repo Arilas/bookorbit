@@ -68,6 +68,7 @@ type FileProgress = {
   cfi: string | null
   pageNumber: number | null
   updatedAt: string | null
+  appName: string | null
 }
 
 type FileProgressRow = FileProgress & {
@@ -648,7 +649,13 @@ function cancelReadingDateEdit(field: 'startedAt' | 'finishedAt') {
 }
 
 const fileProgressById = ref<Record<number, FileProgress>>({})
-const audiobookProgress = ref<{ percentage: number; currentFileId: number; positionSeconds: number; updatedAt: string | null } | null>(null)
+const audiobookProgress = ref<{
+  percentage: number
+  currentFileId: number
+  positionSeconds: number
+  updatedAt: string | null
+  appName: string | null
+} | null>(null)
 const collections = ref<CollectionMembership[]>([])
 const koboState = ref<BookKoboState | null>(null)
 const supplementalLoading = ref(false)
@@ -801,13 +808,16 @@ const fileProgressRows = computed(() =>
       cfi: null,
       pageNumber: null,
       updatedAt: null,
+      appName: null,
     },
   })),
 )
 const detailProgressRows = computed(() => fileProgressRows.value.filter(({ progress }) => progress.percentage > 0))
 
 type ProgressRow = {
+  key: string
   label: string
+  appName: string | null
   percentage: number
   color: string
   badgeStyle: Record<string, string>
@@ -823,7 +833,9 @@ const leftColumnProgressRows = computed<ProgressRow[]>(() => {
   for (const { file, progress } of detailProgressRows.value) {
     const color = getFormatColor(file.format ?? '?')
     rows.push({
+      key: `file:${file.id}`,
       label: (file.format ?? '?').toUpperCase(),
+      appName: progress.appName,
       percentage: progress.percentage,
       color,
       badgeStyle: { color, borderColor: `${color}66`, backgroundColor: `${color}1a` },
@@ -837,7 +849,9 @@ const leftColumnProgressRows = computed<ProgressRow[]>(() => {
     const format = audioFile?.format ?? 'audio'
     const color = getFormatColor(format)
     rows.push({
+      key: `audio:${audiobookProgress.value.currentFileId}`,
       label: format.toUpperCase(),
+      appName: audiobookProgress.value.appName,
       percentage: audiobookProgress.value.percentage,
       color,
       badgeStyle: { color, borderColor: `${color}66`, backgroundColor: `${color}1a` },
@@ -848,7 +862,9 @@ const leftColumnProgressRows = computed<ProgressRow[]>(() => {
   const koboPercent = koboState.value?.readingState?.progressPercent
   if (canViewKobo.value && koboPercent != null && koboPercent > 0) {
     rows.push({
+      key: 'kobo',
       label: 'Kobo',
+      appName: null,
       percentage: koboPercent,
       color: KOBO_COLOR,
       badgeStyle: { color: KOBO_COLOR, borderColor: `${KOBO_COLOR}66`, backgroundColor: `${KOBO_COLOR}1a` },
@@ -859,7 +875,9 @@ const leftColumnProgressRows = computed<ProgressRow[]>(() => {
   if (canViewKoreader.value && koreaderBookProgress.value != null && koreaderBookProgress.value.canonicalPercentage > 0) {
     const koreaderColor = '#b3b910'
     rows.push({
+      key: 'koreader',
       label: 'KO-R',
+      appName: null,
       percentage: koreaderBookProgress.value.canonicalPercentage,
       color: koreaderColor,
       badgeStyle: { color: koreaderColor, borderColor: `${koreaderColor}66`, backgroundColor: `${koreaderColor}1a` },
@@ -1156,6 +1174,7 @@ async function loadSupplemental() {
         cfi: row.cfi,
         pageNumber: row.pageNumber,
         updatedAt: row.updatedAt,
+        appName: row.appName ?? null,
       }
     }
     fileProgressById.value = progressMap
@@ -1168,6 +1187,7 @@ async function loadSupplemental() {
             currentFileId: data.currentFileId,
             positionSeconds: data.positionSeconds,
             updatedAt: data.updatedAt ?? null,
+            appName: data.appName ?? null,
           }
         : null
     } else {
@@ -1710,12 +1730,13 @@ watch(
           </div>
         </div>
         <div v-if="leftColumnProgressVisible.length" class="mt-4 space-y-2">
-          <div v-for="row in leftColumnProgressVisible" :key="row.label" class="flex items-center gap-2 cursor-default">
+          <div v-for="row in leftColumnProgressVisible" :key="row.key" class="flex items-center gap-2 cursor-default">
             <span
               class="w-11 shrink-0 text-center text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border"
               :style="row.badgeStyle"
               >{{ row.label }}</span
             >
+            <span v-if="row.appName" class="max-w-24 truncate text-[10px] text-muted-foreground" :title="row.appName">{{ row.appName }}</span>
             <div class="flex-1 h-1 rounded-full bg-muted overflow-hidden">
               <div
                 class="h-full rounded-full"
@@ -2342,12 +2363,13 @@ watch(
         class="md:hidden mt-6 pt-5 border-t border-border space-y-3"
       >
         <div v-if="leftColumnProgressVisible.length" class="space-y-2">
-          <div v-for="row in leftColumnProgressVisible" :key="row.label" class="flex items-center gap-2 cursor-default">
+          <div v-for="row in leftColumnProgressVisible" :key="row.key" class="flex items-center gap-2 cursor-default">
             <span
               class="w-11 shrink-0 text-center text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border"
               :style="row.badgeStyle"
               >{{ row.label }}</span
             >
+            <span v-if="row.appName" class="max-w-24 truncate text-[10px] text-muted-foreground" :title="row.appName">{{ row.appName }}</span>
             <div class="flex-1 h-1 rounded-full bg-muted overflow-hidden">
               <div
                 class="h-full rounded-full"

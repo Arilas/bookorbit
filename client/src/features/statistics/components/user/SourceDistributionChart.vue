@@ -3,11 +3,12 @@ import { computed, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
 import { MonitorSmartphone } from '@lucide/vue'
-import { READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
 import { breakpointsTailwind, useBreakpoints } from '@vueuse/core'
 
 import { useThemeStore } from '@/stores/theme'
-import { resolveSourceBucketColors } from '../../lib/source-bucket-colors'
+import { getReadingSourceDisplayLabels } from '@/lib/reading-source'
+import { escapeHtml } from '../../lib/escape-html'
+import { resolveReadingSourceColor } from '../../lib/source-bucket-colors'
 import { useUserReadingSourceDistribution } from '../../composables/useUserReadingSourceDistribution'
 import ChartCard from '../ChartCard.vue'
 
@@ -34,7 +35,8 @@ watchEffect(() => {
   option.value = {}
   if (isEmpty.value) return
 
-  const colors = resolveSourceBucketColors(`${themeStore.resolvedTheme}:${themeStore.accent}`)
+  const themeKey = `${themeStore.resolvedTheme}:${themeStore.accent}`
+  const displayLabels = getReadingSourceDisplayLabels(data.value.slices)
 
   option.value = {
     tooltip: {
@@ -42,7 +44,7 @@ watchEffect(() => {
       appendToBody: true,
       formatter: (p: { name: string; value: number; percent: number; color: string }) =>
         `<div style="font-size:12px;line-height:1.5">` +
-        `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${p.color};margin-right:6px"></span>${p.name}` +
+        `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${p.color};margin-right:6px"></span>${escapeHtml(p.name)}` +
         `<div><span style="font-weight:600">${formatDuration(p.value)}</span> · ${p.percent}%</div></div>`,
     },
     legend: {
@@ -60,9 +62,10 @@ watchEffect(() => {
         radius: ['45%', '72%'],
         center: md.value ? ['38%', '50%'] : ['50%', '44%'],
         data: data.value.slices.map((slice) => ({
-          name: READING_SESSION_SOURCE_BUCKET_LABELS[slice.bucket],
+          id: slice.key,
+          name: displayLabels.get(slice.key) ?? slice.label,
           value: slice.readingSeconds,
-          itemStyle: { color: colors[slice.bucket] },
+          itemStyle: { color: resolveReadingSourceColor(slice, themeKey) },
         })),
         label: { show: false },
       },

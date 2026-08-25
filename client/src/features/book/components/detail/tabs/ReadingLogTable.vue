@@ -93,7 +93,17 @@ const SESSION_SOURCE_PILLS = computed<Record<ReadingSessionSource, { label: stri
   manual: { label: t('book.detail.readingLog.table.sourceManual'), class: 'border-border bg-muted text-muted-foreground' },
 }))
 
-const showSource = computed(() => props.sessions.some((s) => s.source != null))
+function sourcePill(session: BookReadingSession): { label: string; class: string } | null {
+  if (session.sourceAttribution.kind === 'app_password') {
+    return {
+      label: session.sourceAttribution.label,
+      class: SESSION_SOURCE_PILLS.value.web.class,
+    }
+  }
+  return session.source ? SESSION_SOURCE_PILLS.value[session.source] : null
+}
+
+const showSource = computed(() => props.sessions.some((session) => sourcePill(session) != null))
 
 function handleDeleteClick(sessionId: number) {
   if (confirmDeleteId.value === sessionId) {
@@ -244,8 +254,8 @@ const rows = computed<TableRow[]>(() => {
                   <template v-else>{{ formatDateCompact(row.session.startedAt) }}</template>
                 </p>
                 <div class="mt-1 flex flex-wrap items-center gap-1.5">
-                  <span v-if="row.session.source" :class="[PILL_BASE, SESSION_SOURCE_PILLS[row.session.source].class]">
-                    {{ SESSION_SOURCE_PILLS[row.session.source].label }}
+                  <span v-if="sourcePill(row.session)" :class="[PILL_BASE, sourcePill(row.session)?.class]">
+                    {{ sourcePill(row.session)?.label }}
                   </span>
                   <span
                     v-if="hasMultipleFormats && row.session.format"
@@ -376,8 +386,8 @@ const rows = computed<TableRow[]>(() => {
                 </td>
                 <td class="hidden whitespace-nowrap px-4 py-1.5 text-muted-foreground sm:table-cell">{{ formatPace(row.session) }}</td>
                 <td v-if="showSource" class="whitespace-nowrap px-4 py-1.5">
-                  <span v-if="row.session.source" :class="[PILL_BASE, SESSION_SOURCE_PILLS[row.session.source].class]">
-                    {{ SESSION_SOURCE_PILLS[row.session.source].label }}
+                  <span v-if="sourcePill(row.session)" :class="[PILL_BASE, sourcePill(row.session)?.class]">
+                    {{ sourcePill(row.session)?.label }}
                   </span>
                   <span v-else class="text-muted-foreground">-</span>
                 </td>

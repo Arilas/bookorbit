@@ -637,7 +637,7 @@
         "creating": "Creating...",
         "label": "App or device name",
         "labelPlaceholder": "KOReader on Kobo Libra 2",
-        "labelHint": "Choose a name that identifies exactly where this password will be used.",
+        "labelHint": "This name appears in reading sessions and statistics. Choose one that identifies exactly where the password is used.",
         "expiration": "Expiration",
         "expirationHint": "The credential stops working after this period. Existing sessions are revoked when it expires.",
         "expirationDays": {
@@ -7433,7 +7433,7 @@
       "sourceDistribution": {
         "title": "Where You Read",
         "emptyTitle": "No reading activity yet",
-        "emptyDescription": "Read on the web, KOReader, or Kobo to see your source split."
+        "emptyDescription": "Read in BookOrbit, a named app, KOReader, or Kobo to see your source split."
       }
     }
   },

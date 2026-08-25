@@ -5,8 +5,7 @@ import { formatDate } from '@/i18n/formatters'
 import VChart from 'vue-echarts'
 import { CalendarRange } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import type { UserReadingSessionTimeline, UserReadingSessionTimelineItem, ReadingSessionSourceBucket } from '@bookorbit/types'
-import { READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
+import type { ReadingSessionSourceDescriptor, UserReadingSessionTimeline, UserReadingSessionTimelineItem } from '@bookorbit/types'
 
 import { useThemeStore } from '@/stores/theme'
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
@@ -17,6 +16,7 @@ import {
   type BreakdownDimension,
   type BreakdownSeries,
 } from '../../lib/breakdown'
+import { escapeHtml } from '../../lib/escape-html'
 import { fetchUserReadingSessionTimeline, updateUserReadingSessionTimelineSession } from '../../api/statistics.api'
 import { useStatisticsConfig } from '../../composables/useStatisticsConfig'
 import BreakdownSelect from '../BreakdownSelect.vue'
@@ -33,7 +33,7 @@ interface SessionSegment {
   bookId: number
   bookTitle: string | null
   bookFormat: string | null
-  bookSource: ReadingSessionSourceBucket
+  bookSource: ReadingSessionSourceDescriptor
   dayIndex: number
   startMinute: number
   endMinute: number
@@ -96,7 +96,12 @@ const isEmpty = computed(() => timeline.value.items.length === 0)
 
 const legendItems = computed<BreakdownSeries[]>(() => {
   const formatKeys = [...new Set(timeline.value.items.map((item) => (item.bookFormat ?? 'UNKNOWN').toUpperCase()))].sort()
-  return getBreakdownSeries(dimension.value, themeKey.value, formatKeys)
+  return getBreakdownSeries(
+    dimension.value,
+    themeKey.value,
+    formatKeys,
+    timeline.value.items.map((item) => item.bookSource),
+  )
 })
 
 const weekStartDate = computed(() => parseYmdLocal(timeline.value.weekStart) ?? getIsoWeekStart(selectedYear.value, selectedWeek.value))
@@ -185,7 +190,12 @@ function makeOption(data: SessionSegment[], preview: DragPreview | null, dim: Br
     bookSource: segment.bookSource,
     durationMinutes: segment.durationMinutes,
     itemStyle: {
-      color: getBreakdownColor(dim, dim === 'source' ? segment.bookSource : (segment.bookFormat ?? 'UNKNOWN').toUpperCase(), themeKeyValue),
+      color: getBreakdownColor(
+        dim,
+        dim === 'source' ? segment.bookSource.key : (segment.bookFormat ?? 'UNKNOWN').toUpperCase(),
+        themeKeyValue,
+        segment.bookSource.bucket,
+      ),
       opacity: 0.9,
     },
   }))
@@ -232,7 +242,7 @@ function makeOption(data: SessionSegment[], preview: DragPreview | null, dim: Br
           bookId?: number
           bookTitle?: string | null
           bookFormat?: string | null
-          bookSource?: ReadingSessionSourceBucket
+          bookSource?: ReadingSessionSourceDescriptor
           durationMinutes?: number
           value: number[]
         }
@@ -244,7 +254,7 @@ function makeOption(data: SessionSegment[], preview: DragPreview | null, dim: Br
         const duration = formatDuration(Math.max(0, d.durationMinutes ?? 0))
         const title = escapeHtml(d.bookTitle ?? 'Reading session')
         const format = escapeHtml(d.bookFormat ?? 'Unknown')
-        const source = d.bookSource ? READING_SESSION_SOURCE_BUCKET_LABELS[d.bookSource] : ''
+        const source = d.bookSource ? escapeHtml(d.bookSource.label) : ''
         const cover = d.bookId
           ? `<img src="${coverUrl(d.bookId)}" alt="Cover" style="width:32px;height:48px;object-fit:cover;border-radius:4px;" />`
           : ''
@@ -363,6 +373,18 @@ function shiftWeek(delta: number) {
   base.setDate(base.getDate() + delta * 7)
   selectedYear.value = getIsoWeekYear(base)
   selectedWeek.value = getIsoWeek(base)
+}
+
+function handlePreviousWeek() {
+  shiftWeek(-1)
+}
+
+function handleNextWeek() {
+  shiftWeek(1)
+}
+
+function toggleDragEnabled() {
+  dragEnabled.value = !dragEnabled.value
 }
 
 function handleChartMouseDown(params: { seriesId?: string; dataIndex?: number; event?: unknown } | null) {
@@ -621,10 +643,6 @@ function formatDuration(minutes: number): string {
   return `${secs}s`
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
-}
-
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
 }
@@ -711,7 +729,7 @@ function getIsoWeekStart(year: number, week: number): Date {
           dragEnabled ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground',
           persistLoading && 'pointer-events-none opacity-50',
         ]"
-        @click="dragEnabled = !dragEnabled"
+        @click="toggleDragEnabled"
       >
         {{ dragEnabled ? t('statistics.charts.readingSessionTimeline.dragOn') : t('statistics.charts.readingSessionTimeline.dragOff') }}
       </button>
@@ -724,7 +742,7 @@ function getIsoWeekStart(year: number, week: number): Date {
             type="button"
             class="border-border text-muted-foreground hover:text-foreground rounded-md border px-2 py-1 text-xs"
             :disabled="persistLoading"
-            @click="shiftWeek(-1)"
+            @click="handlePreviousWeek"
           >
             {{ t('statistics.charts.readingSessionTimeline.prev') }}
           </button>
@@ -733,7 +751,7 @@ function getIsoWeekStart(year: number, week: number): Date {
             type="button"
             class="border-border text-muted-foreground hover:text-foreground rounded-md border px-2 py-1 text-xs"
             :disabled="persistLoading"
-            @click="shiftWeek(1)"
+            @click="handleNextWeek"
           >
             {{ t('statistics.charts.readingSessionTimeline.next') }}
           </button>

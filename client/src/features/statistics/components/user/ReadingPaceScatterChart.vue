@@ -6,6 +6,7 @@ import { Zap } from '@lucide/vue'
 
 import { useThemeStore } from '@/stores/theme'
 import { DEFAULT_BREAKDOWN_DIMENSION, getBreakdownSeries, type BreakdownDimension } from '../../lib/breakdown'
+import { escapeHtml } from '../../lib/escape-html'
 import { useUserReadingPace } from '../../composables/useUserReadingPace'
 import BreakdownSelect from '../BreakdownSelect.vue'
 import ChartCard from '../ChartCard.vue'
@@ -30,12 +31,18 @@ watchEffect(() => {
 
   const visible = data.value.filter((p) => p.durationSeconds > 0 && p.durationSeconds <= 14400 && p.progressDelta > 0 && p.progressDelta <= 100)
   const formatKeys = [...new Set(visible.map((p) => p.format))].sort()
-  const seriesMeta = getBreakdownSeries(dimension.value, `${themeStore.resolvedTheme}:${themeStore.accent}`, formatKeys)
+  const seriesMeta = getBreakdownSeries(
+    dimension.value,
+    `${themeStore.resolvedTheme}:${themeStore.accent}`,
+    formatKeys,
+    visible.map((point) => point.source),
+  )
   const series = seriesMeta.map((meta) => ({
+    id: meta.key,
     type: 'scatter',
     name: meta.label,
     data: visible
-      .filter((p) => (dimension.value === 'source' ? p.bucket : p.format) === meta.key)
+      .filter((p) => (dimension.value === 'source' ? p.source.key : p.format) === meta.key)
       .map((p) => [+(p.durationSeconds / 60).toFixed(1), +p.progressDelta.toFixed(2)]),
     symbolSize: 5,
     itemStyle: { color: meta.color, opacity: 0.5 },
@@ -47,7 +54,7 @@ watchEffect(() => {
       trigger: 'item',
       formatter: (params: { seriesName: string; data: [number, number] }) => {
         const [mins, pct] = params.data
-        return `${params.seriesName}<br/>${mins} min session<br/><strong>${pct}%</strong> progress made`
+        return `${escapeHtml(params.seriesName)}<br/>${mins} min session<br/><strong>${pct}%</strong> progress made`
       },
     },
     grid: { left: '3%', right: '5%', bottom: '8%', top: 30, containLabel: true },

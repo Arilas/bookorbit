@@ -1301,9 +1301,14 @@ describe('AuthService', () => {
       const { service, userService, appPasswordService } = makeService();
       const user = makeFullUser({ tokenVersion: 2 });
       userService.findByIdWithPermissions.mockResolvedValue(user);
-      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt: new Date(Date.now() + 60_000) });
+      appPasswordService.findUsableById.mockResolvedValue({ id: 17, label: 'iPhone app', expiresAt: new Date(Date.now() + 60_000) });
 
-      await expect(service.validateUser(1, 2, 17)).resolves.toEqual({ ...user, authMethod: 'app_password', appPasswordId: 17 });
+      await expect(service.validateUser(1, 2, 17)).resolves.toEqual({
+        ...user,
+        authMethod: 'app_password',
+        appPasswordId: 17,
+        appPasswordLabel: 'iPhone app',
+      });
     });
 
     it('rejects an access token after its app password is revoked or expired', async () => {

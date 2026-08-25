@@ -12,7 +12,7 @@ import type {
   UserSessionArchetypePoint,
   UserStatisticsSummary,
 } from '@bookorbit/types';
-import { toReadingSessionSourceBucket } from '@bookorbit/types';
+import { toReadingSessionSourceDescriptor } from '@bookorbit/types';
 
 import {
   aggregateReadingSessionDailyStats,
@@ -24,6 +24,7 @@ import { resolveTimeZone } from '../../common/utils/timezone.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import {
+  appPasswords,
   bookFiles,
   bookGenres,
   bookMetadata,
@@ -45,6 +46,8 @@ type SessionTimelineItemRow = {
   bookTitle: string | null;
   bookFormat: string | null;
   source: ReadingSessionSource | null;
+  appPasswordId: number | null;
+  appPasswordLabel: string | null;
   startedAt: Date;
   endedAt: Date;
   durationSeconds: number;
@@ -56,6 +59,12 @@ type SessionTimelineConflictRow = {
   sessionId: number;
   startedAt: Date;
   endedAt: Date;
+};
+
+type SourceAttributionRow = {
+  source: ReadingSessionSource | null;
+  appPasswordId: number | null;
+  appPasswordLabel: string | null;
 };
 const RECENT_DAILY_AGGREGATION_DAYS = 2;
 
@@ -172,7 +181,7 @@ export class UserStatisticsRepository {
     filterLibraryIds?: number[],
     days = 365,
     timeZone = 'UTC',
-  ): Promise<{ hour: number; format: string; source: ReadingSessionSource | null; readingSeconds: number; eventsCount: number }[]> {
+  ): Promise<(SourceAttributionRow & { hour: number; format: string; readingSeconds: number; eventsCount: number })[]> {
     const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
     const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
     const since = this.sinceDateForDays(days);
@@ -185,11 +194,14 @@ export class UserStatisticsRepository {
         hour: hourExpr.as('hour'),
         format: formatExpr.as('format'),
         source: readingSessions.source,
+        appPasswordId: readingSessions.appPasswordId,
+        appPasswordLabel: appPasswords.label,
         durationSeconds: readingSessions.durationSeconds,
       })
       .from(readingSessions)
       .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
       .innerJoin(books, eq(books.id, readingSessions.bookId))
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
       .where(and(eq(readingSessions.userId, userId), gte(readingSessions.startedAt, since), libraryFilter))
       .as('session_buckets');
 
@@ -198,11 +210,13 @@ export class UserStatisticsRepository {
         hour: sessionBuckets.hour,
         format: sessionBuckets.format,
         source: sessionBuckets.source,
+        appPasswordId: sessionBuckets.appPasswordId,
+        appPasswordLabel: sessionBuckets.appPasswordLabel,
         readingSeconds: sql<number>`coalesce(sum(${sessionBuckets.durationSeconds}), 0)::int`,
         eventsCount: sql<number>`count(*)::int`,
       })
       .from(sessionBuckets)
-      .groupBy(sessionBuckets.hour, sessionBuckets.format, sessionBuckets.source)
+      .groupBy(sessionBuckets.hour, sessionBuckets.format, sessionBuckets.source, sessionBuckets.appPasswordId, sessionBuckets.appPasswordLabel)
       .orderBy(sessionBuckets.hour);
   }
 
@@ -224,6 +238,8 @@ export class UserStatisticsRepository {
         bookTitle: bookMetadata.title,
         bookFormat: sql<string | null>`nullif(${bookFiles.format}, '')`,
         source: readingSessions.source,
+        appPasswordId: readingSessions.appPasswordId,
+        appPasswordLabel: appPasswords.label,
         startedAt: readingSessions.startedAt,
         endedAt: readingSessions.endedAt,
         durationSeconds: readingSessions.durationSeconds,
@@ -232,6 +248,7 @@ export class UserStatisticsRepository {
       .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
       .innerJoin(books, eq(books.id, readingSessions.bookId))
       .leftJoin(bookMetadata, eq(bookMetadata.bookId, readingSessions.bookId))
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
       .where(
         and(
           eq(readingSessions.userId, userId),
@@ -261,6 +278,8 @@ export class UserStatisticsRepository {
         bookTitle: bookMetadata.title,
         bookFormat: sql<string | null>`nullif(${bookFiles.format}, '')`,
         source: readingSessions.source,
+        appPasswordId: readingSessions.appPasswordId,
+        appPasswordLabel: appPasswords.label,
         startedAt: readingSessions.startedAt,
         endedAt: readingSessions.endedAt,
         durationSeconds: readingSessions.durationSeconds,
@@ -269,6 +288,7 @@ export class UserStatisticsRepository {
       .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
       .innerJoin(books, eq(books.id, readingSessions.bookId))
       .leftJoin(bookMetadata, eq(bookMetadata.bookId, readingSessions.bookId))
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
       .where(and(eq(readingSessions.userId, userId), eq(readingSessions.id, sessionId), libraryFilter))
       .limit(1);
 
@@ -335,6 +355,8 @@ export class UserStatisticsRepository {
           bookTitle: bookMetadata.title,
           bookFormat: sql<string | null>`nullif(${bookFiles.format}, '')`,
           source: readingSessions.source,
+          appPasswordId: readingSessions.appPasswordId,
+          appPasswordLabel: appPasswords.label,
           startedAt: readingSessions.startedAt,
           endedAt: readingSessions.endedAt,
           durationSeconds: readingSessions.durationSeconds,
@@ -343,6 +365,7 @@ export class UserStatisticsRepository {
         .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
         .innerJoin(books, eq(books.id, readingSessions.bookId))
         .leftJoin(bookMetadata, eq(bookMetadata.bookId, readingSessions.bookId))
+        .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
         .where(and(eq(readingSessions.userId, userId), eq(readingSessions.id, sessionId)))
         .limit(1);
 
@@ -437,7 +460,7 @@ export class UserStatisticsRepository {
     isSuperuser: boolean,
     filterLibraryIds?: number[],
     days = 365,
-  ): Promise<{ dayOfWeek: number; source: ReadingSessionSource | null; format: string; readingSeconds: number; eventsCount: number }[]> {
+  ): Promise<(SourceAttributionRow & { dayOfWeek: number; format: string; readingSeconds: number; eventsCount: number })[]> {
     const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
     const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
     const since = this.sinceDateForDays(days);
@@ -448,6 +471,8 @@ export class UserStatisticsRepository {
       .select({
         dayOfWeek: dayOfWeekExpr,
         source: readingSessions.source,
+        appPasswordId: readingSessions.appPasswordId,
+        appPasswordLabel: appPasswords.label,
         format: formatExpr,
         readingSeconds: sql<number>`coalesce(sum(${readingSessions.durationSeconds}), 0)::int`,
         eventsCount: sql<number>`count(*)::int`,
@@ -455,8 +480,9 @@ export class UserStatisticsRepository {
       .from(readingSessions)
       .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
       .innerJoin(books, eq(books.id, readingSessions.bookId))
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
       .where(and(eq(readingSessions.userId, userId), gte(readingSessions.startedAt, since), libraryFilter))
-      .groupBy(dayOfWeekExpr, readingSessions.source, formatExpr)
+      .groupBy(dayOfWeekExpr, readingSessions.source, readingSessions.appPasswordId, appPasswords.label, formatExpr)
       .orderBy(dayOfWeekExpr);
   }
 
@@ -587,7 +613,7 @@ export class UserStatisticsRepository {
     isSuperuser: boolean,
     filterLibraryIds?: number[],
     days = 365,
-  ): Promise<{ genre: string; source: ReadingSessionSource | null; readingSeconds: number }[]> {
+  ): Promise<(SourceAttributionRow & { genre: string; readingSeconds: number })[]> {
     const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
     const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
     const since = this.sinceDateForDays(days);
@@ -598,14 +624,17 @@ export class UserStatisticsRepository {
       .select({
         genre: genres.name,
         source: readingSessions.source,
+        appPasswordId: readingSessions.appPasswordId,
+        appPasswordLabel: appPasswords.label,
         readingSeconds: sql<number>`coalesce(sum(${readingSessions.durationSeconds}), 0)::int`,
       })
       .from(readingSessions)
       .innerJoin(books, eq(books.id, readingSessions.bookId))
       .innerJoin(bookGenres, eq(bookGenres.bookId, books.id))
       .innerJoin(genres, eq(genres.id, bookGenres.genreId))
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
       .where(and(eq(readingSessions.userId, userId), gte(readingSessions.startedAt, since), libraryFilter))
-      .groupBy(genres.name, readingSessions.source);
+      .groupBy(genres.name, readingSessions.source, readingSessions.appPasswordId, appPasswords.label);
   }
 
   async getDailyReadingSecondsBySource(
@@ -613,7 +642,7 @@ export class UserStatisticsRepository {
     isSuperuser: boolean,
     filterLibraryIds: number[] | undefined,
     days: number,
-  ): Promise<{ day: string; source: ReadingSessionSource | null; readingSeconds: number }[]> {
+  ): Promise<(SourceAttributionRow & { day: string; readingSeconds: number })[]> {
     const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
     const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
     const since = this.sinceDateForDays(days);
@@ -623,12 +652,15 @@ export class UserStatisticsRepository {
       .select({
         day: dayExpr,
         source: readingSessions.source,
+        appPasswordId: readingSessions.appPasswordId,
+        appPasswordLabel: appPasswords.label,
         readingSeconds: sql<number>`coalesce(sum(${readingSessions.durationSeconds}), 0)::int`,
       })
       .from(readingSessions)
       .innerJoin(books, eq(books.id, readingSessions.bookId))
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
       .where(and(eq(readingSessions.userId, userId), gte(readingSessions.startedAt, since), libraryFilter))
-      .groupBy(dayExpr, readingSessions.source);
+      .groupBy(dayExpr, readingSessions.source, readingSessions.appPasswordId, appPasswords.label);
   }
 
   async getReadingPacePoints(userId: number, isSuperuser: boolean, filterLibraryIds?: number[], days = 1825): Promise<UserReadingPacePoint[]> {
@@ -641,11 +673,14 @@ export class UserStatisticsRepository {
         durationSeconds: readingSessions.durationSeconds,
         progressDelta: readingSessions.progressDelta,
         source: readingSessions.source,
+        appPasswordId: readingSessions.appPasswordId,
+        appPasswordLabel: appPasswords.label,
         format: sql<string>`upper(coalesce(${bookFiles.format}, 'UNKNOWN'))`,
       })
       .from(readingSessions)
       .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
       .innerJoin(books, eq(books.id, readingSessions.bookId))
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
       .where(
         and(
           eq(readingSessions.userId, userId),
@@ -661,7 +696,7 @@ export class UserStatisticsRepository {
     return rows.map((r) => ({
       durationSeconds: r.durationSeconds,
       progressDelta: r.progressDelta!,
-      bucket: toReadingSessionSourceBucket(r.source),
+      source: toReadingSessionSourceDescriptor(r.source, r.appPasswordId, r.appPasswordLabel),
       format: r.format,
     }));
   }

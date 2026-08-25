@@ -3,11 +3,11 @@ import { computed, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
 import { Tag } from '@lucide/vue'
-import { READING_SESSION_SOURCE_BUCKETS, READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
 
 import { useThemeStore } from '@/stores/theme'
 import { getThemePalette, readCssColor } from '@/lib/echarts'
 import { useUserGenreReadingTime } from '../../composables/useUserGenreReadingTime'
+import { escapeHtml } from '../../lib/escape-html'
 import ChartCard from '../ChartCard.vue'
 import ChartEmptyState from '../ChartEmptyState.vue'
 
@@ -41,11 +41,12 @@ watchEffect(() => {
         const pct = totalSeconds.value > 0 ? ((params.value / totalSeconds.value) * 100).toFixed(1) : '0'
         const bySource = bySourceByGenre.get(params.name)
         const sourceRows = bySource
-          ? READING_SESSION_SOURCE_BUCKETS.filter((bucket) => (bySource[bucket] ?? 0) > 0)
-              .map((bucket) => `${READING_SESSION_SOURCE_BUCKET_LABELS[bucket]}: ${((bySource[bucket] ?? 0) / 3600).toFixed(1)}h`)
+          ? bySource
+              .filter((source) => source.readingSeconds > 0)
+              .map((source) => `${escapeHtml(source.label)}: ${(source.readingSeconds / 3600).toFixed(1)}h`)
               .join('<br/>')
           : ''
-        const base = `<strong>${params.name}</strong><br/>${hours}h reading time<br/>${pct}% of total`
+        const base = `<strong>${escapeHtml(params.name)}</strong><br/>${hours}h reading time<br/>${pct}% of total`
         return sourceRows ? `${base}<br/>${sourceRows}` : base
       },
     },

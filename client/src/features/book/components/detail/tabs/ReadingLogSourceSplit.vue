@@ -2,8 +2,9 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { MonitorSmartphone } from '@lucide/vue'
-import type { BookReadingSessionStats, ReadingSessionSourceBucket } from '@bookorbit/types'
-import { READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
+import type { BookReadingSessionStats } from '@bookorbit/types'
+
+import { getReadingSourceDisplayLabels, resolveReadingSourceCssColor } from '@/lib/reading-source'
 
 const props = withDefaults(
   defineProps<{
@@ -15,12 +16,6 @@ const props = withDefaults(
 )
 
 const { t } = useI18n()
-
-const BUCKET_TOKEN: Record<ReadingSessionSourceBucket, string> = {
-  bookorbit: '--pill-web',
-  koreader: '--pill-koreader',
-  kobo: '--pill-kobo',
-}
 
 function formatDuration(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds))
@@ -35,10 +30,13 @@ const totalSeconds = computed(() => (props.stats?.bySource ?? []).reduce((sum, s
 
 const segments = computed(() => {
   const total = totalSeconds.value
-  return (props.stats?.bySource ?? []).map((slice) => ({
+  const sources = props.stats?.bySource ?? []
+  const displayLabels = getReadingSourceDisplayLabels(sources)
+  return sources.map((slice) => ({
+    key: slice.key,
     bucket: slice.bucket,
-    label: READING_SESSION_SOURCE_BUCKET_LABELS[slice.bucket],
-    token: BUCKET_TOKEN[slice.bucket],
+    label: displayLabels.get(slice.key) ?? slice.label,
+    color: resolveReadingSourceCssColor(slice),
     seconds: slice.totalSeconds,
     sessions: slice.totalSessions,
     widthPercent: total > 0 ? (slice.totalSeconds / total) * 100 : 0,
@@ -69,15 +67,15 @@ const shouldShow = computed(() => segments.value.length >= 2 && totalSeconds.val
       <div class="flex h-1.5 w-20 shrink-0 overflow-hidden rounded-full bg-muted sm:w-28">
         <div
           v-for="seg in segments"
-          :key="seg.bucket"
+          :key="seg.key"
           class="h-full"
-          :style="{ width: `${seg.widthPercent}%`, backgroundColor: `var(${seg.token})` }"
+          :style="{ width: `${seg.widthPercent}%`, backgroundColor: seg.color }"
           :title="`${seg.label}: ${seg.percent}%`"
         />
       </div>
       <div class="flex flex-wrap gap-x-3 gap-y-1.5">
-        <span v-for="seg in segments" :key="seg.bucket" class="flex items-center gap-1 text-muted-foreground">
-          <span class="size-1.5 rounded-full" :style="{ backgroundColor: `var(${seg.token})` }" />
+        <span v-for="seg in segments" :key="seg.key" class="flex items-center gap-1 text-muted-foreground">
+          <span class="size-1.5 rounded-full" :style="{ backgroundColor: seg.color }" />
           <span class="font-medium text-foreground">{{ seg.label }}</span>
           {{ seg.percent }}%
         </span>
@@ -92,15 +90,15 @@ const shouldShow = computed(() => segments.value.length >= 2 && totalSeconds.val
       <div class="flex h-2.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
         <div
           v-for="seg in segments"
-          :key="seg.bucket"
+          :key="seg.key"
           class="h-full"
-          :style="{ width: `${seg.widthPercent}%`, backgroundColor: `var(${seg.token})` }"
+          :style="{ width: `${seg.widthPercent}%`, backgroundColor: seg.color }"
           :title="`${seg.label}: ${seg.percent}%`"
         />
       </div>
       <div class="flex flex-wrap gap-x-3 gap-y-1.5 md:justify-end">
-        <div v-for="seg in segments" :key="seg.bucket" class="flex items-center gap-1.5 text-xs">
-          <span class="size-2.5 rounded-full" :style="{ backgroundColor: `var(${seg.token})` }" />
+        <div v-for="seg in segments" :key="seg.key" class="flex items-center gap-1.5 text-xs">
+          <span class="size-2.5 rounded-full" :style="{ backgroundColor: seg.color }" />
           <span class="font-medium text-foreground">{{ seg.label }}</span>
           <span class="text-muted-foreground">{{ seg.percent }}% · {{ formatDuration(seg.seconds) }}</span>
         </div>

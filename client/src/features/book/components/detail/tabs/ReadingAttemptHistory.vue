@@ -257,7 +257,7 @@ watch(
               </td>
               <td><input v-model="startedOn" type="date" class="h-8 rounded border border-input bg-background px-1" /></td>
               <td><input v-model="endedOn" type="date" class="h-8 rounded border border-input bg-background px-1" /></td>
-              <td>{{ attempt.origin }}</td>
+              <td>{{ attempt.externalProvider ?? attempt.origin }}</td>
               <td>{{ attempt.totalSessions }} sessions</td>
               <td class="text-right">
                 <button class="p-1" aria-label="Save attempt" @click="handleSaveAttempt"><Check class="size-4" /></button
@@ -268,7 +268,7 @@ watch(
               <td class="py-2 font-medium text-foreground">{{ outcomeLabel(attempt.outcome) }}</td>
               <td>{{ formatDate(attempt.startedOn) }}</td>
               <td>{{ formatDate(attempt.endedOn) }}</td>
-              <td class="capitalize">{{ attempt.origin }}</td>
+              <td :class="{ capitalize: attempt.externalProvider == null }">{{ attempt.externalProvider ?? attempt.origin }}</td>
               <td>{{ attempt.totalSessions }} sessions</td>
               <td class="text-right">
                 <button class="p-1 text-muted-foreground hover:text-foreground" aria-label="Edit attempt" @click="handleEdit(attempt)">

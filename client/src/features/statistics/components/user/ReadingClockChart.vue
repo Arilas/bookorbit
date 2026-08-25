@@ -3,10 +3,10 @@ import { computed, ref, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
 import { Clock } from '@lucide/vue'
-import type { ReadingSessionSourceBucket } from '@bookorbit/types'
 
 import { useThemeStore } from '@/stores/theme'
-import { DEFAULT_BREAKDOWN_DIMENSION, getBreakdownSeries, type BreakdownDimension } from '../../lib/breakdown'
+import { DEFAULT_BREAKDOWN_DIMENSION, getBreakdownSeries, getReadingSecondsForSource, type BreakdownDimension } from '../../lib/breakdown'
+import { escapeHtml } from '../../lib/escape-html'
 import { useUserPeakReadingHours } from '../../composables/useUserPeakReadingHours'
 import BreakdownSelect from '../BreakdownSelect.vue'
 import ChartCard from '../ChartCard.vue'
@@ -53,13 +53,15 @@ watchEffect(() => {
   if (isEmpty.value || lowConfidence.value || !data.value.length) return
 
   const formatKeys = [...new Set(data.value.flatMap((d) => Object.keys(d.byFormat)))].sort()
-  const seriesMeta = getBreakdownSeries(dimension.value, `${themeStore.resolvedTheme}:${themeStore.accent}`, formatKeys)
+  const sourceDescriptors = data.value.flatMap((item) => item.bySource)
+  const seriesMeta = getBreakdownSeries(dimension.value, `${themeStore.resolvedTheme}:${themeStore.accent}`, formatKeys, sourceDescriptors)
 
   const series = seriesMeta.map((meta) => ({
+    id: meta.key,
     type: 'bar',
     name: meta.label,
-    data: data.value.map(
-      (d) => ((dimension.value === 'source' ? d.bySource?.[meta.key as ReadingSessionSourceBucket] : d.byFormat?.[meta.key]) ?? 0) / 60,
+    data: data.value.map((item) =>
+      dimension.value === 'source' ? getReadingSecondsForSource(item.bySource, meta.key) / 60 : (item.byFormat[meta.key] ?? 0) / 60,
     ),
     coordinateSystem: 'polar',
     stack: 'clock',
@@ -105,7 +107,7 @@ watchEffect(() => {
                   return (
                     `<div style="display:flex;align-items:center;gap:6px;margin-top:2px">` +
                     `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${p.color};flex-shrink:0"></span>` +
-                    `<span style="color:rgba(180,180,180,0.9)">${p.seriesName}</span>` +
+                    `<span style="color:rgba(180,180,180,0.9)">${escapeHtml(p.seriesName)}</span>` +
                     `<span style="margin-left:auto;padding-left:12px">${formatDuration(sourceSeconds)}</span>` +
                     `</div>`
                   )

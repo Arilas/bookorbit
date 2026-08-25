@@ -6,7 +6,7 @@ import { and, eq, gt, isNull } from 'drizzle-orm';
 import { hash } from 'bcryptjs';
 
 import * as schema from '../src/db/schema';
-import { closeE2EContext, createE2EContext, type Db, type E2EContext } from './e2e/app-harness';
+import { closeE2EContext, createE2EContext, seedLibrary, type Db, type E2EContext } from './e2e/app-harness';
 
 type CookieJar = Map<string, string>;
 
@@ -127,12 +127,17 @@ async function activeAppSessionCount(db: Db, appPasswordId: number): Promise<num
   return rows.length;
 }
 
-async function createAppPassword(app: NestFastifyApplication, accessToken: string, expiresAt: Date): Promise<CreateAppPasswordResponse> {
+async function createAppPassword(
+  app: NestFastifyApplication,
+  accessToken: string,
+  expiresAt: Date,
+  label = 'KOReader tablet',
+): Promise<CreateAppPasswordResponse> {
   const response = await app.inject({
     method: 'POST',
     url: '/api/v1/auth/app-passwords',
     headers: { authorization: `Bearer ${accessToken}` },
-    payload: { label: 'KOReader tablet', expiresAt: expiresAt.toISOString() },
+    payload: { label, expiresAt: expiresAt.toISOString() },
   });
 
   expect(response.statusCode).toBe(201);
@@ -361,5 +366,125 @@ describe('Application passwords (e2e)', () => {
     });
 
     await refresh(context.app, primary);
+  }, 15_000);
+
+  it('attributes progress, sessions, attempts, and statistics to the named app', async () => {
+    const credentials = await createUser(context.db);
+    const primary = await login(context.app, credentials.username, credentials.password);
+    const created = await createAppPassword(context.app, primary.accessToken, new Date(Date.now() + 180 * 24 * 60 * 60 * 1000), 'iPhone app');
+    const appSession = await login(context.app, credentials.username, created.password);
+    const library = await seedLibrary(context.db, {
+      rootPath: `/tmp/bookorbit-app-password-reading-${randomUUID()}`,
+      mode: 'book_per_file',
+      watch: false,
+    });
+    await context.db.insert(schema.userLibraryAccess).values({
+      userId: credentials.id,
+      libraryId: library.libraryId,
+      accessLevel: 'owner',
+    });
+    const [book] = await context.db
+      .insert(schema.books)
+      .values({
+        libraryId: library.libraryId,
+        libraryFolderId: library.libraryFolderId,
+        folderPath: 'iphone-reading',
+      })
+      .returning({ id: schema.books.id });
+    const [file] = await context.db
+      .insert(schema.bookFiles)
+      .values({
+        bookId: book.id,
+        libraryFolderId: library.libraryFolderId,
+        absolutePath: `/tmp/bookorbit-app-password-reading-${book.id}.epub`,
+        relPath: `iphone-reading-${book.id}.epub`,
+        ino: BigInt(900_000 + book.id),
+        sizeBytes: 1024,
+        format: 'epub',
+        role: 'content',
+      })
+      .returning({ id: schema.bookFiles.id });
+    await context.db.update(schema.books).set({ primaryFileId: file.id }).where(eq(schema.books.id, book.id));
+
+    const progressResponse = await context.app.inject({
+      method: 'POST',
+      url: `/api/v1/books/files/${file.id}/progress`,
+      headers: { authorization: `Bearer ${appSession.accessToken}` },
+      payload: { percentage: 37 },
+    });
+    expect(progressResponse.statusCode).toBe(201);
+
+    const endedAt = new Date(Date.now() - 1_000);
+    const startedAt = new Date(endedAt.getTime() - 10 * 60 * 1_000);
+    const sessionResponse = await context.app.inject({
+      method: 'POST',
+      url: `/api/v1/books/files/${file.id}/sessions`,
+      headers: { authorization: `Bearer ${appSession.accessToken}` },
+      payload: {
+        sessionId: `iphone-session-${randomUUID()}`,
+        startedAt: startedAt.toISOString(),
+        endedAt: endedAt.toISOString(),
+        durationSeconds: 600,
+        progressDelta: 12,
+        endProgress: 37,
+      },
+    });
+    expect(sessionResponse.statusCode).toBe(204);
+
+    const [storedProgress] = await context.db
+      .select({ appPasswordId: schema.readingProgress.appPasswordId })
+      .from(schema.readingProgress)
+      .where(and(eq(schema.readingProgress.userId, credentials.id), eq(schema.readingProgress.bookFileId, file.id)));
+    const [storedSession] = await context.db
+      .select({ appPasswordId: schema.readingSessions.appPasswordId })
+      .from(schema.readingSessions)
+      .where(and(eq(schema.readingSessions.userId, credentials.id), eq(schema.readingSessions.bookFileId, file.id)));
+    expect(storedProgress?.appPasswordId).toBe(created.appPassword.id);
+    expect(storedSession?.appPasswordId).toBe(created.appPassword.id);
+
+    const revoke = await context.app.inject({
+      method: 'DELETE',
+      url: `/api/v1/auth/app-passwords/${created.appPassword.id}`,
+      headers: { authorization: `Bearer ${primary.accessToken}` },
+    });
+    expect(revoke.statusCode).toBe(204);
+
+    const progressRead = await context.app.inject({
+      method: 'GET',
+      url: `/api/v1/books/files/${file.id}/progress`,
+      headers: { authorization: `Bearer ${primary.accessToken}` },
+    });
+    expect(progressRead.statusCode).toBe(200);
+    expect(progressRead.json()).toMatchObject({ percentage: 37, appName: 'iPhone app' });
+
+    const sessionsRead = await context.app.inject({
+      method: 'GET',
+      url: `/api/v1/books/${book.id}/sessions`,
+      headers: { authorization: `Bearer ${primary.accessToken}` },
+    });
+    expect(sessionsRead.statusCode).toBe(200);
+    expect(sessionsRead.json()).toMatchObject({
+      items: [{ sourceAttribution: { key: `app-password:${created.appPassword.id}`, label: 'iPhone app', kind: 'app_password' } }],
+      stats: { bySource: [{ key: `app-password:${created.appPassword.id}`, label: 'iPhone app', totalSeconds: 600 }] },
+    });
+
+    const sourceDistribution = await context.app.inject({
+      method: 'GET',
+      url: '/api/v1/user-statistics/reading-source-distribution?days=365',
+      headers: { authorization: `Bearer ${primary.accessToken}` },
+    });
+    expect(sourceDistribution.statusCode).toBe(200);
+    expect(sourceDistribution.json()).toMatchObject({
+      totalSeconds: 600,
+      slices: [{ key: `app-password:${created.appPassword.id}`, label: 'iPhone app', readingSeconds: 600 }],
+    });
+
+    const attempts = await context.app.inject({
+      method: 'GET',
+      url: `/api/v1/books/${book.id}/reading-attempts?page=1&pageSize=20`,
+      headers: { authorization: `Bearer ${primary.accessToken}` },
+    });
+    expect(attempts.statusCode).toBe(200);
+    expect(attempts.json()).toMatchObject({ items: [{ origin: 'bookorbit', externalProvider: 'iPhone app' }] });
   }, 15_000);
 });

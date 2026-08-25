@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, notExists, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, inArray, notExists, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { chunk } from '../../common/utils/batch.utils';
@@ -550,8 +550,15 @@ export class KoreaderRepository {
 
   async getReadingProgress(bookFileId: number, userId: number) {
     const [row] = await this.db
-      .select()
+      .select({
+        ...getTableColumns(schema.readingProgress),
+        appPasswordLabel: schema.appPasswords.label,
+      })
       .from(schema.readingProgress)
+      .leftJoin(
+        schema.appPasswords,
+        and(eq(schema.appPasswords.id, schema.readingProgress.appPasswordId), eq(schema.appPasswords.userId, schema.readingProgress.userId)),
+      )
       .where(and(eq(schema.readingProgress.bookFileId, bookFileId), eq(schema.readingProgress.userId, userId)))
       .limit(1);
     return row ?? null;

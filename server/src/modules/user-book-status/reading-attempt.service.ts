@@ -250,6 +250,7 @@ export class ReadingAttemptService {
     bookId: number;
     occurredOn: string;
     origin: Exclude<ReadingAttemptOrigin, 'manual' | 'hardcover' | 'migration'>;
+    externalProvider?: string;
     progress: number;
     finishThreshold: number;
     strongRereadEvidence: boolean;
@@ -270,6 +271,7 @@ export class ReadingAttemptService {
           endedOn: input.occurredOn,
           outcome: 'completed',
           origin: input.origin,
+          ...(input.externalProvider ? { externalProvider: input.externalProvider } : {}),
         });
       }
       if (!active && isFinished && hasCompleted && input.strongRereadEvidence) {
@@ -280,6 +282,7 @@ export class ReadingAttemptService {
           endedOn: input.occurredOn,
           outcome: 'completed',
           origin: input.origin,
+          ...(input.externalProvider ? { externalProvider: input.externalProvider } : {}),
         });
       }
       if (!active && !isFinished && (input.progress > 0 || input.strongRereadEvidence || input.meaningfulActivity)) {
@@ -288,6 +291,7 @@ export class ReadingAttemptService {
           bookId: input.bookId,
           startedOn: input.occurredOn,
           origin: input.origin,
+          ...(input.externalProvider ? { externalProvider: input.externalProvider } : {}),
         });
       }
 

@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Optional } from '@nestjs/common';
-import { SQL, and, asc, count, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import { SQL, and, asc, count, eq, getTableColumns, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import { SUPPORTED_BOOK_FORMATS } from '../upload/upload-validator.service';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
@@ -26,6 +26,7 @@ import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import {
   authors,
+  appPasswords,
   bookAuthors,
   bookCommunityRatings,
   bookFiles,
@@ -1501,6 +1502,19 @@ export class BookRepository {
     return row ?? null;
   }
 
+  async findProgressWithAppAttribution(userId: number, fileId: number) {
+    const [row] = await this.db
+      .select({
+        ...getTableColumns(readingProgress),
+        appName: appPasswords.label,
+      })
+      .from(readingProgress)
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingProgress.appPasswordId), eq(appPasswords.userId, readingProgress.userId)))
+      .where(and(eq(readingProgress.bookFileId, fileId), eq(readingProgress.userId, userId)))
+      .limit(1);
+    return row ?? null;
+  }
+
   async findProgressByBook(userId: number, bookId: number) {
     return this.db
       .select({
@@ -1513,10 +1527,12 @@ export class BookRepository {
         koboLocationValue: readingProgress.koboLocationValue,
         koboContentSourceProgressPercent: readingProgress.koboContentSourceProgressPercent,
         koreaderProgress: readingProgress.koreaderProgress,
+        appName: appPasswords.label,
         updatedAt: readingProgress.updatedAt,
       })
       .from(bookFiles)
       .leftJoin(readingProgress, and(eq(readingProgress.bookFileId, bookFiles.id), eq(readingProgress.userId, userId)))
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingProgress.appPasswordId), eq(appPasswords.userId, readingProgress.userId)))
       .where(eq(bookFiles.bookId, bookId))
       .orderBy(asc(bookFiles.sortOrder), asc(bookFiles.id));
   }
@@ -2024,6 +2040,7 @@ export class BookRepository {
     koboLocationValue?: string | null,
     koboContentSourceProgressPercent?: number | null,
     koreaderProgress?: string | null,
+    appPasswordId: number | null = null,
   ) {
     const now = new Date();
     const normalizedKoboLocationSource = this.normalizeKoboLocationPart(koboLocationSource);
@@ -2036,6 +2053,7 @@ export class BookRepository {
       .values({
         userId,
         bookFileId: fileId,
+        appPasswordId,
         cfi,
         pageNumber,
         percentage,
@@ -2050,6 +2068,7 @@ export class BookRepository {
       .onConflictDoUpdate({
         target: [readingProgress.bookFileId, readingProgress.userId],
         set: {
+          appPasswordId,
           cfi,
           pageNumber,
           percentage,
@@ -2336,14 +2355,34 @@ export class BookRepository {
     return row ?? null;
   }
 
-  async upsertAudioProgress(userId: number, bookId: number, currentFileId: number, positionSeconds: number, percentage: number) {
+  async findAudioProgressWithAppAttribution(userId: number, bookId: number) {
+    const [row] = await this.db
+      .select({
+        ...getTableColumns(audiobookProgress),
+        appName: appPasswords.label,
+      })
+      .from(audiobookProgress)
+      .leftJoin(appPasswords, and(eq(appPasswords.id, audiobookProgress.appPasswordId), eq(appPasswords.userId, audiobookProgress.userId)))
+      .where(and(eq(audiobookProgress.userId, userId), eq(audiobookProgress.bookId, bookId)))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async upsertAudioProgress(
+    userId: number,
+    bookId: number,
+    currentFileId: number,
+    positionSeconds: number,
+    percentage: number,
+    appPasswordId: number | null = null,
+  ) {
     const now = new Date();
     const [row] = await this.db
       .insert(audiobookProgress)
-      .values({ userId, bookId, currentFileId, positionSeconds, percentage, updatedAt: now })
+      .values({ userId, bookId, appPasswordId, currentFileId, positionSeconds, percentage, updatedAt: now })
       .onConflictDoUpdate({
         target: [audiobookProgress.userId, audiobookProgress.bookId],
-        set: { currentFileId, positionSeconds, percentage, updatedAt: now },
+        set: { appPasswordId, currentFileId, positionSeconds, percentage, updatedAt: now },
       })
       .returning();
     return row;

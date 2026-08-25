@@ -22,6 +22,7 @@ type ManualStatusPatch = {
 export type AutoReadingActivity = {
   occurredOn?: string;
   origin?: 'bookorbit' | 'kobo' | 'koreader';
+  externalProvider?: string;
   strongRereadEvidence?: boolean;
   meaningfulActivity?: boolean;
 };
@@ -251,6 +252,7 @@ export class UserBookStatusService {
         bookId,
         occurredOn: activity.occurredOn ?? new Date().toISOString().slice(0, 10),
         origin: activity.origin ?? 'bookorbit',
+        ...(activity.externalProvider ? { externalProvider: activity.externalProvider } : {}),
         progress: normalizedPercentage,
         finishThreshold: normalizedFinishThreshold,
         strongRereadEvidence: activity.strongRereadEvidence === true,

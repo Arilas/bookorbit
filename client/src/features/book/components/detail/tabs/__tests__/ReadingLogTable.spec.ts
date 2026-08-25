@@ -1,8 +1,9 @@
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
+import type { BookReadingSession } from '@bookorbit/types'
 import ReadingLogTable from '../ReadingLogTable.vue'
 
-function makeSession(overrides = {}) {
+function makeSession(overrides: Partial<BookReadingSession> = {}): BookReadingSession {
   return {
     id: 1,
     startedAt: '2026-04-15T10:00:00.000Z',
@@ -12,6 +13,13 @@ function makeSession(overrides = {}) {
     endProgress: 42.0,
     format: 'epub',
     source: null,
+    sourceAttribution: {
+      key: 'bookorbit',
+      label: 'BookOrbit',
+      bucket: 'bookorbit',
+      kind: 'built_in',
+      appPasswordId: null,
+    },
     ...overrides,
   }
 }
@@ -171,6 +179,28 @@ describe('ReadingLogTable', () => {
     expect(wrapper.text()).toContain('Manual')
     const headers = wrapper.findAll('th')
     expect(headers.some((h) => h.text() === 'Source')).toBe(true)
+  })
+
+  it('uses the App Password label without changing the built-in source styling', () => {
+    const wrapper = mountTable({
+      sessions: [
+        makeSession({
+          source: 'web',
+          sourceAttribution: {
+            key: 'app-password:9',
+            label: 'iPhone app',
+            bucket: 'bookorbit',
+            kind: 'app_password',
+            appPasswordId: 9,
+          },
+        }),
+      ],
+    })
+
+    expect(wrapper.text()).toContain('iPhone app')
+    const appPill = wrapper.findAll('tbody span').find((span) => span.text() === 'iPhone app')
+    expect(appPill?.classes()).toContain('text-[var(--pill-web)]')
+    expect(wrapper.findAll('tbody span').some((span) => span.text() === 'Web')).toBe(false)
   })
 
   it('hides the source column when no session has a source', () => {

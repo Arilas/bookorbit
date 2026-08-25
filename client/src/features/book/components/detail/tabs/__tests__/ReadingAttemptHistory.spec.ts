@@ -24,7 +24,7 @@ describe('ReadingAttemptHistory', () => {
             endedOn: '2024-01-12',
             outcome: 'completed',
             origin: 'manual',
-            externalProvider: null,
+            externalProvider: 'iPhone app',
             externalId: null,
             totalSessions: 4,
             totalSeconds: 3600,
@@ -46,6 +46,7 @@ describe('ReadingAttemptHistory', () => {
     expect(api).toHaveBeenCalledWith('/api/v1/books/10/reading-attempts?page=1&pageSize=10')
     expect(wrapper.text()).toContain('Completed')
     expect(wrapper.text()).toContain('4 sessions')
+    expect(wrapper.text()).toContain('iPhone app')
   })
 
   it('starts a reread with progress reset enabled by default', async () => {
