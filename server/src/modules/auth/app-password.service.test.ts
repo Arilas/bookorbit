@@ -26,6 +26,7 @@ function makeService() {
     findForVerification: vi.fn(),
     findUsableById: vi.fn(),
     touchLastUsed: vi.fn().mockResolvedValue(undefined),
+    rotateOwnedWithSessions: vi.fn(),
     revokeOwnedWithSessions: vi.fn(),
     revokeByIdWithSessions: vi.fn(),
     revokeAllForUser: vi.fn(),
@@ -196,6 +197,106 @@ describe('AppPasswordService', () => {
 
       await expect(service.verify(7, 'not-an-app-password')).resolves.toBeNull();
       expect(appPasswordRepo.findForVerification).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('rotate', () => {
+    it('replaces the secret while preserving the credential identity and label', async () => {
+      const { service, appPasswordRepo, auditEvents } = makeService();
+      const createdAt = new Date('2026-01-01T00:00:00.000Z');
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      appPasswordRepo.rotateOwnedWithSessions.mockImplementation((_userId: number, id: number, data: Record<string, unknown>) => ({
+        id,
+        userId: 7,
+        label: 'KOReader on Kobo',
+        secretHint: data.secretHint,
+        expiresAt: data.expiresAt,
+        lastUsedAt: null,
+        lastUsedIp: null,
+        createdAt,
+      }));
+
+      const result = await service.rotate(makeActor(), 11, { expiresAt }, '10.0.0.10');
+
+      expect(result.password).toMatch(/^boap_[a-f0-9]{24}_[A-Za-z0-9_-]{43}$/);
+      const [, selector, secret] = /^boap_([a-f0-9]{24})_([A-Za-z0-9_-]{43})$/.exec(result.password)!;
+      expect(appPasswordRepo.rotateOwnedWithSessions).toHaveBeenCalledWith(7, 11, {
+        selector,
+        secretHash: createHash('sha256').update(secret!).digest('hex'),
+        secretHint: secret!.slice(-4),
+        expiresAt: new Date(expiresAt),
+      });
+      expect(result.appPassword).toEqual({
+        id: 11,
+        label: 'KOReader on Kobo',
+        hint: secret!.slice(-4),
+        expiresAt,
+        lastUsedAt: null,
+        lastUsedIp: null,
+        createdAt: createdAt.toISOString(),
+        activeSessions: 0,
+        status: 'active',
+      });
+      expect(auditEvents.emit).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          action: AuditAction.AuthAppPasswordRotate,
+          ip: '10.0.0.10',
+          meta: { appPasswordId: 11, label: 'KOReader on Kobo' },
+        }),
+      );
+    });
+
+    it('allows an expired but non-revoked credential to be renewed', async () => {
+      const { service, appPasswordRepo } = makeService();
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      appPasswordRepo.rotateOwnedWithSessions.mockResolvedValue({
+        id: 9,
+        userId: 7,
+        label: 'Expired reader',
+        secretHint: 'abcd',
+        expiresAt,
+        lastUsedAt: null,
+        lastUsedIp: null,
+        createdAt: new Date('2025-01-01T00:00:00.000Z'),
+      });
+
+      await expect(service.rotate(makeActor(), 9, { expiresAt: expiresAt.toISOString() })).resolves.toEqual(
+        expect.objectContaining({ appPassword: expect.objectContaining({ id: 9, status: 'active' }) }),
+      );
+      expect(appPasswordRepo.rotateOwnedWithSessions).toHaveBeenCalledWith(7, 9, expect.any(Object));
+    });
+
+    it('rejects shared accounts before replacing the secret', async () => {
+      const { service, appPasswordRepo } = makeService();
+
+      await expect(
+        service.rotate({ id: 7, username: 'shared', provisioningMethod: 'shared' } as never, 9, {
+          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        }),
+      ).rejects.toThrow('Shared accounts cannot rotate application passwords');
+      expect(appPasswordRepo.rotateOwnedWithSessions).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an invalid date', 'not-a-date'],
+      ['a past date', new Date(Date.now() - 60_000).toISOString()],
+      ['less than 24 hours', new Date(Date.now() + 60_000).toISOString()],
+      ['more than 365 days', new Date(Date.now() + 366 * 24 * 60 * 60 * 1000).toISOString()],
+    ])('rejects %s before replacing the secret', async (_description, expiresAt) => {
+      const { service, appPasswordRepo } = makeService();
+
+      await expect(service.rotate(makeActor(), 9, { expiresAt })).rejects.toThrow(BadRequestException);
+      expect(appPasswordRepo.rotateOwnedWithSessions).not.toHaveBeenCalled();
+    });
+
+    it('does not reveal whether a missing credential belongs to another user', async () => {
+      const { service, appPasswordRepo } = makeService();
+      appPasswordRepo.rotateOwnedWithSessions.mockResolvedValue(null);
+
+      await expect(service.rotate(makeActor(), 999, { expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() })).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 

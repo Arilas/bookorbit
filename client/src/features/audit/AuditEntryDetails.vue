@@ -6,13 +6,21 @@ import { formatDateTime } from '@/i18n/formatters'
 import AuditCategoryBadge from './AuditCategoryBadge.vue'
 import { getAuditActionLabelKey } from './audit-actions'
 import { getAuditCategory } from './audit-display'
-import { getBookDeletionAuditMeta } from './audit-meta'
+import { getAuditAppPasswordActor, getBookDeletionAuditMeta } from './audit-meta'
 import { getAuditResourceLabelKey } from './audit-resources'
 
 const props = defineProps<{ entry: AuditLogEntry }>()
 const { t } = useI18n()
 
 const deletionMeta = computed(() => getBookDeletionAuditMeta(props.entry))
+const appPasswordActor = computed(() => getAuditAppPasswordActor(props.entry))
+const appPasswordActorDescription = computed(() => {
+  const actor = appPasswordActor.value
+  if (!actor) return ''
+  return actor.appPasswordLabel
+    ? t('audit.appPasswordWithId', { label: actor.appPasswordLabel, id: actor.appPasswordId })
+    : t('audit.appPasswordFallback', { id: actor.appPasswordId })
+})
 const category = computed(() => getAuditCategory(props.entry.action))
 </script>
 
@@ -37,6 +45,10 @@ const category = computed(() => getAuditCategory(props.entry.action))
           {{ entry.actorUsername }}
           <span v-if="entry.userId !== null">({{ t('audit.userId', { id: entry.userId }) }})</span>
         </dd>
+      </div>
+      <div v-if="appPasswordActor">
+        <dt class="font-medium text-foreground">{{ t('audit.detailAuthenticatedApp') }}</dt>
+        <dd class="mt-0.5">{{ appPasswordActorDescription }}</dd>
       </div>
       <div>
         <dt class="font-medium text-foreground">{{ t('audit.detailCategory') }}</dt>

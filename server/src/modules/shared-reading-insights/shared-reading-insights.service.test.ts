@@ -2,8 +2,8 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 
 import { SharedReadingInsightsService } from './shared-reading-insights.service';
 
-function makeUser() {
-  return { id: 5, username: 'viewer', isSuperuser: false, permissions: [], settings: {} } as never;
+function makeUser(overrides: Record<string, unknown> = {}) {
+  return { id: 5, username: 'viewer', isSuperuser: false, permissions: [], settings: {}, ...overrides } as never;
 }
 
 function summaryData() {
@@ -43,6 +43,22 @@ describe('SharedReadingInsightsService', () => {
     expect(result).toEqual({ sharingLevel: 'summary', consentedAt: '2026-07-01T00:00:00.000Z' });
     expect(repository.updateSharingSettings).toHaveBeenCalledWith(5, 'summary', expect.any(Date));
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ resourceId: 5, meta: { sharingLevel: 'summary' } }));
+  });
+
+  it('attributes a direct consent audit record to the requesting app password', async () => {
+    const repository = {
+      updateSharingSettings: vi.fn().mockResolvedValue({ sharingLevel: 'summary', consentedAt: new Date('2026-07-01T00:00:00Z') }),
+    };
+    const audit = { record: vi.fn().mockResolvedValue(undefined) };
+    const service = new SharedReadingInsightsService(repository as never, audit as never);
+
+    await service.updateMySettings(makeUser({ authMethod: 'app_password', appPasswordId: 12, appPasswordLabel: 'iPhone app' }), 'summary');
+
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorAuth: { authMethod: 'app_password', appPasswordId: 12, appPasswordLabel: 'iPhone app' },
+      }),
+    );
   });
 
   it('withdraws consent with a null timestamp and rejects missing update targets', async () => {

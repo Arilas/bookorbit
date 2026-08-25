@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AlertTriangle, Check, Copy } from '@lucide/vue'
 import { DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from 'reka-ui'
@@ -7,11 +7,15 @@ import { DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRo
 import { Button } from '@/components/ui/button'
 import { copyToClipboard } from '@/lib/clipboard'
 
-const props = defineProps<{
-  open: boolean
-  label: string
-  password: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    open: boolean
+    label: string
+    password: string
+    mode?: 'created' | 'rotated'
+  }>(),
+  { mode: 'created' },
+)
 
 const emit = defineEmits<{ close: [] }>()
 
@@ -19,6 +23,13 @@ const { t } = useI18n()
 const copied = ref(false)
 const copyFailed = ref(false)
 let feedbackTimer: ReturnType<typeof setTimeout> | null = null
+
+const title = computed(() => t(props.mode === 'rotated' ? 'settings.appPasswords.rotate.completedTitle' : 'settings.appPasswords.created.title'))
+const description = computed(() =>
+  t(props.mode === 'rotated' ? 'settings.appPasswords.rotate.completedDescription' : 'settings.appPasswords.created.description', {
+    label: props.label,
+  }),
+)
 
 watch(
   () => props.open,
@@ -66,10 +77,8 @@ function handleClose(): void {
         aria-modal="true"
         class="fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-card p-6 shadow-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <DialogTitle class="text-lg font-semibold text-foreground">{{ t('settings.appPasswords.created.title') }}</DialogTitle>
-        <DialogDescription class="mt-1 text-sm text-muted-foreground">
-          {{ t('settings.appPasswords.created.description', { label: props.label }) }}
-        </DialogDescription>
+        <DialogTitle class="text-lg font-semibold text-foreground">{{ title }}</DialogTitle>
+        <DialogDescription class="mt-1 text-sm text-muted-foreground">{{ description }}</DialogDescription>
 
         <div class="mt-5 space-y-4">
           <div class="flex items-start gap-2 rounded-md border border-[var(--pill-warning)]/40 bg-[var(--pill-warning)]/10 px-3 py-2">

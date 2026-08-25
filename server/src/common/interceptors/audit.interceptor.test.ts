@@ -101,4 +101,80 @@ describe('AuditInterceptor', () => {
       }),
     );
   });
+
+  it('adds trusted app-password actor context alongside route metadata', async () => {
+    const reflector = {
+      get: vi.fn().mockReturnValue({
+        action: 'collection.create',
+        description: 'Created collection',
+        getMeta: () => ({ source: 'route', actorAuth: { authMethod: 'app_password', appPasswordId: 999 } }),
+      }),
+    };
+    const auditEvents = {
+      emit: vi.fn(),
+    };
+    const interceptor = new AuditInterceptor(reflector as never, auditEvents as never);
+    const next: CallHandler = {
+      handle: vi.fn().mockReturnValue(of({ id: 1 })),
+    };
+
+    await firstValueFrom(
+      interceptor.intercept(
+        makeContext({
+          ip: '10.0.0.9',
+          user: {
+            id: 7,
+            username: 'reader',
+            authMethod: 'app_password',
+            appPasswordId: 12,
+            appPasswordLabel: 'iPhone app',
+          },
+        }),
+        next,
+      ),
+    );
+
+    expect(auditEvents.emit).toHaveBeenCalledWith(
+      AUDIT_EVENT,
+      expect.objectContaining({
+        actorAuth: {
+          authMethod: 'app_password',
+          appPasswordId: 12,
+          appPasswordLabel: 'iPhone app',
+        },
+        meta: { source: 'route', actorAuth: { authMethod: 'app_password', appPasswordId: 999 } },
+      }),
+    );
+  });
+
+  it('does not derive app-password context from a primary request carrying spoofed fields', async () => {
+    const reflector = {
+      get: vi.fn().mockReturnValue({
+        action: 'collection.create',
+        description: 'Created collection',
+      }),
+    };
+    const auditEvents = {
+      emit: vi.fn(),
+    };
+    const interceptor = new AuditInterceptor(reflector as never, auditEvents as never);
+
+    await firstValueFrom(
+      interceptor.intercept(
+        makeContext({
+          ip: '10.0.0.9',
+          user: {
+            id: 7,
+            username: 'reader',
+            authMethod: 'primary',
+            appPasswordId: 12,
+            appPasswordLabel: 'spoofed',
+          },
+        }),
+        { handle: vi.fn().mockReturnValue(of({})) },
+      ),
+    );
+
+    expect(auditEvents.emit).toHaveBeenCalledWith(AUDIT_EVENT, expect.not.objectContaining({ actorAuth: expect.anything() }));
+  });
 });

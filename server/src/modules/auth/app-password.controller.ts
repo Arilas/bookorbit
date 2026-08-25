@@ -10,6 +10,7 @@ import { RequirePrimaryAuthentication } from '../../common/decorators/require-pr
 import type { RequestUser } from '../../common/types/request-user';
 import { AppPasswordService } from './app-password.service';
 import { CreateAppPasswordDto } from './dto/create-app-password.dto';
+import { RotateAppPasswordDto } from './dto/rotate-app-password.dto';
 
 const ONE_MINUTE_MS = 60_000;
 
@@ -29,6 +30,13 @@ export class AppPasswordController {
   @HttpCode(HttpStatus.CREATED)
   create(@CurrentUser() user: RequestUser, @Body() dto: CreateAppPasswordDto, @Req() req: FastifyRequest) {
     return this.appPasswordService.create(user, dto, req.ip);
+  }
+
+  @Post(':id/rotate')
+  @Throttle({ default: { limit: 5, ttl: ONE_MINUTE_MS } })
+  @HttpCode(HttpStatus.OK)
+  rotate(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number, @Body() dto: RotateAppPasswordDto, @Req() req: FastifyRequest) {
+    return this.appPasswordService.rotate(user, id, dto, req.ip);
   }
 
   @Delete(':id')

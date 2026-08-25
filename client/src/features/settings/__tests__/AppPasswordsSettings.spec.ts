@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import type { AppPassword, CreateAppPasswordRequest, CreateAppPasswordResponse } from '@bookorbit/types'
+import type {
+  AppPassword,
+  CreateAppPasswordRequest,
+  CreateAppPasswordResponse,
+  RotateAppPasswordRequest,
+  RotateAppPasswordResponse,
+} from '@bookorbit/types'
 
 const mocks = vi.hoisted(() => {
   function makeRef<T>(value: T) {
@@ -12,10 +18,12 @@ const mocks = vi.hoisted(() => {
     loading: makeRef(false),
     loaded: makeRef(true),
     creating: makeRef(false),
+    rotatingId: makeRef<number | null>(null),
     revokingId: makeRef<number | null>(null),
     loadError: makeRef(false),
     load: vi.fn<() => Promise<boolean>>(),
     create: vi.fn<(payload: CreateAppPasswordRequest) => Promise<CreateAppPasswordResponse>>(),
+    rotate: vi.fn<(id: number, payload: RotateAppPasswordRequest) => Promise<RotateAppPasswordResponse>>(),
     revoke: vi.fn<(id: number) => Promise<void>>(),
     toastSuccess: vi.fn<(message: string) => void>(),
     toastError: vi.fn<(message: string) => void>(),
@@ -28,10 +36,12 @@ vi.mock('../composables/useAppPasswords', () => ({
     loading: mocks.loading,
     loaded: mocks.loaded,
     creating: mocks.creating,
+    rotatingId: mocks.rotatingId,
     revokingId: mocks.revokingId,
     loadError: mocks.loadError,
     load: mocks.load,
     create: mocks.create,
+    rotate: mocks.rotate,
     revoke: mocks.revoke,
   }),
 }))
@@ -51,10 +61,19 @@ vi.mock('../components/CreateAppPasswordDialog.vue', () => ({
 
 vi.mock('../components/AppPasswordCreatedDialog.vue', () => ({
   default: {
-    props: ['open', 'label', 'password'],
+    props: ['open', 'label', 'password', 'mode'],
     emits: ['close'],
     template:
-      '<div v-if="open" data-testid="created-dialog"><span>{{ label }}</span><code>{{ password }}</code><button data-testid="close-created" @click="$emit(\'close\')">Done</button></div>',
+      '<div v-if="open" data-testid="created-dialog"><span>{{ label }}</span><code>{{ password }}</code><span data-testid="created-mode">{{ mode }}</span><button data-testid="close-created" @click="$emit(\'close\')">Done</button></div>',
+  },
+}))
+
+vi.mock('../components/RotateAppPasswordDialog.vue', () => ({
+  default: {
+    props: ['open', 'appPassword', 'saving', 'error'],
+    emits: ['update:open', 'submit'],
+    template:
+      '<div v-if="open" data-testid="rotate-dialog"><span>{{ appPassword.label }}</span><p v-if="error">{{ error }}</p><button data-testid="submit-rotate" @click="$emit(\'submit\', { expiresAt: \'2027-11-23T12:00:00.000Z\' })">Submit rotation</button></div>',
   },
 }))
 
@@ -98,10 +117,15 @@ describe('AppPasswordsSettings', () => {
     mocks.loading.value = false
     mocks.loaded.value = true
     mocks.creating.value = false
+    mocks.rotatingId.value = null
     mocks.revokingId.value = null
     mocks.loadError.value = false
     mocks.load.mockResolvedValue(true)
     mocks.create.mockResolvedValue({ appPassword: appPassword(), password: 'bo_app_generated_secret' })
+    mocks.rotate.mockResolvedValue({
+      appPassword: appPassword({ hint: '91cd', expiresAt: '2027-11-23T12:00:00.000Z', activeSessions: 0 }),
+      password: 'bo_app_rotated_secret',
+    })
     mocks.revoke.mockResolvedValue(undefined)
   })
 
@@ -151,6 +175,38 @@ describe('AppPasswordsSettings', () => {
 
     expect(mocks.revoke).toHaveBeenCalledWith(7)
     expect(mocks.toastSuccess).toHaveBeenCalledWith('App password revoked')
+  })
+
+  it('rotates an active credential and reuses the one-time secret dialog', async () => {
+    mocks.appPasswords.value = [appPassword({ id: 7, activeSessions: 2 })]
+    mocks.rotate.mockResolvedValue({
+      appPassword: appPassword({ id: 7, hint: '91cd', expiresAt: '2027-11-23T12:00:00.000Z', activeSessions: 0 }),
+      password: 'bo_app_rotated_secret',
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('Rotate'))
+      ?.trigger('click')
+    expect(wrapper.get('[data-testid="rotate-dialog"]').text()).toContain('KOReader on Kobo')
+
+    await wrapper.get('[data-testid="submit-rotate"]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.rotate).toHaveBeenCalledWith(7, { expiresAt: '2027-11-23T12:00:00.000Z' })
+    expect(wrapper.get('[data-testid="created-dialog"]').text()).toContain('bo_app_rotated_secret')
+    expect(wrapper.get('[data-testid="created-mode"]').text()).toBe('rotated')
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('App password rotated')
+  })
+
+  it('offers renewal for an expired credential', async () => {
+    mocks.appPasswords.value = [appPassword({ status: 'expired', activeSessions: 0 })]
+    const wrapper = mountPage()
+    await flushPromises()
+
+    expect(wrapper.findAll('button').some((button) => button.text().includes('Renew'))).toBe(true)
   })
 
   it('shows a useful empty state', async () => {

@@ -7,6 +7,7 @@ import * as schema from '../../db/schema';
 
 type AppPasswordRow = typeof schema.appPasswords.$inferSelect;
 type NewAppPassword = Pick<typeof schema.appPasswords.$inferInsert, 'userId' | 'label' | 'selector' | 'secretHash' | 'secretHint' | 'expiresAt'>;
+type RotatedAppPassword = Pick<typeof schema.appPasswords.$inferInsert, 'selector' | 'secretHash' | 'secretHint' | 'expiresAt'>;
 
 const APP_PASSWORD_CREATE_LOCK_NAMESPACE = 4_280_400;
 
@@ -132,6 +133,37 @@ export class AppPasswordRepository {
         ...(ip ? { lastUsedIp: ip } : {}),
       })
       .where(and(eq(schema.appPasswords.id, id), isNull(schema.appPasswords.revokedAt)));
+  }
+
+  async rotateOwnedWithSessions(userId: number, id: number, data: RotatedAppPassword) {
+    return this.db.transaction(async (tx) => {
+      const [credential] = await tx
+        .update(schema.appPasswords)
+        .set({
+          ...data,
+          lastUsedAt: null,
+          lastUsedIp: null,
+        })
+        .where(and(eq(schema.appPasswords.id, id), eq(schema.appPasswords.userId, userId), isNull(schema.appPasswords.revokedAt)))
+        .returning({
+          id: schema.appPasswords.id,
+          userId: schema.appPasswords.userId,
+          label: schema.appPasswords.label,
+          secretHint: schema.appPasswords.secretHint,
+          expiresAt: schema.appPasswords.expiresAt,
+          lastUsedAt: schema.appPasswords.lastUsedAt,
+          lastUsedIp: schema.appPasswords.lastUsedIp,
+          createdAt: schema.appPasswords.createdAt,
+        });
+
+      if (!credential) return null;
+
+      // Removing every family prevents an old refresh token from being treated as
+      // a replay attack against the newly rotated secret for this same row ID.
+      await tx.delete(schema.refreshTokens).where(eq(schema.refreshTokens.appPasswordId, id));
+
+      return credential;
+    });
   }
 
   async revokeOwnedWithSessions(userId: number, id: number) {

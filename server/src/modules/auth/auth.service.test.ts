@@ -9,6 +9,7 @@ vi.mock('bcryptjs', () => ({
 }));
 
 import { AuthService } from './auth.service';
+import { AUDIT_EVENT } from '../audit/audit-events.service';
 
 function makeDb(overrides?: Record<string, unknown>) {
   const returning = vi.fn().mockResolvedValue([]);
@@ -32,6 +33,7 @@ function makeDb(overrides?: Record<string, unknown>) {
     set: vi.fn().mockReturnThis(),
     where,
     delete: vi.fn().mockReturnThis(),
+    execute: vi.fn().mockResolvedValue({ rows: [{ id: 17 }], rowCount: 1 }),
     transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
   };
   return { ...db, ...overrides } as never;
@@ -119,6 +121,7 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     revokeForRefreshReplay: vi.fn().mockResolvedValue(undefined),
     revokeAllForUser: vi.fn().mockResolvedValue(undefined),
   };
+  const auditEvents = { emit: vi.fn() };
 
   const service = new AuthService(
     userService as never,
@@ -127,7 +130,7 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     systemMailService as never,
     oidcSessionRepo as never,
     oidcDiscovery as never,
-    { emit: vi.fn() } as never,
+    auditEvents as never,
     magicLinkRepo as never,
     appSettings as never,
     appPasswordService as never,
@@ -146,6 +149,7 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     oidcDiscovery,
     magicLinkRepo,
     appPasswordService,
+    auditEvents,
   };
 }
 
@@ -464,7 +468,7 @@ describe('AuthService', () => {
     });
 
     it('issues an app-bound access token and longer refresh session for a valid app password', async () => {
-      const { service, db, userService, jwtService, appPasswordService } = makeService();
+      const { service, db, userService, jwtService, appPasswordService, auditEvents } = makeService();
       const reply = makeReply();
       const credentialExpiresAt = new Date(Date.now() + 300 * 24 * 60 * 60 * 1000);
       userService.findByUsername.mockResolvedValue({
@@ -477,7 +481,7 @@ describe('AuthService', () => {
         lockedUntil: new Date(Date.now() + 60_000),
       });
       userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
-      appPasswordService.verify.mockResolvedValue({ id: 17, label: 'KOReader', expiresAt: credentialExpiresAt });
+      appPasswordService.verify.mockResolvedValue({ id: 17, label: 'KOReader', selector: 'old-selector', expiresAt: credentialExpiresAt });
 
       const result = await service.login({ username: 'jdoe', password: 'boap_selector_secret' }, reply, '127.0.0.1');
 
@@ -495,6 +499,43 @@ describe('AuthService', () => {
       expect(refreshCookie?.[2].maxAge).toBeGreaterThan(89 * 24 * 60 * 60);
       expect(refreshCookie?.[2].maxAge).toBeLessThanOrEqual(90 * 24 * 60 * 60);
       expect((db as unknown as Record<string, vi.Mock>).set).not.toHaveBeenCalledWith({ failedLoginAttempts: 0, lockedUntil: null });
+      expect(auditEvents.emit).toHaveBeenCalledWith(
+        AUDIT_EVENT,
+        expect.objectContaining({
+          actorAuth: {
+            authMethod: 'app_password',
+            appPasswordId: 17,
+            appPasswordLabel: 'KOReader',
+          },
+        }),
+      );
+    });
+
+    it('rejects an app login when the credential rotates during session issuance', async () => {
+      const { service, db, userService, appPasswordService } = makeService();
+      userService.findByUsername.mockResolvedValue({
+        id: 1,
+        username: 'jdoe',
+        active: true,
+        passwordHash: 'mock-hash:primary-password',
+        tokenVersion: 4,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+      });
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
+      appPasswordService.verify.mockResolvedValue({
+        id: 17,
+        label: 'KOReader',
+        selector: 'old-selector',
+        expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+      });
+      (db as unknown as { execute: vi.Mock }).execute.mockResolvedValue({ rows: [], rowCount: 0 });
+      const reply = makeReply();
+
+      await expect(service.login({ username: 'jdoe', password: 'boap_selector_secret' }, reply, '127.0.0.1')).rejects.toThrow(UnauthorizedException);
+
+      expect((db as unknown as { values: vi.Mock }).values).not.toHaveBeenCalled();
+      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).not.toHaveBeenCalled();
     });
 
     it('rejects login attempts while account is locked', async () => {
@@ -1181,7 +1222,7 @@ describe('AuthService', () => {
         active: true,
         provisioningMethod: 'local',
       });
-      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt: appPasswordExpiresAt });
+      appPasswordService.findUsableById.mockResolvedValue({ id: 17, selector: 'old-selector', expiresAt: appPasswordExpiresAt });
       const request = makeRequest({ refresh_token: 'app-token' }) as unknown as { ip: string };
       request.ip = '127.0.0.1';
 
@@ -1207,6 +1248,36 @@ describe('AuthService', () => {
       const refreshCookie = (reply as unknown as { setCookie: vi.Mock }).setCookie.mock.calls.find(([name]) => name === 'refresh_token');
       expect(refreshCookie?.[2].maxAge).toBeGreaterThan(89 * 24 * 60 * 60);
       expect(refreshCookie?.[2].maxAge).toBeLessThanOrEqual(90 * 24 * 60 * 60);
+    });
+
+    it('rejects an app refresh when the credential rotates during token rotation', async () => {
+      const { service, db, appPasswordService } = makeService();
+      const reply = makeReply();
+      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
+        id: 11,
+        userId: 5,
+        appPasswordId: 17,
+        sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
+        id: 5,
+        tokenVersion: 2,
+        active: true,
+        provisioningMethod: 'local',
+      });
+      appPasswordService.findUsableById.mockResolvedValue({
+        id: 17,
+        selector: 'old-selector',
+        expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+      });
+      (db as unknown as { execute: vi.Mock }).execute.mockResolvedValue({ rows: [], rowCount: 0 });
+
+      await expect(service.refresh(makeRequest({ refresh_token: 'app-token' }), reply)).rejects.toThrow(UnauthorizedException);
+
+      expect((db as unknown as { values: vi.Mock }).values).not.toHaveBeenCalled();
+      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).not.toHaveBeenCalled();
     });
 
     it('isolates refresh replay response to the affected app password', async () => {

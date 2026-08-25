@@ -85,6 +85,61 @@ describe('AuditService', () => {
     await service.onModuleDestroy();
   });
 
+  it('merges trusted app-password actor context over route metadata', async () => {
+    const { service, auditEvents, auditRepository } = makeService();
+    service.onModuleInit();
+
+    auditEvents.emit(
+      AUDIT_EVENT,
+      makePayload({
+        meta: {
+          source: 'route',
+          actorAuth: { authMethod: 'app_password', appPasswordId: 999, appPasswordLabel: 'spoofed' },
+        },
+        actorAuth: { authMethod: 'app_password', appPasswordId: 12, appPasswordLabel: 'iPhone app' },
+      }),
+    );
+    await flushMicrotasks();
+
+    expect(auditRepository.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: {
+          source: 'route',
+          actorAuth: { authMethod: 'app_password', appPasswordId: 12, appPasswordLabel: 'iPhone app' },
+        },
+      }),
+    );
+
+    await service.onModuleDestroy();
+  });
+
+  it('strips untrusted actor context when no trusted context exists', async () => {
+    const { service, auditRepository } = makeService();
+
+    await service.record(
+      makePayload({
+        meta: { actorAuth: { authMethod: 'app_password', appPasswordId: 999, appPasswordLabel: 'spoofed' } },
+      }) as never,
+    );
+
+    expect(auditRepository.insert).toHaveBeenCalledWith(expect.objectContaining({ meta: null }));
+  });
+
+  it('preserves other metadata when stripping untrusted actor context', async () => {
+    const { service, auditRepository } = makeService();
+
+    await service.record(
+      makePayload({
+        meta: {
+          source: 'route',
+          actorAuth: { authMethod: 'app_password', appPasswordId: 999, appPasswordLabel: 'spoofed' },
+        },
+      }) as never,
+    );
+
+    expect(auditRepository.insert).toHaveBeenCalledWith(expect.objectContaining({ meta: { source: 'route' } }));
+  });
+
   it('drops writes when queue reaches max concurrent capacity', async () => {
     const { service, auditEvents, auditRepository } = makeService();
     const allPending = Array.from({ length: 20 }, () => deferred());

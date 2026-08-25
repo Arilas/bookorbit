@@ -5,6 +5,7 @@ import { tap } from 'rxjs/operators';
 import type { Observable } from 'rxjs';
 
 import type { RequestUser } from '../types/request-user';
+import { auditActorAuthFromUser } from '../utils/audit-actor-auth.utils';
 import { AUDITABLE_KEY, AuditableOptions, AuditRequest } from '../decorators/auditable.decorator';
 import { AUDIT_EVENT, AuditEventsService } from '../../modules/audit/audit-events.service';
 
@@ -24,6 +25,7 @@ export class AuditInterceptor implements NestInterceptor {
     return next.handle().pipe(
       tap((responseBody) => {
         const user = req.user;
+        const actorAuth = auditActorAuthFromUser(user);
         const description = typeof options.description === 'function' ? options.description(req, responseBody) : options.description;
         const meta = options.getMeta?.(req, responseBody);
 
@@ -35,6 +37,7 @@ export class AuditInterceptor implements NestInterceptor {
           resourceId: options.getResourceId?.(req, responseBody),
           description,
           ip: req.ip,
+          ...(actorAuth ? { actorAuth } : {}),
           ...(meta ? { meta } : {}),
         });
       }),

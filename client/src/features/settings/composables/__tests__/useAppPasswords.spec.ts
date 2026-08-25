@@ -63,6 +63,32 @@ describe('useAppPasswords', () => {
     expect(state.creating.value).toBe(false)
   })
 
+  it('rotates a credential with the selected expiry and replaces only that summary', async () => {
+    const rotated: CreateAppPasswordResponse = {
+      appPassword: appPassword({
+        id: 2,
+        hint: '91cd',
+        expiresAt: '2027-11-23T08:00:00.000Z',
+        activeSessions: 0,
+      }),
+      password: 'replacement-secret',
+    }
+    apiMock.mockResolvedValue(response(rotated))
+    const state = useAppPasswords()
+    state.appPasswords.value = [appPassword({ id: 1 }), appPassword({ id: 2, hint: 'old2' })]
+    const payload = { expiresAt: '2027-11-23T08:00:00.000Z' }
+
+    await expect(state.rotate(2, payload)).resolves.toEqual(rotated)
+
+    expect(apiMock).toHaveBeenCalledWith('/api/v1/auth/app-passwords/2/rotate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    expect(state.appPasswords.value).toEqual([appPassword({ id: 1 }), rotated.appPassword])
+    expect(state.rotatingId.value).toBeNull()
+  })
+
   it('revokes a credential and removes only that row', async () => {
     apiMock.mockResolvedValue(response(undefined))
     const state = useAppPasswords()
@@ -86,6 +112,9 @@ describe('useAppPasswords', () => {
 
     await expect(state.create({ label: 'KOReader', expiresAt: '2027-08-25T08:00:00.000Z' })).rejects.toThrow('Credential limit reached')
     expect(state.creating.value).toBe(false)
+
+    await expect(state.rotate(1, { expiresAt: '2027-08-25T08:00:00.000Z' })).rejects.toThrow('Credential limit reached')
+    expect(state.rotatingId.value).toBeNull()
 
     await expect(state.revoke(1)).rejects.toThrow('Credential limit reached')
     expect(state.revokingId.value).toBeNull()

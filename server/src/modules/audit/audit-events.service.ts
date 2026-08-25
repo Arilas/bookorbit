@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { EventEmitter } from 'events';
 
-import type { AuditAction, AuditResource } from '@bookorbit/types';
+import type { AuditAction, AuditAppPasswordActor, AuditLogMeta, AuditResource } from '@bookorbit/types';
 
 export const AUDIT_EVENT = 'audit.log';
 
@@ -13,7 +13,8 @@ export interface AuditEventPayload {
   resourceId?: number;
   description: string;
   ip?: string;
-  meta?: Record<string, unknown>;
+  meta?: AuditLogMeta;
+  actorAuth?: AuditAppPasswordActor;
 }
 
 @Injectable()

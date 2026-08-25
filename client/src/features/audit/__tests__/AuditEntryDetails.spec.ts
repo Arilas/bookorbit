@@ -58,4 +58,24 @@ describe('AuditEntryDetails', () => {
     expect(wrapper.text()).not.toContain('Deleted books')
     expect(wrapper.text()).not.toContain('Dune (book #10)')
   })
+
+  it('shows the trusted App Password name and safely escapes it', () => {
+    const wrapper = mount(AuditEntryDetails, {
+      props: {
+        entry: makeEntry({
+          meta: {
+            actorAuth: {
+              authMethod: 'app_password',
+              appPasswordId: 12,
+              appPasswordLabel: '<script>iPhone app</script>',
+            },
+          },
+        }),
+      },
+    })
+
+    expect(wrapper.text()).toContain('Authenticated app')
+    expect(wrapper.text()).toContain('<script>iPhone app</script> (app password #12)')
+    expect(wrapper.find('script').exists()).toBe(false)
+  })
 })

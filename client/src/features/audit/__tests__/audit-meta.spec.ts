@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { AuditAction, type AuditLogEntry } from '@bookorbit/types'
-import { getBookDeletionAuditMeta } from '../audit-meta'
+import { getAuditAppPasswordActor, getBookDeletionAuditMeta } from '../audit-meta'
 
 function makeEntry(meta: Record<string, unknown> | null, action = AuditAction.BookBulkDelete): AuditLogEntry {
   return {
@@ -35,5 +35,35 @@ describe('getBookDeletionAuditMeta', () => {
     expect(getBookDeletionAuditMeta(makeEntry({ total: 2, books: [{ id: 10, title: 'Dune' }], omitted: 0 }))).toBeNull()
     expect(getBookDeletionAuditMeta(makeEntry({ total: 1, books: [{ id: -1, title: 'Dune' }], omitted: 0 }))).toBeNull()
     expect(getBookDeletionAuditMeta(makeEntry({ total: 0, books: [], omitted: 0 }, AuditAction.AuthLogin))).toBeNull()
+  })
+})
+
+describe('getAuditAppPasswordActor', () => {
+  it('returns a validated App Password actor snapshot', () => {
+    expect(
+      getAuditAppPasswordActor(
+        makeEntry({
+          actorAuth: {
+            authMethod: 'app_password',
+            appPasswordId: 12,
+            appPasswordLabel: 'iPhone app',
+          },
+        }),
+      ),
+    ).toEqual({
+      authMethod: 'app_password',
+      appPasswordId: 12,
+      appPasswordLabel: 'iPhone app',
+    })
+  })
+
+  it.each([
+    null,
+    { actorAuth: null },
+    { actorAuth: { authMethod: 'primary', appPasswordId: 12, appPasswordLabel: 'spoofed' } },
+    { actorAuth: { authMethod: 'app_password', appPasswordId: 0, appPasswordLabel: 'invalid' } },
+    { actorAuth: { authMethod: 'app_password', appPasswordId: 12, appPasswordLabel: 123 } },
+  ])('rejects malformed actor metadata', (meta) => {
+    expect(getAuditAppPasswordActor(makeEntry(meta))).toBeNull()
   })
 })

@@ -64,6 +64,11 @@ describe('AuditLogPage', () => {
               description: 'Deleted 3 books',
               ip: null,
               meta: {
+                actorAuth: {
+                  authMethod: 'app_password',
+                  appPasswordId: 12,
+                  appPasswordLabel: 'iPhone app',
+                },
                 total: 3,
                 books: [
                   { id: 1, title: 'Dune' },
@@ -94,6 +99,9 @@ describe('AuditLogPage', () => {
 
     const categoryCell = wrapper.get('tbody tr td:nth-child(3)')
     expect(categoryCell.text()).toContain('Books')
+
+    const actorCell = wrapper.get('tbody tr td:nth-child(2)')
+    expect(actorCell.text()).toContain('via iPhone app')
 
     const eventCell = wrapper.get('tbody tr td:nth-child(4)')
     expect(eventCell.text()).toContain('Deleted 3 books')

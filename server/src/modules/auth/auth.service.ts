@@ -65,7 +65,7 @@ class ConcurrentRotationError extends Error {}
 
 type TokenProfile =
   | { authMethod: 'primary'; appPasswordId: null; appPasswordExpiresAt: null }
-  | { authMethod: 'app_password'; appPasswordId: number; appPasswordExpiresAt: Date };
+  | { authMethod: 'app_password'; appPasswordId: number; appPasswordExpiresAt: Date; appPasswordSelector: string };
 
 const PRIMARY_TOKEN_PROFILE: TokenProfile = {
   authMethod: 'primary',
@@ -299,6 +299,7 @@ export class AuthService {
           authMethod: 'app_password',
           appPasswordId: appPassword.id,
           appPasswordExpiresAt: appPassword.expiresAt,
+          appPasswordSelector: appPassword.selector,
         }
       : PRIMARY_TOKEN_PROFILE;
     const { accessToken, rawRefreshToken, refreshExpiresAt } = await this.issueTokenPair(user.id, user.tokenVersion, tokenProfile);
@@ -316,6 +317,15 @@ export class AuthService {
       description: `User '${user.username}' logged in${appPassword ? ` with app password '${appPassword.label}'` : ''}`,
       ip,
       meta: { authMethod: tokenProfile.authMethod, ...(appPassword ? { appPasswordId: appPassword.id } : {}) },
+      ...(appPassword
+        ? {
+            actorAuth: {
+              authMethod: 'app_password' as const,
+              appPasswordId: appPassword.id,
+              appPasswordLabel: appPassword.label,
+            },
+          }
+        : {}),
     });
 
     return { accessToken, user: this.buildUserResponse(fullUser!, tokenProfile.authMethod) };
@@ -421,6 +431,20 @@ export class AuthService {
     const rotatedAt = new Date();
     try {
       await this.db.transaction(async (tx) => {
+        if (tokenProfile.authMethod === 'app_password') {
+          const currentCredential = await tx.execute<{ id: number }>(sql`
+            select ${schema.appPasswords.id} as id
+            from ${schema.appPasswords}
+            where ${schema.appPasswords.id} = ${tokenProfile.appPasswordId}
+              and ${schema.appPasswords.userId} = ${row.userId}
+              and ${schema.appPasswords.selector} = ${tokenProfile.appPasswordSelector}
+              and ${schema.appPasswords.revokedAt} is null
+              and ${schema.appPasswords.expiresAt} > now()
+            for update
+          `);
+          if (!currentCredential.rows[0]) throw new UnauthorizedException();
+        }
+
         const updateResult = await tx
           .update(schema.refreshTokens)
           .set({ revokedAt: rotatedAt, rotatedAt, replacedByTokenHash: refreshTokenHash })
@@ -821,6 +845,20 @@ export class AuthService {
     const authenticatedAt = new Date();
 
     await this.db.transaction(async (tx) => {
+      if (tokenProfile.authMethod === 'app_password') {
+        const currentCredential = await tx.execute<{ id: number }>(sql`
+          select ${schema.appPasswords.id} as id
+          from ${schema.appPasswords}
+          where ${schema.appPasswords.id} = ${tokenProfile.appPasswordId}
+            and ${schema.appPasswords.userId} = ${userId}
+            and ${schema.appPasswords.selector} = ${tokenProfile.appPasswordSelector}
+            and ${schema.appPasswords.revokedAt} is null
+            and ${schema.appPasswords.expiresAt} > now()
+          for update
+        `);
+        if (!currentCredential.rows[0]) throw new UnauthorizedException();
+      }
+
       await tx.insert(schema.refreshTokens).values({
         userId,
         appPasswordId: tokenProfile.appPasswordId,
@@ -937,6 +975,7 @@ export class AuthService {
         authMethod: 'app_password',
         appPasswordId: appPassword.id,
         appPasswordExpiresAt: appPassword.expiresAt,
+        appPasswordSelector: appPassword.selector,
       } satisfies TokenProfile,
     };
   }

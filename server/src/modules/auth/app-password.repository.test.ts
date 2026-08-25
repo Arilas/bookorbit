@@ -110,6 +110,74 @@ describe('AppPasswordRepository', () => {
     expect(set).toHaveBeenCalledWith({ lastUsedAt: expect.any(Date) });
   });
 
+  it('rotates an owned credential and deletes every linked refresh family in one transaction', async () => {
+    const db = makeRepositoryDb();
+    const expiresAt = new Date(Date.now() + 86_400_000);
+    const rotated = {
+      id: 2,
+      userId: 7,
+      label: 'KOReader',
+      secretHint: 'wxyz',
+      expiresAt,
+      lastUsedAt: null,
+      lastUsedIp: null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
+    const credentialReturning = vi.fn().mockResolvedValue([rotated]);
+    const credentialWhere = vi.fn().mockReturnValue({ returning: credentialReturning });
+    const credentialSet = vi.fn().mockReturnValue({ where: credentialWhere });
+    const sessionWhere = vi.fn().mockResolvedValue({ rowCount: 3 });
+    const tx = {
+      update: vi.fn().mockReturnValue({ set: credentialSet }),
+      delete: vi.fn().mockReturnValue({ where: sessionWhere }),
+    };
+    db.transaction.mockImplementation((callback: (transaction: typeof tx) => unknown) => callback(tx));
+    const repository = new AppPasswordRepository(db as never);
+
+    const result = await repository.rotateOwnedWithSessions(7, 2, {
+      selector: 'new-selector',
+      secretHash: 'new-hash',
+      secretHint: 'wxyz',
+      expiresAt,
+    });
+
+    expect(result).toEqual(rotated);
+    expect(credentialSet).toHaveBeenCalledWith({
+      selector: 'new-selector',
+      secretHash: 'new-hash',
+      secretHint: 'wxyz',
+      expiresAt,
+      lastUsedAt: null,
+      lastUsedIp: null,
+    });
+    expect(tx.update).toHaveBeenCalledTimes(1);
+    expect(tx.delete).toHaveBeenCalledTimes(1);
+    expect(sessionWhere).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not delete refresh families when rotation does not match an owned credential', async () => {
+    const db = makeRepositoryDb();
+    const credentialReturning = vi.fn().mockResolvedValue([]);
+    const tx = {
+      update: vi.fn().mockReturnValue({
+        set: vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ returning: credentialReturning }) }),
+      }),
+      delete: vi.fn(),
+    };
+    db.transaction.mockImplementation((callback: (transaction: typeof tx) => unknown) => callback(tx));
+    const repository = new AppPasswordRepository(db as never);
+
+    await expect(
+      repository.rotateOwnedWithSessions(7, 999, {
+        selector: 'new-selector',
+        secretHash: 'new-hash',
+        secretHint: 'wxyz',
+        expiresAt: new Date(Date.now() + 86_400_000),
+      }),
+    ).resolves.toBeNull();
+    expect(tx.delete).not.toHaveBeenCalled();
+  });
+
   it('revokes an owned credential and its refresh tokens in one transaction', async () => {
     const db = makeRepositoryDb();
     const credentialReturning = vi.fn().mockResolvedValue([{ id: 2, userId: 7, label: 'KOReader' }]);

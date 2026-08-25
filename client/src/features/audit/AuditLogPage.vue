@@ -14,7 +14,7 @@ import AuditEntryDetails from './AuditEntryDetails.vue'
 import AuditResourcePicker from './AuditResourcePicker.vue'
 import { getAuditActionLabelKey } from './audit-actions'
 import { getAuditCategory, getAuditTarget } from './audit-display'
-import { getBookDeletionAuditMeta } from './audit-meta'
+import { getAuditAppPasswordActor, getBookDeletionAuditMeta } from './audit-meta'
 import { getAuditResourceBadgeClass, getAuditResourceLabelKey } from './audit-resources'
 import { useAuditLog } from './useAuditLog'
 
@@ -78,6 +78,12 @@ function targetSummary(entry: AuditLogEntry): string {
 function impactSummary(entry: AuditLogEntry): string {
   const deletion = getBookDeletionAuditMeta(entry)
   return deletion ? t('audit.bookImpact', { count: deletion.total }) : '-'
+}
+
+function appPasswordActorName(entry: AuditLogEntry): string | null {
+  const actor = getAuditAppPasswordActor(entry)
+  if (!actor) return null
+  return actor.appPasswordLabel ?? t('audit.appPasswordFallback', { id: actor.appPasswordId })
 }
 
 function detailRegionId(entryId: number, layout: 'desktop' | 'mobile') {
@@ -319,12 +325,17 @@ watch(
                 <time :datetime="entry.createdAt" :title="exactTimestamp(entry.createdAt)">{{ relativeTimestamp(entry.createdAt) }}</time>
               </td>
               <td class="px-3 py-2.5">
-                <Button variant="link" size="sm" type="button" class="h-auto p-0" @click="filterActor(entry)">
-                  {{ entry.actorUsername }}
-                </Button>
-                <span v-if="entry.userId !== null" class="ms-1 text-[11px] text-muted-foreground">{{
-                  t('audit.userIdCompact', { id: entry.userId })
-                }}</span>
+                <div>
+                  <Button variant="link" size="sm" type="button" class="h-auto p-0" @click="filterActor(entry)">
+                    {{ entry.actorUsername }}
+                  </Button>
+                  <span v-if="entry.userId !== null" class="ms-1 text-[11px] text-muted-foreground">{{
+                    t('audit.userIdCompact', { id: entry.userId })
+                  }}</span>
+                </div>
+                <p v-if="appPasswordActorName(entry)" class="mt-0.5 truncate text-[11px] text-muted-foreground">
+                  {{ t('audit.viaAppPassword', { label: appPasswordActorName(entry) }) }}
+                </p>
               </td>
               <td class="hidden px-3 py-2.5 xl:table-cell">
                 <AuditCategoryBadge :category="getAuditCategory(entry.action)" />
@@ -372,9 +383,14 @@ watch(
         <p class="mt-2 font-medium text-foreground">{{ entry.description }}</p>
         <p class="mt-1 text-sm text-muted-foreground">{{ targetSummary(entry) }}</p>
         <div class="mt-2 flex items-center justify-between gap-3">
-          <Button variant="link" size="sm" type="button" class="h-auto p-0" @click="filterActor(entry)">
-            {{ entry.actorUsername }}
-          </Button>
+          <div class="min-w-0">
+            <Button variant="link" size="sm" type="button" class="h-auto p-0" @click="filterActor(entry)">
+              {{ entry.actorUsername }}
+            </Button>
+            <p v-if="appPasswordActorName(entry)" class="truncate text-[11px] text-muted-foreground">
+              {{ t('audit.viaAppPassword', { label: appPasswordActorName(entry) }) }}
+            </p>
+          </div>
           <Button
             variant="link"
             size="sm"

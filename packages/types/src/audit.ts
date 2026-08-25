@@ -9,6 +9,7 @@ export enum AuditAction {
   AuthPasswordAdminReset = "auth.password.admin_reset",
   AuthSessionRevoke = "auth.session.revoke",
   AuthAppPasswordCreate = "auth.app_password.create",
+  AuthAppPasswordRotate = "auth.app_password.rotate",
   AuthAppPasswordRevoke = "auth.app_password.revoke",
 
   MagicLinkCreate = "magic_link.create",
@@ -144,6 +145,16 @@ export enum AuditResource {
   ReadingInsightsProfile = "reading_insights_profile",
 }
 
+export interface AuditAppPasswordActor {
+  authMethod: "app_password";
+  appPasswordId: number;
+  appPasswordLabel: string | null;
+}
+
+export interface AuditLogMeta extends Record<string, unknown> {
+  actorAuth?: AuditAppPasswordActor;
+}
+
 export interface AuditLogEntry {
   id: number;
   userId: number | null;
@@ -153,7 +164,7 @@ export interface AuditLogEntry {
   resourceId: number | null;
   description: string;
   ip: string | null;
-  meta: Record<string, unknown> | null;
+  meta: AuditLogMeta | null;
   createdAt: string;
 }
 
