@@ -117,6 +117,61 @@ describe('AuditService', () => {
     expect(auditRepository.insert).toHaveBeenCalledWith(expect.objectContaining({ resourceLabel: 'Old Shelf' }));
   });
 
+  it('merges trusted app-password actor context over route metadata', async () => {
+    const { service, auditEvents, auditRepository } = makeService();
+    service.onModuleInit();
+
+    auditEvents.emit(
+      AUDIT_EVENT,
+      makePayload({
+        meta: {
+          source: 'route',
+          actorAuth: { authenticationMethod: 'app_password', appPasswordId: 999, appName: 'spoofed' },
+        },
+        actorAuth: { authenticationMethod: 'app_password', appPasswordId: 12, appName: 'iPhone app' },
+      }),
+    );
+    await flushMicrotasks();
+
+    expect(auditRepository.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: {
+          source: 'route',
+          actorAuth: { authenticationMethod: 'app_password', appPasswordId: 12, appName: 'iPhone app' },
+        },
+      }),
+    );
+
+    await service.onModuleDestroy();
+  });
+
+  it('strips untrusted actor context when no trusted context exists', async () => {
+    const { service, auditRepository } = makeService();
+
+    await service.record(
+      makePayload({
+        meta: { actorAuth: { authenticationMethod: 'app_password', appPasswordId: 999, appName: 'spoofed' } },
+      }) as never,
+    );
+
+    expect(auditRepository.insert).toHaveBeenCalledWith(expect.objectContaining({ meta: null }));
+  });
+
+  it('preserves other metadata when stripping untrusted actor context', async () => {
+    const { service, auditRepository } = makeService();
+
+    await service.record(
+      makePayload({
+        meta: {
+          source: 'route',
+          actorAuth: { authenticationMethod: 'app_password', appPasswordId: 999, appName: 'spoofed' },
+        },
+      }) as never,
+    );
+
+    expect(auditRepository.insert).toHaveBeenCalledWith(expect.objectContaining({ meta: { source: 'route' } }));
+  });
+
   it('drops writes when queue reaches max concurrent capacity', async () => {
     const { service, auditEvents, auditRepository } = makeService();
     const allPending = Array.from({ length: 20 }, () => deferred());
@@ -205,7 +260,7 @@ describe('AuditService', () => {
     });
   });
 
-  it('serialises sign-in group times as ISO strings', async () => {
+  it('serialises sign-in group times and preserves the grouped app identity', async () => {
     const { service, auditRepository } = makeService();
     auditRepository.findSignInGroups.mockResolvedValue({
       data: [
@@ -214,6 +269,7 @@ describe('AuditService', () => {
           actorUsername: 'test1',
           userId: 2,
           ip: '192.168.8.230',
+          actorAuth: { authenticationMethod: 'app_password', appPasswordId: 12, appName: 'iPhone app' },
           signIns: 1,
           signOuts: 1,
           failed: 1,
@@ -230,6 +286,7 @@ describe('AuditService', () => {
     expect(page.total).toBe(1);
     expect(page.data[0]).toMatchObject({
       actorName: 'Test One',
+      actorAuth: { authenticationMethod: 'app_password', appPasswordId: 12, appName: 'iPhone app' },
       firstAt: '2026-10-16T01:49:37.000Z',
       lastAt: '2026-10-16T02:02:00.000Z',
       failedUsernames: ['test1'],

@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Header, HttpCode, HttpStatus, Param, ParseIntPipe, Post, Req } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { FastifyRequest } from 'fastify';
 
@@ -10,6 +10,7 @@ import { RequirePrimaryAuthentication } from '../../common/decorators/require-pr
 import type { RequestUser } from '../../common/types/request-user';
 import { AppPasswordService } from './app-password.service';
 import { CreateAppPasswordDto } from './dto/create-app-password.dto';
+import { RotateAppPasswordDto } from './dto/rotate-app-password.dto';
 
 const ONE_MINUTE_MS = 60_000;
 
@@ -27,8 +28,17 @@ export class AppPasswordController {
   @Post()
   @Throttle({ default: { limit: 5, ttl: ONE_MINUTE_MS } })
   @HttpCode(HttpStatus.CREATED)
+  @Header('Cache-Control', 'no-store')
   create(@CurrentUser() user: RequestUser, @Body() dto: CreateAppPasswordDto, @Req() req: FastifyRequest) {
     return this.appPasswordService.create(user, dto, req.ip);
+  }
+
+  @Post(':id/rotate')
+  @Throttle({ default: { limit: 5, ttl: ONE_MINUTE_MS } })
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  rotate(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number, @Body() dto: RotateAppPasswordDto, @Req() req: FastifyRequest) {
+    return this.appPasswordService.rotate(user, id, dto, req.ip);
   }
 
   @Delete(':id')

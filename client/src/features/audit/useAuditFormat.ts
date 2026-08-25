@@ -1,5 +1,5 @@
 import { useI18n } from 'vue-i18n'
-import type { AuditLogEntry } from '@bookorbit/types'
+import type { AuditAppPasswordActor, AuditLogEntry } from '@bookorbit/types'
 import { formatDate } from '@/i18n/formatters'
 import { getAuditActionLabelKey } from './audit-actions'
 import { getAuditTargetView, type AuditTargetView } from './audit-display'
@@ -26,6 +26,13 @@ export function useAuditFormat() {
       resource: resourceLabel,
       withId: (resource, id) => t('audit.target.withId', { type: resourceLabel(resource), id }),
     })
+  }
+
+  function appPasswordActor(actor: AuditAppPasswordActor | null | undefined): string | null {
+    if (!actor) return null
+    return actor.appName
+      ? t('audit.appPasswordWithId', { label: actor.appName, id: actor.appPasswordId })
+      : t('audit.appPasswordFallback', { id: actor.appPasswordId })
   }
 
   function dayDate(day: string): Date {
@@ -79,5 +86,5 @@ export function useAuditFormat() {
     })
   }
 
-  return { actionLabel, resourceLabel, targetOf, dayTitle, dayDetail, dayShort, dateShort, time, timeWithSeconds, fullDate }
+  return { actionLabel, resourceLabel, targetOf, appPasswordActor, dayTitle, dayDetail, dayShort, dateShort, time, timeWithSeconds, fullDate }
 }

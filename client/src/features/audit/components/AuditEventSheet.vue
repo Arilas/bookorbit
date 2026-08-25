@@ -9,7 +9,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/
 import { formatBytes } from '@/lib/formatting'
 import { formatNumber, formatRelativeTimeFromNow } from '@/i18n/formatters'
 import { AUDIT_CATEGORY_STYLE, getAuditCategory, getAuditFacts, getAuditPerson, getAuditSourceKind, type AuditFactKey } from '../audit-display'
-import { getBookDeletionAuditMeta } from '../audit-meta'
+import { getAuditAppPasswordActor, getBookDeletionAuditMeta } from '../audit-meta'
 import type { AuditEventSet } from '../audit-sets'
 import { useAuditFormat } from '../useAuditFormat'
 import AuditCategoryTile from './AuditCategoryTile.vue'
@@ -40,6 +40,8 @@ let request = 0
 const entry = computed(() => props.set?.first ?? null)
 const category = computed(() => (entry.value ? getAuditCategory(entry.value.action) : 'other'))
 const person = computed(() => (entry.value ? getAuditPerson(entry.value) : null))
+const appPasswordActor = computed(() => (entry.value ? getAuditAppPasswordActor(entry.value) : null))
+const appIdentityLabel = computed(() => format.appPasswordActor(appPasswordActor.value))
 const target = computed(() => (entry.value ? format.targetOf(entry.value) : null))
 const sourceKind = computed(() => (entry.value ? getAuditSourceKind(entry.value.ip, entry.value.actorUsername) : 'unknown'))
 const facts = computed(() => (entry.value ? getAuditFacts(entry.value) : []))
@@ -159,6 +161,11 @@ function personName(item: AuditLogEntry) {
                 <span v-else-if="person.kind === 'system'" class="text-xs text-muted-foreground">{{ t('audit.person.automation') }}</span>
                 <span v-else class="text-xs text-muted-foreground">{{ t('audit.person.deleted') }}</span>
               </dd>
+
+              <template v-if="appIdentityLabel">
+                <dt class="border-t border-foreground/8 py-[9px] text-muted-foreground">{{ t('audit.detailAuthenticatedApp') }}</dt>
+                <dd class="border-t border-foreground/8 py-[9px] text-foreground">{{ appIdentityLabel }}</dd>
+              </template>
 
               <dt class="border-t border-foreground/8 py-[9px] text-muted-foreground">{{ t('audit.drawer.source') }}</dt>
               <dd class="border-t border-foreground/8 py-[9px]"><AuditSourceLabel :kind="sourceKind" :ip="entry.ip" /></dd>

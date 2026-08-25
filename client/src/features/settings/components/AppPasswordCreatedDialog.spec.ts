@@ -43,6 +43,17 @@ describe('AppPasswordCreatedDialog', () => {
     expect(document.body.textContent).not.toContain('Copied!')
   })
 
+  it('uses rotation copy when showing a replacement secret', async () => {
+    mount(AppPasswordCreatedDialog, {
+      props: { open: true, label: 'iPhone app', password: 'bo_app_rotated_secret', mode: 'rotated' },
+      attachTo: document.body,
+    })
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('App password rotated')
+    expect(document.body.textContent).toContain('Use this new password to sign in from iPhone app')
+  })
+
   it('emits close so the owner can clear the one-time password', async () => {
     const wrapper = mount(AppPasswordCreatedDialog, {
       props: { open: true, label: 'KOReader on Kobo', password: 'bo_app_generated_secret' },

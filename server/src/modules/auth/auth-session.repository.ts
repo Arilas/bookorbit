@@ -10,18 +10,51 @@ type SessionRow = typeof schema.authSessions.$inferSelect;
 type RefreshRow = typeof schema.refreshTokens.$inferSelect;
 type ExchangeResult = { session: SessionRow; refresh: RefreshRow; tokenIndex: number } | null;
 
+export interface VerifiedAppPasswordBinding {
+  id: number;
+  selector: string;
+  lastUsedIp?: string;
+}
+
 @Injectable()
 export class AuthSessionRepository {
   constructor(@Inject(DB) private readonly db: NodePgDatabase<typeof schema>) {}
 
-  async create(data: typeof schema.authSessions.$inferInsert, tokenHash: string, oidc?: OidcSessionInput) {
+  async create(data: typeof schema.authSessions.$inferInsert, tokenHash: string, oidc?: OidcSessionInput, appPassword?: VerifiedAppPasswordBinding) {
+    const usesAppPassword = data.authenticationMethod === 'app_password';
+    if (usesAppPassword !== !!appPassword || data.appPasswordId !== (appPassword?.id ?? null)) return null;
+
     return this.db.transaction(async (tx) => {
+      const now = new Date();
       const [user] = await tx
         .select({ active: schema.users.active, tokenVersion: schema.users.tokenVersion })
         .from(schema.users)
         .where(eq(schema.users.id, data.userId))
         .for('update');
       if (!user?.active || user.tokenVersion !== data.tokenVersion) return null;
+
+      if (appPassword) {
+        const [credential] = await tx
+          .select({ id: schema.appPasswords.id })
+          .from(schema.appPasswords)
+          .where(
+            and(
+              eq(schema.appPasswords.id, appPassword.id),
+              eq(schema.appPasswords.userId, data.userId),
+              eq(schema.appPasswords.selector, appPassword.selector),
+              isNull(schema.appPasswords.revokedAt),
+              gt(schema.appPasswords.expiresAt, now),
+            ),
+          )
+          .for('update');
+        if (!credential) return null;
+
+        await tx
+          .update(schema.appPasswords)
+          .set({ lastUsedAt: now, ...(appPassword.lastUsedIp ? { lastUsedIp: appPassword.lastUsedIp } : {}) })
+          .where(eq(schema.appPasswords.id, credential.id));
+      }
+
       const [session] = await tx.insert(schema.authSessions).values(data).returning();
       await tx.insert(schema.refreshTokens).values({
         userId: session.userId,
@@ -33,7 +66,7 @@ export class AuthSessionRepository {
       if (oidc) await tx.insert(schema.oidcSessions).values({ ...oidc, userId: session.userId, sessionId: session.id, expiresAt: session.expiresAt });
       await tx
         .update(schema.users)
-        .set({ lastLoginAt: new Date(), lastAuthenticatedAt: new Date(), updatedAt: sql`${schema.users.updatedAt}` })
+        .set({ lastLoginAt: now, lastAuthenticatedAt: now, updatedAt: sql`${schema.users.updatedAt}` })
         .where(eq(schema.users.id, data.userId));
       return session;
     });

@@ -19,6 +19,7 @@ export interface RequestUser {
   provisioningMethod: string;
   authenticationMethod?: AuthenticationMethod;
   appPasswordId?: number;
+  appPasswordName?: string;
   permissions: Permission[];
   contentFilters: ContentFilterRules;
 }

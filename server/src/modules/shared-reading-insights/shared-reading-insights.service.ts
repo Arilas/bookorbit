@@ -13,6 +13,7 @@ import type {
 import { AuditAction, AuditResource } from '@bookorbit/types';
 
 import type { RequestUser } from '../../common/types/request-user';
+import { auditActorAuthFromUser } from '../../common/utils/audit-actor-auth.utils';
 import { AuditService } from '../audit/audit.service';
 import { SharedReadingInsightsRepository } from './shared-reading-insights.repository';
 
@@ -35,6 +36,7 @@ export class SharedReadingInsightsService {
     const consentedAt = sharingLevel === 'private' ? null : new Date();
     const row = await this.repository.updateSharingSettings(user.id, sharingLevel, consentedAt);
     if (!row) throw new NotFoundException('User not found');
+    const actorAuth = auditActorAuthFromUser(user);
     await this.auditService.record({
       userId: user.id,
       actorUsername: user.username,
@@ -43,6 +45,7 @@ export class SharedReadingInsightsService {
       resourceId: user.id,
       description: `User updated reading insights sharing to '${sharingLevel}'`,
       meta: { sharingLevel },
+      ...(actorAuth ? { actorAuth } : {}),
     });
     return this.mapSettings(row);
   }
@@ -62,6 +65,7 @@ export class SharedReadingInsightsService {
       sharingLevel: subject.readingInsightsSharingLevel,
       expiresAt,
     });
+    const actorAuth = auditActorAuthFromUser(viewer);
     await this.auditService.record({
       userId: viewer.id,
       actorUsername: viewer.username,
@@ -70,6 +74,7 @@ export class SharedReadingInsightsService {
       resourceId: subjectUserId,
       description: `Viewed shared reading insights for user #${subjectUserId}`,
       meta: { subjectUserId, sharingLevel: subject.readingInsightsSharingLevel, viewSessionId: id },
+      ...(actorAuth ? { actorAuth } : {}),
     });
     return { viewSessionId: id, sharingLevel: subject.readingInsightsSharingLevel, expiresAt: expiresAt.toISOString() };
   }

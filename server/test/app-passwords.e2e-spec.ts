@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'crypto';
 
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
-import type { AppPassword, AuthResponse, CreateAppPasswordResponse, RefreshResponse } from '@bookorbit/types';
+import { AuditAction } from '@bookorbit/types';
+import type { AppPassword, AuthResponse, CreateAppPasswordResponse, RefreshResponse, RotateAppPasswordResponse } from '@bookorbit/types';
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { hash } from 'bcryptjs';
 
@@ -148,6 +149,18 @@ async function createAppPassword(
   return response.json() as CreateAppPasswordResponse;
 }
 
+async function rotateAppPassword(app: NestFastifyApplication, accessToken: string, id: number, expiresAt: Date): Promise<RotateAppPasswordResponse> {
+  const response = await app.inject({
+    method: 'POST',
+    url: `/api/v1/auth/app-passwords/${id}/rotate`,
+    headers: { authorization: `Bearer ${accessToken}` },
+    payload: { expiresAt: expiresAt.toISOString() },
+  });
+
+  expect(response.statusCode).toBe(200);
+  return response.json() as RotateAppPasswordResponse;
+}
+
 async function listAppPasswords(app: NestFastifyApplication, accessToken: string): Promise<AppPassword[]> {
   const response = await app.inject({
     method: 'GET',
@@ -156,6 +169,20 @@ async function listAppPasswords(app: NestFastifyApplication, accessToken: string
   });
   expect(response.statusCode).toBe(200);
   return response.json() as AppPassword[];
+}
+
+async function waitForAuditLog(db: Db, userId: number, action: AuditAction, resourceId: number) {
+  const deadline = Date.now() + 2_000;
+
+  while (Date.now() < deadline) {
+    const row = await db.query.auditLog.findFirst({
+      where: and(eq(schema.auditLog.userId, userId), eq(schema.auditLog.action, action), eq(schema.auditLog.resourceId, resourceId)),
+    });
+    if (row) return row;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  return undefined;
 }
 
 describe('Application passwords (e2e)', () => {
@@ -261,6 +288,14 @@ describe('Application passwords (e2e)', () => {
       headers: { authorization: `Bearer ${deviceB.accessToken}` },
     });
     expect(deniedRevoke.statusCode).toBe(403);
+
+    const deniedRotate = await context.app.inject({
+      method: 'POST',
+      url: `/api/v1/auth/app-passwords/${created.appPassword.id}/rotate`,
+      headers: { authorization: `Bearer ${deviceB.accessToken}` },
+      payload: { expiresAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString() },
+    });
+    expect(deniedRotate.statusCode).toBe(403);
 
     const deniedSessions = await context.app.inject({
       method: 'GET',
@@ -378,6 +413,138 @@ describe('Application passwords (e2e)', () => {
     });
 
     await refresh(context.app, primary);
+  }, 15_000);
+
+  it('rotates and renews a credential without changing its app identity', async () => {
+    const credentials = await createUser(context.db);
+    const primary = await login(context.app, credentials.username, credentials.password);
+    const created = await createAppPassword(context.app, primary.accessToken, new Date(Date.now() + 180 * 24 * 60 * 60 * 1000), 'iPhone app');
+    const oldPassword = created.password;
+    const oldAppSession = await login(context.app, credentials.username, oldPassword);
+    const rowBeforeRotation = await context.db.query.appPasswords.findFirst({
+      where: eq(schema.appPasswords.id, created.appPassword.id),
+    });
+
+    const otherCredentials = await createUser(context.db);
+    const otherPrimary = await login(context.app, otherCredentials.username, otherCredentials.password);
+    const foreignRotate = await context.app.inject({
+      method: 'POST',
+      url: `/api/v1/auth/app-passwords/${created.appPassword.id}/rotate`,
+      headers: { authorization: `Bearer ${otherPrimary.accessToken}` },
+      payload: { expiresAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString() },
+    });
+    expect(foreignRotate.statusCode).toBe(404);
+
+    const rotated = await rotateAppPassword(
+      context.app,
+      primary.accessToken,
+      created.appPassword.id,
+      new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+    );
+
+    expect(rotated.password).toMatch(/^boap_[a-f0-9]{24}_[A-Za-z0-9_-]{43}$/);
+    expect(rotated.password).not.toBe(oldPassword);
+    expect(rotated.appPassword).toMatchObject({
+      id: created.appPassword.id,
+      label: 'iPhone app',
+      createdAt: created.appPassword.createdAt,
+      status: 'active',
+      activeSessions: 0,
+      lastUsedAt: null,
+      lastUsedIp: null,
+    });
+    expect((await findAuthSession(context.db, oldAppSession.sessionId))?.revokedAt).toBeInstanceOf(Date);
+    expect(await findRefreshToken(context.db, oldAppSession.refreshToken)).toBeDefined();
+
+    const oldAccessResponse = await context.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/me',
+      headers: { authorization: `Bearer ${oldAppSession.accessToken}` },
+    });
+    expect(oldAccessResponse.statusCode).toBe(401);
+
+    const oldRefreshResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: { cookie: cookieHeader(oldAppSession.jar) },
+    });
+    expect(oldRefreshResponse.statusCode).toBe(401);
+
+    const rowAfterOldRefresh = await context.db.query.appPasswords.findFirst({
+      where: eq(schema.appPasswords.id, created.appPassword.id),
+    });
+    expect(rowAfterOldRefresh?.revokedAt).toBeNull();
+    expect(rowAfterOldRefresh?.selector).not.toBe(rowBeforeRotation?.selector);
+
+    const oldLoginResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { username: credentials.username, password: oldPassword },
+    });
+    expect(oldLoginResponse.statusCode).toBe(401);
+
+    await login(context.app, credentials.username, rotated.password);
+    const expiredCreatedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    await context.db
+      .update(schema.appPasswords)
+      .set({
+        createdAt: expiredCreatedAt,
+        expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      })
+      .where(eq(schema.appPasswords.id, created.appPassword.id));
+    expect(await listAppPasswords(context.app, primary.accessToken)).toMatchObject([
+      { id: created.appPassword.id, label: 'iPhone app', status: 'expired' },
+    ]);
+
+    const renewed = await rotateAppPassword(
+      context.app,
+      primary.accessToken,
+      created.appPassword.id,
+      new Date(Date.now() + 180 * 24 * 60 * 60 * 1000),
+    );
+    expect(renewed.password).not.toBe(rotated.password);
+    expect(renewed.appPassword).toMatchObject({
+      id: created.appPassword.id,
+      label: 'iPhone app',
+      createdAt: expiredCreatedAt.toISOString(),
+      status: 'active',
+      activeSessions: 0,
+    });
+    const renewedSession = await login(context.app, credentials.username, renewed.password);
+    expect(renewedSession.accessToken).toEqual(expect.any(String));
+
+    const primaryAccessResponse = await context.app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/me',
+      headers: { authorization: `Bearer ${primary.accessToken}` },
+    });
+    expect(primaryAccessResponse.statusCode).toBe(200);
+  }, 15_000);
+
+  it('records the named app on existing audited API actions', async () => {
+    const credentials = await createUser(context.db);
+    const primary = await login(context.app, credentials.username, credentials.password);
+    const created = await createAppPassword(context.app, primary.accessToken, new Date(Date.now() + 180 * 24 * 60 * 60 * 1000), 'iPhone app');
+    const appSession = await login(context.app, credentials.username, created.password);
+
+    const collectionResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/collections',
+      headers: { authorization: `Bearer ${appSession.accessToken}` },
+      payload: { name: `App collection ${randomUUID()}`, icon: 'folder' },
+    });
+    expect(collectionResponse.statusCode).toBe(201);
+    const collection = collectionResponse.json() as { id: number };
+
+    const auditEntry = await waitForAuditLog(context.db, credentials.id, AuditAction.CollectionCreate, collection.id);
+    expect(auditEntry).toBeDefined();
+    expect(auditEntry?.meta).toMatchObject({
+      actorAuth: {
+        authenticationMethod: 'app_password',
+        appPasswordId: created.appPassword.id,
+        appName: 'iPhone app',
+      },
+    });
   }, 15_000);
 
   it('attributes progress, sessions, attempts, and statistics to the named app', async () => {

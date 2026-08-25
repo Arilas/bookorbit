@@ -1,5 +1,11 @@
 import { ref } from 'vue'
-import type { AppPassword, CreateAppPasswordRequest, CreateAppPasswordResponse } from '@bookorbit/types'
+import type {
+  AppPassword,
+  CreateAppPasswordRequest,
+  CreateAppPasswordResponse,
+  RotateAppPasswordRequest,
+  RotateAppPasswordResponse,
+} from '@bookorbit/types'
 
 import { api } from '@/lib/api'
 import { readApiErrorDetail } from '@/lib/api-error'
@@ -13,6 +19,7 @@ export function useAppPasswords() {
   const loading = ref(false)
   const loaded = ref(false)
   const creating = ref(false)
+  const rotatingId = ref<number | null>(null)
   const revokingId = ref<number | null>(null)
   const loadError = ref(false)
 
@@ -52,6 +59,24 @@ export function useAppPasswords() {
     }
   }
 
+  async function rotate(id: number, payload: RotateAppPasswordRequest): Promise<RotateAppPasswordResponse> {
+    rotatingId.value = id
+    try {
+      const response = await api(`/api/v1/auth/app-passwords/${id}/rotate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw await requestError(response)
+
+      const result = (await response.json()) as RotateAppPasswordResponse
+      appPasswords.value = appPasswords.value.map((entry) => (entry.id === id ? result.appPassword : entry))
+      return result
+    } finally {
+      rotatingId.value = null
+    }
+  }
+
   async function revoke(id: number): Promise<void> {
     revokingId.value = id
     try {
@@ -63,5 +88,5 @@ export function useAppPasswords() {
     }
   }
 
-  return { appPasswords, loading, loaded, creating, revokingId, loadError, load, create, revoke }
+  return { appPasswords, loading, loaded, creating, rotatingId, revokingId, loadError, load, create, rotate, revoke }
 }

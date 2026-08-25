@@ -1,4 +1,4 @@
-import { AuditAction, type AuditLogEntry, type BookDeletionAuditBook, type BookDeletionAuditMeta } from '@bookorbit/types'
+import { AuditAction, type AuditAppPasswordActor, type AuditLogEntry, type BookDeletionAuditBook, type BookDeletionAuditMeta } from '@bookorbit/types'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -12,6 +12,28 @@ function isDeletionBook(value: unknown): value is BookDeletionAuditBook {
     value.id > 0 &&
     (typeof value.title === 'string' || value.title === null)
   )
+}
+
+export function parseAuditAppPasswordActor(value: unknown): AuditAppPasswordActor | null {
+  if (!isRecord(value)) return null
+
+  const { authenticationMethod, appPasswordId, appName } = value
+  if (
+    authenticationMethod !== 'app_password' ||
+    typeof appPasswordId !== 'number' ||
+    !Number.isSafeInteger(appPasswordId) ||
+    appPasswordId <= 0 ||
+    (typeof appName !== 'string' && appName !== null)
+  ) {
+    return null
+  }
+
+  return { authenticationMethod, appPasswordId, appName }
+}
+
+export function getAuditAppPasswordActor(entry: AuditLogEntry): AuditAppPasswordActor | null {
+  if (!isRecord(entry.meta)) return null
+  return parseAuditAppPasswordActor(entry.meta.actorAuth)
 }
 
 export function getBookDeletionAuditMeta(entry: AuditLogEntry): BookDeletionAuditMeta | null {

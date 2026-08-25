@@ -44,6 +44,21 @@ describe('foldAuditEvents', () => {
     expect(sets.map((set) => set.items.length)).toEqual([1, 1, 2, 1])
   })
 
+  it('keeps separate App Password identities in separate rows', () => {
+    const actorAuth = (appPasswordId: number, appName: string) => ({
+      actorAuth: { authenticationMethod: 'app_password' as const, appPasswordId, appName },
+    })
+    const sets = foldAuditEvents([
+      entry(34, { meta: actorAuth(7, 'Reader') }),
+      entry(33, { meta: actorAuth(8, 'Reader') }),
+      entry(32, { meta: actorAuth(8, 'Renamed Reader') }),
+      entry(31, { meta: null }),
+    ])
+
+    expect(sets.map((set) => set.items.length)).toEqual([1, 2, 1])
+    expect(sets.map((set) => set.first.meta?.actorAuth)).toEqual([actorAuth(7, 'Reader').actorAuth, actorAuth(8, 'Reader').actorAuth, undefined])
+  })
+
   it('folds untargeted events such as sign-ins across the whole day, per address', () => {
     const signIn = (minute: number, ip = '127.0.0.1') => entry(minute, { action: AuditAction.AuthLogin, resource: null, resourceId: null, ip })
     const sets = foldAuditEvents([signIn(59), signIn(5), signIn(4, '192.168.8.230'), signIn(1, '192.168.8.230')])

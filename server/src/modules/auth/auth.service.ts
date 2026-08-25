@@ -257,7 +257,7 @@ export class AuthService {
     // probing usernames still gets the generic failure and learns nothing about which accounts exist.
     const passwordHash = user?.passwordHash ?? DUMMY_HASH;
     const isPasswordValid = !isAppPasswordAttempt && (await compare(dto.password, passwordHash));
-    const appPassword = isAppPasswordAttempt ? await this.appPasswordService.verify(user?.active ? user.id : 0, dto.password, ip) : null;
+    const appPassword = isAppPasswordAttempt ? await this.appPasswordService.verify(user?.active ? user.id : 0, dto.password) : null;
     if (!user || !user.active || (!isPasswordValid && !appPassword)) {
       const newlyLockedUntil =
         user && user.active && !isLockedOut && !isAppPasswordAttempt
@@ -312,7 +312,14 @@ export class AuthService {
       authenticationMethod,
       dto,
       undefined,
-      appPassword ? { id: appPassword.id, expiresAt: appPassword.expiresAt } : undefined,
+      appPassword
+        ? {
+            id: appPassword.id,
+            selector: appPassword.selector,
+            expiresAt: appPassword.expiresAt,
+            lastUsedIp: ip,
+          }
+        : undefined,
     );
 
     this.logger.log(
@@ -326,6 +333,15 @@ export class AuthService {
       description: `User '${user.username}' logged in${appPassword ? ` with app password '${appPassword.label}'` : ''}`,
       ip,
       meta: { authenticationMethod, ...(appPassword ? { appPasswordId: appPassword.id } : {}) },
+      ...(appPassword
+        ? {
+            actorAuth: {
+              authenticationMethod: AuthenticationMethod.AppPassword,
+              appPasswordId: appPassword.id,
+              appName: appPassword.label,
+            },
+          }
+        : {}),
     });
 
     return {
@@ -389,7 +405,7 @@ export class AuthService {
 
       const appPassword =
         method === AuthenticationMethod.AppPassword && session.appPasswordId
-          ? await this.appPasswordService.findUsableById(row.userId, session.appPasswordId)
+          ? await this.appPasswordService.findUsableGenerationById(row.userId, session.appPasswordId)
           : null;
       if ((method === AuthenticationMethod.AppPassword && !appPassword) || (method !== AuthenticationMethod.AppPassword && session.appPasswordId)) {
         await this.sessionRepo.revoke(row.sessionId, row.userId);
@@ -399,7 +415,7 @@ export class AuthService {
       const user = await this.userService.findByIdWithPermissions(row.userId);
       if (!user?.active || !(await this.canActNow(user))) throw new UnauthorizedException();
       const credentials = await this.sessions.refresh(rawToken, row.userId, user.tokenVersion, row.sessionId, method, appPassword?.expiresAt);
-      if (session.appPasswordId) await this.appPasswordService.markUsed(session.appPasswordId, req.ip);
+      if (appPassword) await this.appPasswordService.markUsed(row.userId, appPassword.id, appPassword.selector, req.ip);
       return this.deliverCredentials(credentials, reply, native);
     } catch (error) {
       if (!native && error instanceof UnauthorizedException) {
@@ -417,6 +433,10 @@ export class AuthService {
       if (row?.sessionId) {
         const session = await this.sessionRepo.findSession(row.sessionId);
         if (session && (session.clientKind === 'native') === native) {
+          const appPassword =
+            session.authenticationMethod === AuthenticationMethod.AppPassword && session.appPasswordId
+              ? await this.appPasswordService.findUsableById(row.userId, session.appPasswordId)
+              : null;
           await this.sessionRepo.revoke(row.sessionId, row.userId);
           const user = await this.userService.findByIdWithPermissions(row.userId);
           if (user)
@@ -426,6 +446,15 @@ export class AuthService {
               action: AuditAction.AuthLogout,
               description: `User '${user.username}' logged out`,
               ip: req.ip,
+              ...(appPassword
+                ? {
+                    actorAuth: {
+                      authenticationMethod: AuthenticationMethod.AppPassword,
+                      appPasswordId: appPassword.id,
+                      appName: appPassword.label,
+                    },
+                  }
+                : {}),
             });
         }
       }
@@ -452,17 +481,23 @@ export class AuthService {
     if (!session) throw new UnauthorizedException();
 
     let appPasswordId: number | undefined;
+    let appPasswordName: string | undefined;
     if (authenticationMethod === AuthenticationMethod.AppPassword) {
-      if (!session.appPasswordId || !(await this.appPasswordService.findUsableById(userId, session.appPasswordId))) {
-        throw new UnauthorizedException();
-      }
-      appPasswordId = session.appPasswordId;
+      if (!session.appPasswordId) throw new UnauthorizedException();
+      const appPassword = await this.appPasswordService.findUsableById(userId, session.appPasswordId);
+      if (!appPassword) throw new UnauthorizedException();
+      appPasswordId = appPassword.id;
+      appPasswordName = appPassword.label;
     } else if (session.appPasswordId) {
       throw new UnauthorizedException();
     }
 
     const user = await this.validateUser(userId, tokenVersion, authenticationMethod);
-    return { ...user, sessionId, ...(appPasswordId ? { appPasswordId } : {}) };
+    return {
+      ...user,
+      sessionId,
+      ...(appPasswordId ? { appPasswordId, appPasswordName } : {}),
+    };
   }
 
   async validateUser(userId: number, tokenVersion: number, authenticationMethod: AuthenticationMethodValue) {

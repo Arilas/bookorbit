@@ -31,6 +31,7 @@ import {
 
 import { LibraryOperationGate, type LibraryOperationLease } from '../../common/services/library-operation-gate.service';
 import type { RequestUser } from '../../common/types/request-user';
+import { auditActorAuthFromUser } from '../../common/utils/audit-actor-auth.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import type { BookDuplicateResolutionRow } from '../../db/schema';
 import { AUDIT_EVENT, AuditEventsService, type AuditEventPayload } from '../audit/audit-events.service';
@@ -492,6 +493,7 @@ export class BookDuplicateResolutionService implements OnApplicationBootstrap {
 
   /** Each change is recorded as the endpoint that makes it alone would record it, tied to this run. */
   private audit(context: RunContext, action: AuditAction, resourceId: number | undefined, description: string, meta: Record<string, unknown>): void {
+    const actorAuth = auditActorAuthFromUser(context.user);
     const payload: AuditEventPayload = {
       userId: context.user.id,
       actorUsername: context.user.username,
@@ -500,6 +502,7 @@ export class BookDuplicateResolutionService implements OnApplicationBootstrap {
       resourceId,
       description,
       meta: { ...meta, duplicateResolutionJobId: context.jobId },
+      ...(actorAuth ? { actorAuth } : {}),
     };
     this.auditEvents.emit(AUDIT_EVENT, payload);
   }

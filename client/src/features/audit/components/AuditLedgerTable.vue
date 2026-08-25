@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { ChevronRight } from '@lucide/vue'
 import { formatNumber } from '@/i18n/formatters'
 import { getAuditCategory, getAuditPerson, getAuditSourceKind, getAuditTone } from '../audit-display'
+import { getAuditAppPasswordActor } from '../audit-meta'
 import { groupByDay, type AuditEventSet } from '../audit-sets'
 import { useAuditFormat } from '../useAuditFormat'
 import AuditCategoryTile from './AuditCategoryTile.vue'
@@ -31,6 +32,10 @@ function toneClass(set: AuditEventSet) {
 
 function openSet(set: AuditEventSet) {
   emit('open', set)
+}
+
+function appIdentityLabel(set: AuditEventSet): string | null {
+  return format.appPasswordActor(getAuditAppPasswordActor(set.first))
 }
 </script>
 
@@ -89,6 +94,9 @@ function openSet(set: AuditEventSet) {
             </td>
             <td class="border-t border-border px-3 py-2">
               <AuditPersonLabel :person="getAuditPerson(set.first)" :show-meta="false" />
+              <p v-if="appIdentityLabel(set)" class="mt-0.5 truncate text-[11px] text-muted-foreground">
+                {{ t('audit.viaAppPassword', { label: appIdentityLabel(set) }) }}
+              </p>
             </td>
             <td class="border-t border-border px-3 py-2">
               <div class="flex min-w-0 items-center gap-2.5">

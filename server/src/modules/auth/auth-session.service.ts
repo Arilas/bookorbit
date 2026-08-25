@@ -30,7 +30,7 @@ export class AuthSessionService {
     authenticationMethod: AuthenticationMethod,
     options: AuthClientOptions = {},
     oidc?: OidcSessionInput,
-    appPassword?: { id: number; expiresAt: Date },
+    appPassword?: { id: number; selector: string; expiresAt: Date; lastUsedIp?: string },
   ) {
     if ((authenticationMethod === AuthenticationMethod.AppPassword) !== !!appPassword) throw new UnauthorizedException();
     const refreshToken = randomBytes(32).toString('hex');
@@ -49,6 +49,7 @@ export class AuthSessionService {
       },
       hashRefreshToken(refreshToken),
       oidc,
+      appPassword ? { id: appPassword.id, selector: appPassword.selector, lastUsedIp: appPassword.lastUsedIp } : undefined,
     );
     if (!session) throw new UnauthorizedException();
     return this.credentials(session, refreshToken, session.expiresAt);

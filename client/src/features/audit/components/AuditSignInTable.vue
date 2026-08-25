@@ -5,6 +5,7 @@ import { TriangleAlert } from '@lucide/vue'
 import type { AuditSignInGroup } from '@bookorbit/types'
 import { formatList } from '@/i18n/formatters'
 import { getAuditPerson, getAuditSourceKind } from '../audit-display'
+import { parseAuditAppPasswordActor } from '../audit-meta'
 import { groupByDay } from '../audit-sets'
 import { useAuditFormat } from '../useAuditFormat'
 import AuditPersonLabel from './AuditPersonLabel.vue'
@@ -34,6 +35,15 @@ function failedText(group: AuditSignInGroup) {
   return group.failedUsernames.length > 0
     ? t('audit.signIns.failedAs', { count: group.failed, names: formatList(group.failedUsernames) })
     : t('audit.signIns.failed', { count: group.failed })
+}
+
+function appIdentityLabel(group: AuditSignInGroup): string | null {
+  return format.appPasswordActor(parseAuditAppPasswordActor(group.actorAuth))
+}
+
+function groupKey(group: AuditSignInGroup): string {
+  const appPasswordId = parseAuditAppPasswordActor(group.actorAuth)?.appPasswordId ?? 'primary'
+  return `${group.day}-${group.actorUsername}-${group.ip}-${appPasswordId}`
 }
 </script>
 
@@ -73,9 +83,12 @@ function failedText(group: AuditSignInGroup) {
               </div>
             </td>
           </tr>
-          <tr v-for="group in day.items" :key="`${group.day}-${group.actorUsername}-${group.ip}`">
+          <tr v-for="group in day.items" :key="groupKey(group)">
             <td class="h-[45px] border-t border-border px-3 py-2" :class="group.failed > 0 ? 'shadow-[inset_2px_0_0_var(--pill-warning)]' : ''">
               <AuditPersonLabel :person="personOf(group)" />
+              <p v-if="appIdentityLabel(group)" class="mt-0.5 truncate text-[11px] text-muted-foreground">
+                {{ t('audit.viaAppPassword', { label: appIdentityLabel(group) }) }}
+              </p>
             </td>
             <td class="border-t border-border px-3 py-2">
               <div class="flex min-w-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
@@ -110,7 +123,7 @@ function failedText(group: AuditSignInGroup) {
       <ul class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card shadow-xs">
         <li
           v-for="group in day.items"
-          :key="`${group.day}-${group.actorUsername}-${group.ip}`"
+          :key="groupKey(group)"
           class="flex flex-col gap-0.5 px-3 py-2.5"
           :class="group.failed > 0 ? 'shadow-[inset_2px_0_0_var(--pill-warning)]' : ''"
         >
@@ -118,6 +131,9 @@ function failedText(group: AuditSignInGroup) {
             <AuditPersonLabel :person="personOf(group)" class="min-w-0" :show-meta="false" />
             <span class="ms-auto shrink-0 text-xs tabular-nums text-muted-foreground">{{ format.time(group.lastAt) }}</span>
           </div>
+          <p v-if="appIdentityLabel(group)" class="truncate text-xs text-muted-foreground">
+            {{ t('audit.viaAppPassword', { label: appIdentityLabel(group) }) }}
+          </p>
           <p class="text-sm text-foreground">
             <span v-if="group.signIns > 0">{{ t('audit.signIns.signIns', { count: group.signIns }) }}</span>
             <span v-if="group.failed > 0" class="font-medium text-[var(--pill-warning)]">

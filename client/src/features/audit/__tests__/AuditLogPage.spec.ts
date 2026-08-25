@@ -127,7 +127,7 @@ describe('AuditLogPage', () => {
     expect(wrapper.findComponent(AuditLedgerTable).exists()).toBe(false)
     expect(wrapper.findComponent(AuditSignInTable).props('groups')).toHaveLength(1)
     expect(requested('/api/v1/audit-log/sign-ins')).toHaveLength(1)
-    expect(wrapper.text()).toContain('454 sign-in events, folded into 1 row by person, day and network')
+    expect(wrapper.text()).toContain('454 sign-in events, folded into 1 row by person, credential, day and network')
   })
 
   it('shows the security groups that have events in the Security view', async () => {

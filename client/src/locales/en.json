@@ -771,6 +771,23 @@
         "usageHint": "Use your normal BookOrbit username with this generated password.",
         "done": "Done"
       },
+      "rotate": {
+        "action": "Rotate",
+        "renewAction": "Renew",
+        "title": "Rotate app password?",
+        "renewTitle": "Renew app password?",
+        "description": "Generate a new password for \"{label}\" and choose when it expires.",
+        "sessionWarning": "The current password stops working immediately. {count, plural, =0 {No active app sessions are connected.} one {One active app session will end immediately.} other {# active app sessions will end immediately.}}",
+        "historyHint": "Reading history and statistics stay attributed to \"{label}\" because this keeps the same app identity.",
+        "expiration": "New expiration",
+        "expirationHint": "The replacement password stops working after this period.",
+        "confirm": "Rotate password",
+        "renewConfirm": "Renew password",
+        "rotating": "Rotating...",
+        "renewing": "Renewing...",
+        "completedTitle": "App password rotated",
+        "completedDescription": "Use this new password to sign in from {label}."
+      },
       "revoke": {
         "title": "Revoke app password?",
         "description": "Revoke \"{label}\"? New sign-ins will stop immediately. {count, plural, =0 {No active app sessions are connected.} one {One active app session will be signed out.} other {# active app sessions will be signed out.}}",
@@ -779,11 +796,14 @@
       },
       "feedback": {
         "created": "App password created",
+        "rotated": "App password rotated",
+        "renewed": "App password renewed",
         "revoked": "App password revoked"
       },
       "errors": {
         "load": "Failed to load app passwords",
         "create": "Failed to create app password",
+        "rotate": "Failed to rotate app password",
         "revoke": "Failed to revoke app password",
         "copy": "Failed to copy app password"
       }
@@ -5430,6 +5450,7 @@
     "detailEventId": "Event ID",
     "detailOccurredAt": "Occurred",
     "detailActor": "Actor",
+    "detailAuthenticatedApp": "Authenticated app",
     "detailCategory": "Category",
     "detailActionLabel": "Action",
     "detailEventTypeLabel": "Event type",
@@ -5438,6 +5459,9 @@
     "detailResourceIdLabel": "Resource ID",
     "detailTargetTypeLabel": "Target type",
     "detailTargetIdLabel": "Target ID",
+    "appPasswordWithId": "{label} (app password #{id})",
+    "appPasswordFallback": "App password #{id}",
+    "viaAppPassword": "via {label}",
     "detailAction": "Action: {value}",
     "detailIp": "IP: {value}",
     "detailResource": "Resource: {value}",
@@ -5545,6 +5569,7 @@
       "AuthPasswordAdminReset": "Reset user password",
       "AuthSessionRevoke": "Revoke session",
       "AuthAppPasswordCreate": "Create app password",
+      "AuthAppPasswordRotate": "Rotate app password",
       "AuthAppPasswordRevoke": "Revoke app password",
       "MagicLinkCreate": "Create magic link",
       "MagicLinkLogin": "Sign in with magic link",
@@ -5747,7 +5772,7 @@
       "failed": "{count, plural, one {# failed attempt} other {# failed attempts}}",
       "failedAs": "{count, plural, one {# failed as {names}} other {# failed as {names}}}",
       "range": "{from} – {to}",
-      "footer": "{count, plural, one {{events} sign-in events, folded into # row by person, day and network} other {{events} sign-in events, folded into # rows by person, day and network}}"
+      "footer": "{count, plural, one {{events} sign-in events, folded into # row by person, credential, day and network} other {{events} sign-in events, folded into # rows by person, credential, day and network}}"
     },
     "pager": {
       "label": "Pages",

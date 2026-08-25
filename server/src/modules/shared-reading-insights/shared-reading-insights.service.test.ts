@@ -2,8 +2,8 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 
 import { SharedReadingInsightsService } from './shared-reading-insights.service';
 
-function makeUser() {
-  return { id: 5, username: 'viewer', isSuperuser: false, permissions: [], settings: {} } as never;
+function makeUser(overrides: Record<string, unknown> = {}) {
+  return { id: 5, username: 'viewer', isSuperuser: false, permissions: [], settings: {}, ...overrides } as never;
 }
 
 function summaryData() {
@@ -45,6 +45,22 @@ describe('SharedReadingInsightsService', () => {
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ resourceId: 5, meta: { sharingLevel: 'summary' } }));
   });
 
+  it('attributes a direct consent audit record to the requesting app password', async () => {
+    const repository = {
+      updateSharingSettings: vi.fn().mockResolvedValue({ sharingLevel: 'summary', consentedAt: new Date('2026-07-01T00:00:00Z') }),
+    };
+    const audit = { record: vi.fn().mockResolvedValue(undefined) };
+    const service = new SharedReadingInsightsService(repository as never, audit as never);
+
+    await service.updateMySettings(makeUser({ authenticationMethod: 'app_password', appPasswordId: 12, appPasswordName: 'iPhone app' }), 'summary');
+
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorAuth: { authenticationMethod: 'app_password', appPasswordId: 12, appName: 'iPhone app' },
+      }),
+    );
+  });
+
   it('withdraws consent with a null timestamp and rejects missing update targets', async () => {
     const repository = { updateSharingSettings: vi.fn().mockResolvedValueOnce({ sharingLevel: 'private', consentedAt: null }) };
     const audit = { record: vi.fn().mockResolvedValue(undefined) };
@@ -83,6 +99,23 @@ describe('SharedReadingInsightsService', () => {
     const payload = audit.record.mock.calls[0][0];
     expect(payload.meta).toEqual({ subjectUserId: 9, sharingLevel: 'detailed', viewSessionId: result.viewSessionId });
     expect(JSON.stringify(payload.meta)).not.toContain('book');
+  });
+
+  it('attributes a direct view-session audit record to the requesting app password', async () => {
+    const repository = {
+      getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'summary' }),
+      createViewSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const audit = { record: vi.fn().mockResolvedValue(undefined) };
+    const service = new SharedReadingInsightsService(repository as never, audit as never);
+
+    await service.createViewSession(makeUser({ authenticationMethod: 'app_password', appPasswordId: 17, appPasswordName: 'Tablet app' }), 9);
+
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorAuth: { authenticationMethod: 'app_password', appPasswordId: 17, appName: 'Tablet app' },
+      }),
+    );
   });
 
   it('returns summary-only data without title-level fields', async () => {

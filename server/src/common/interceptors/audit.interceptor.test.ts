@@ -147,7 +147,6 @@ describe('AuditInterceptor', () => {
       }),
     );
   });
-
   describe('naming a target that is about to be deleted', () => {
     function setup(options: Record<string, unknown>, label: string | null = 'Old Shelf', body: unknown = undefined) {
       const reflector = { get: vi.fn().mockReturnValue(options) };
@@ -220,5 +219,81 @@ describe('AuditInterceptor', () => {
       expect(auditEvents.emit).toHaveBeenCalledWith(AUDIT_EVENT, expect.objectContaining({ resourceId: 5 }));
       expect(auditEvents.emit.mock.calls[0][1]).not.toHaveProperty('resourceLabel');
     });
+  });
+
+  it('adds trusted app-password actor context alongside route metadata', async () => {
+    const reflector = {
+      get: vi.fn().mockReturnValue({
+        action: 'collection.create',
+        description: 'Created collection',
+        getMeta: () => ({ source: 'route', actorAuth: { authenticationMethod: 'app_password', appPasswordId: 999 } }),
+      }),
+    };
+    const auditEvents = {
+      emit: vi.fn(),
+    };
+    const interceptor = new AuditInterceptor(reflector as never, auditEvents as never);
+    const next: CallHandler = {
+      handle: vi.fn().mockReturnValue(of({ id: 1 })),
+    };
+
+    await firstValueFrom(
+      interceptor.intercept(
+        makeContext({
+          ip: '10.0.0.9',
+          user: {
+            id: 7,
+            username: 'reader',
+            authenticationMethod: 'app_password',
+            appPasswordId: 12,
+            appPasswordName: 'iPhone app',
+          },
+        }),
+        next,
+      ),
+    );
+
+    expect(auditEvents.emit).toHaveBeenCalledWith(
+      AUDIT_EVENT,
+      expect.objectContaining({
+        actorAuth: {
+          authenticationMethod: 'app_password',
+          appPasswordId: 12,
+          appName: 'iPhone app',
+        },
+        meta: { source: 'route', actorAuth: { authenticationMethod: 'app_password', appPasswordId: 999 } },
+      }),
+    );
+  });
+
+  it('does not derive app-password context from a primary request carrying spoofed fields', async () => {
+    const reflector = {
+      get: vi.fn().mockReturnValue({
+        action: 'collection.create',
+        description: 'Created collection',
+      }),
+    };
+    const auditEvents = {
+      emit: vi.fn(),
+    };
+    const interceptor = new AuditInterceptor(reflector as never, auditEvents as never);
+
+    await firstValueFrom(
+      interceptor.intercept(
+        makeContext({
+          ip: '10.0.0.9',
+          user: {
+            id: 7,
+            username: 'reader',
+            authenticationMethod: 'password',
+            appPasswordId: 12,
+            appPasswordName: 'spoofed',
+          },
+        }),
+        { handle: vi.fn().mockReturnValue(of({})) },
+      ),
+    );
+
+    expect(auditEvents.emit).toHaveBeenCalledWith(AUDIT_EVENT, expect.not.objectContaining({ actorAuth: expect.anything() }));
   });
 });

@@ -119,16 +119,18 @@ function makeService(dbOverrides?: Record<string, unknown>) {
   const appPasswordService = {
     verify: vi.fn().mockResolvedValue(null),
     findUsableById: vi.fn().mockResolvedValue(null),
-    markUsed: vi.fn().mockResolvedValue(undefined),
+    findUsableGenerationById: vi.fn().mockResolvedValue(null),
+    markUsed: vi.fn().mockResolvedValue(true),
     revokeForRefreshReplay: vi.fn().mockResolvedValue(undefined),
     revokeAllForUser: vi.fn().mockResolvedValue(undefined),
   };
 
+  const auditEvents = { emit: vi.fn() };
   const service = new AuthService(
     userService as never,
     config as never,
     systemMailService as never,
-    { emit: vi.fn() } as never,
+    auditEvents as never,
     magicLinkRepo as never,
     appSettings as never,
     oidcProviderService as never,
@@ -150,6 +152,7 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     oidcProviderService,
     authenticationPolicy,
     appPasswordService,
+    auditEvents,
     sessions,
     sessionRepo,
   };
@@ -500,12 +503,12 @@ describe('AuthService', () => {
 
       await expect(service.login({ username: 'jdoe', password: 'boap_invalid' }, makeReply(), '127.0.0.1')).rejects.toThrow(UnauthorizedException);
 
-      expect(appPasswordService.verify).toHaveBeenCalledWith(1, 'boap_invalid', '127.0.0.1');
+      expect(appPasswordService.verify).toHaveBeenCalledWith(1, 'boap_invalid');
       expect(db.update).not.toHaveBeenCalled();
     });
 
     it('issues an app-password auth session without clearing primary-password lockout state', async () => {
-      const { service, db, userService, appPasswordService, authenticationPolicy, sessions } = makeService();
+      const { service, db, userService, appPasswordService, authenticationPolicy, sessions, auditEvents } = makeService();
       const dto = { username: 'jdoe', password: 'boap_selector_secret', clientKind: 'native' as const, deviceLabel: 'KOReader' };
       const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
       userService.findByUsername.mockResolvedValue({
@@ -518,12 +521,23 @@ describe('AuthService', () => {
         lockedUntil: new Date(Date.now() + 60_000),
       });
       userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
-      appPasswordService.verify.mockResolvedValue({ id: 17, label: 'KOReader', expiresAt });
+      appPasswordService.verify.mockResolvedValue({ id: 17, label: 'KOReader', selector: 'verified-selector', expiresAt });
 
       const result = await service.login(dto, makeReply(), '127.0.0.1');
 
       expect(authenticationPolicy.assertPasswordLoginEnabled).not.toHaveBeenCalled();
-      expect(sessions.issue).toHaveBeenCalledWith(1, 4, 'app_password', dto, undefined, { id: 17, expiresAt });
+      expect(sessions.issue).toHaveBeenCalledWith(1, 4, 'app_password', dto, undefined, {
+        id: 17,
+        selector: 'verified-selector',
+        expiresAt,
+        lastUsedIp: '127.0.0.1',
+      });
+      expect(auditEvents.emit).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          actorAuth: { authenticationMethod: 'app_password', appPasswordId: 17, appName: 'KOReader' },
+        }),
+      );
       expect(result.user.authenticationMethod).toBe('app_password');
       expect((db as unknown as Record<string, vi.Mock>).set).not.toHaveBeenCalledWith({ failedLoginAttempts: 0, lockedUntil: null });
     });
@@ -689,13 +703,52 @@ describe('AuthService', () => {
         authenticationMethod: 'app_password',
         appPasswordId: 17,
       });
-      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt });
+      appPasswordService.findUsableGenerationById.mockResolvedValue({ id: 17, selector: 'verified-selector', expiresAt });
       userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
 
       await service.refresh({ cookies: {}, ip: '127.0.0.1' } as never, makeReply(), { refreshToken: 'raw-refresh' });
 
       expect(sessions.refresh).toHaveBeenCalledWith('raw-refresh', 1, 4, 31, 'app_password', expiresAt);
-      expect(appPasswordService.markUsed).toHaveBeenCalledWith(17, '127.0.0.1');
+      expect(appPasswordService.markUsed).toHaveBeenCalledWith(1, 17, 'verified-selector', '127.0.0.1');
+    });
+
+    it('binds post-refresh usage to the generation seen before a concurrent rotation', async () => {
+      const { service, userService, sessionRepo, appPasswordService, sessions } = makeService();
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      let storedSelector = 'pre-rotation-selector';
+      let replacementLastUsedIp: string | null = null;
+      sessionRepo.findRefresh.mockResolvedValue({ sessionId: 31, userId: 1, authenticationMethod: 'app_password' });
+      sessionRepo.findSession.mockResolvedValue({
+        id: 31,
+        userId: 1,
+        clientKind: 'native',
+        authenticationMethod: 'app_password',
+        appPasswordId: 17,
+      });
+      appPasswordService.findUsableGenerationById.mockResolvedValue({ id: 17, selector: 'pre-rotation-selector', expiresAt });
+      appPasswordService.markUsed.mockImplementation((_userId: number, _id: number, selector: string, ip?: string) => {
+        if (selector !== storedSelector) return Promise.resolve(false);
+        replacementLastUsedIp = ip ?? null;
+        return Promise.resolve(true);
+      });
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
+      sessions.refresh.mockImplementation(() => {
+        storedSelector = 'replacement-selector';
+        appPasswordService.findUsableGenerationById.mockResolvedValue({ id: 17, selector: 'replacement-selector', expiresAt });
+        return Promise.resolve({
+          accessToken: 'rotated-access',
+          accessTokenExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          refreshToken: 'rotated-refresh',
+          refreshTokenExpiresAt: expiresAt.toISOString(),
+          sessionId: 31,
+        });
+      });
+
+      await service.refresh({ cookies: {}, ip: '127.0.0.1' } as never, makeReply(), { refreshToken: 'raw-refresh' });
+
+      expect(appPasswordService.markUsed).toHaveBeenCalledWith(1, 17, 'pre-rotation-selector', '127.0.0.1');
+      expect(appPasswordService.markUsed).not.toHaveBeenCalledWith(1, 17, 'replacement-selector', expect.anything());
+      expect(replacementLastUsedIp).toBeNull();
     });
   });
 
@@ -810,13 +863,14 @@ describe('AuthService', () => {
       const user = makeFullUser({ tokenVersion: 2 });
       userService.findByIdWithPermissions.mockResolvedValue(user);
       sessionRepo.findActive.mockResolvedValue({ id: 31, userId: 1, appPasswordId: 17 });
-      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt: new Date(Date.now() + 60_000) });
+      appPasswordService.findUsableById.mockResolvedValue({ id: 17, label: 'KOReader', expiresAt: new Date(Date.now() + 60_000) });
 
       await expect(service.validateSessionUser(1, 2, 'app_password', 31)).resolves.toEqual({
         ...user,
         authenticationMethod: 'app_password',
         sessionId: 31,
         appPasswordId: 17,
+        appPasswordName: 'KOReader',
       });
       expect(sessionRepo.findActive).toHaveBeenCalledWith(31, 1, 2, 'app_password');
       expect(appPasswordService.findUsableById).toHaveBeenCalledWith(1, 17);

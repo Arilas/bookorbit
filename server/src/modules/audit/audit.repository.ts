@@ -10,6 +10,7 @@ import {
   AUDIT_SIGN_IN_ACTIONS,
   AuditAction,
   AuditResource,
+  type AuditAppPasswordActor,
   type AuditCategory,
   type AuditLogKind,
   type AuditSecurityGroup,
@@ -231,15 +232,24 @@ export class AuditRepository {
       query.ip?.trim() ? eq(log.ip, query.ip.trim()) : undefined,
       query.dateFrom ? gte(log.createdAt, query.dateFrom) : undefined,
       query.dateTo ? lte(log.createdAt, query.dateTo) : undefined,
-      pattern ? or(ilike(log.actorUsername, pattern), ilike(log.ip, pattern), sql`${log.meta}->>'attemptedUsername' ILIKE ${pattern}`) : undefined,
+      pattern
+        ? or(
+            ilike(log.actorUsername, pattern),
+            ilike(log.ip, pattern),
+            sql`${log.meta}->>'attemptedUsername' ILIKE ${pattern}`,
+            sql`${log.meta}->'actorAuth'->>'appName' ILIKE ${pattern}`,
+          )
+        : undefined,
     );
     const day = sql<string>`to_char(${log.createdAt} at time zone ${query.tz}, 'YYYY-MM-DD')`;
+    const actorAuth = sql<AuditAppPasswordActor | null>`${log.meta}->'actorAuth'`;
     const groups = this.db
       .select({
         day: day.as('day'),
         actorUsername: log.actorUsername,
         userId: log.userId,
         ip: log.ip,
+        actorAuth: actorAuth.as('actor_auth'),
         signIns: sql<number>`count(*) filter (where ${inArray(log.action, SUCCESSFUL_SIGN_INS)})::int`.as('sign_ins'),
         signOuts: sql<number>`count(*) filter (where ${eq(log.action, AuditAction.AuthLogout)})::int`.as('sign_outs'),
         failed: sql<number>`count(*) filter (where ${eq(log.action, AuditAction.AuthLoginFailed)})::int`.as('failed'),
@@ -253,7 +263,7 @@ export class AuditRepository {
       })
       .from(log)
       .where(where)
-      .groupBy(sql`1`, log.actorUsername, log.userId, log.ip)
+      .groupBy(sql`1`, log.actorUsername, log.userId, log.ip, actorAuth)
       .as('groups');
 
     const [data, [{ total }]] = await Promise.all([

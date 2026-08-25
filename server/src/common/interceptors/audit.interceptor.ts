@@ -6,6 +6,7 @@ import { switchMap, tap } from 'rxjs/operators';
 import type { Observable } from 'rxjs';
 
 import type { RequestUser } from '../types/request-user';
+import { auditActorAuthFromUser } from '../utils/audit-actor-auth.utils';
 import { AUDITABLE_KEY, AuditableOptions, AuditRequest } from '../decorators/auditable.decorator';
 import { AUDIT_EVENT, AuditEventsService } from '../../modules/audit/audit-events.service';
 import { AuditTargetLabelService } from '../../modules/audit/audit-target-label.service';
@@ -35,6 +36,7 @@ export class AuditInterceptor implements NestInterceptor {
           tap((responseBody) => {
             if (options.when && !options.when(req, responseBody)) return;
             const user = req.user;
+            const actorAuth = auditActorAuthFromUser(user);
             const action = typeof options.action === 'function' ? options.action(req, responseBody) : options.action;
             const description = typeof options.description === 'function' ? options.description(req, responseBody) : options.description;
             const meta = options.getMeta?.(req, responseBody);
@@ -48,6 +50,7 @@ export class AuditInterceptor implements NestInterceptor {
               description,
               ip: req.ip,
               ...(meta ? { meta } : {}),
+              ...(actorAuth ? { actorAuth } : {}),
               ...(resourceLabel ? { resourceLabel } : {}),
             });
           }),

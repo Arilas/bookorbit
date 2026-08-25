@@ -55,6 +55,24 @@ describe('AuditEventSheet', () => {
     expect(text).toContain('#329')
   })
 
+  it('shows the authenticated App Password identity', async () => {
+    const { wrapper } = mountSheet(
+      entry({
+        meta: {
+          actorAuth: {
+            authenticationMethod: 'app_password',
+            appPasswordId: 12,
+            appName: 'iPhone app',
+          },
+        },
+      }),
+    )
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Authenticated app')
+    expect(wrapper.text()).toContain('iPhone app (app password #12)')
+  })
+
   it('loads what the same person did around it and the target’s history', async () => {
     const current = entry({})
     const before = entry({

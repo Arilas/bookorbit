@@ -78,6 +78,23 @@ describe('AuditLedgerTable', () => {
     expect(wrapper.text()).toContain('Deleted account')
   })
 
+  it('shows a distinguishable and escaped App Password identity', () => {
+    const wrapper = mountTable([
+      entry({
+        meta: {
+          actorAuth: {
+            authenticationMethod: 'app_password',
+            appPasswordId: 7,
+            appName: '<script>Reader</script>',
+          },
+        },
+      }),
+    ])
+
+    expect(wrapper.text()).toContain('via <script>Reader</script> (app password #7)')
+    expect(wrapper.find('script').exists()).toBe(false)
+  })
+
   it('shows an action this build has no name for by its code', () => {
     const wrapper = mountTable([entry({ action: 'club.create', resource: 'club', resourceId: 13, targetLabel: 'bbb', targetExists: null })])
 

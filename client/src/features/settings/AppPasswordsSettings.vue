@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { KeyRound, Plus, RefreshCw, ShieldCheck, Trash2 } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import type { AppPassword, CreateAppPasswordRequest } from '@bookorbit/types'
+import type { AppPassword, CreateAppPasswordRequest, RotateAppPasswordRequest } from '@bookorbit/types'
 
 import { Button } from '@/components/ui/button'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
@@ -11,18 +11,22 @@ import { formatDate, formatDateTime, formatNumber } from '@/i18n/formatters'
 import { relativeTimestamp } from '@/lib/relative-time'
 import AppPasswordCreatedDialog from './components/AppPasswordCreatedDialog.vue'
 import CreateAppPasswordDialog from './components/CreateAppPasswordDialog.vue'
+import RotateAppPasswordDialog from './components/RotateAppPasswordDialog.vue'
 import { useAppPasswords } from './composables/useAppPasswords'
 
 const HEADER_ACTIONS_TARGET = '#settings-header-actions'
 
 const { t } = useI18n()
-const { appPasswords, loading, loaded, creating, revokingId, loadError, load, create, revoke } = useAppPasswords()
+const { appPasswords, loading, loaded, creating, rotatingId, revokingId, loadError, load, create, rotate, revoke } = useAppPasswords()
 
 const headerSlotAvailable = ref(false)
 const createOpen = ref(false)
 const createError = ref<string | null>(null)
 const createdPassword = ref('')
 const createdLabel = ref('')
+const createdMode = ref<'created' | 'rotated'>('created')
+const rotateTarget = ref<AppPassword | null>(null)
+const rotateError = ref<string | null>(null)
 const revokeTarget = ref<AppPassword | null>(null)
 const revokeError = ref<string | null>(null)
 
@@ -32,6 +36,7 @@ const rows = computed(() =>
     return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
   }),
 )
+const mutationPending = computed(() => creating.value || rotatingId.value !== null || revokingId.value !== null)
 
 const revokeDescription = computed(() => {
   if (!revokeTarget.value) return ''
@@ -55,6 +60,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 function openCreate(): void {
+  if (mutationPending.value) return
   createError.value = null
   createOpen.value = true
 }
@@ -71,6 +77,7 @@ async function handleCreate(payload: CreateAppPasswordRequest): Promise<void> {
     createOpen.value = false
     createdLabel.value = result.appPassword.label
     createdPassword.value = result.password
+    createdMode.value = 'created'
     toast.success(t('settings.appPasswords.feedback.created'))
   } catch (error) {
     createError.value = errorMessage(error, t('settings.appPasswords.errors.create'))
@@ -80,9 +87,40 @@ async function handleCreate(payload: CreateAppPasswordRequest): Promise<void> {
 function closeCreatedPassword(): void {
   createdPassword.value = ''
   createdLabel.value = ''
+  createdMode.value = 'created'
+}
+
+function requestRotate(appPassword: AppPassword): void {
+  if (mutationPending.value) return
+  rotateError.value = null
+  rotateTarget.value = appPassword
+}
+
+function handleRotateOpenChange(open: boolean): void {
+  if (!open && rotatingId.value === null) {
+    rotateTarget.value = null
+    rotateError.value = null
+  }
+}
+
+async function handleRotate(payload: RotateAppPasswordRequest): Promise<void> {
+  const target = rotateTarget.value
+  if (!target) return
+  rotateError.value = null
+  try {
+    const result = await rotate(target.id, payload)
+    rotateTarget.value = null
+    createdLabel.value = result.appPassword.label
+    createdPassword.value = result.password
+    createdMode.value = 'rotated'
+    toast.success(t(target.status === 'expired' ? 'settings.appPasswords.feedback.renewed' : 'settings.appPasswords.feedback.rotated'))
+  } catch (error) {
+    rotateError.value = errorMessage(error, t('settings.appPasswords.errors.rotate'))
+  }
 }
 
 function requestRevoke(appPassword: AppPassword): void {
+  if (mutationPending.value) return
   revokeError.value = null
   revokeTarget.value = appPassword
 }
@@ -121,12 +159,16 @@ function statusClass(status: AppPassword['status']): string {
     ? 'border-[var(--pill-success)]/40 bg-[var(--pill-success)]/10 text-[var(--pill-success)]'
     : 'border-border bg-muted text-muted-foreground'
 }
+
+function rotationActionLabel(appPassword: AppPassword): string {
+  return t(appPassword.status === 'expired' ? 'settings.appPasswords.rotate.renewAction' : 'settings.appPasswords.rotate.action')
+}
 </script>
 
 <template>
   <div class="space-y-5">
     <Teleport :to="HEADER_ACTIONS_TARGET" defer :disabled="!headerSlotAvailable">
-      <Button size="sm" type="button" class="max-sm:size-8 max-sm:p-0" @click="openCreate">
+      <Button size="sm" type="button" class="max-sm:size-8 max-sm:p-0" :disabled="mutationPending" @click="openCreate">
         <Plus :size="14" aria-hidden="true" />
         <span class="max-sm:sr-only">{{ t('settings.appPasswords.create.action') }}</span>
       </Button>
@@ -156,7 +198,7 @@ function statusClass(status: AppPassword['status']): string {
         <KeyRound :size="32" class="mx-auto mb-3 text-muted-foreground" aria-hidden="true" />
         <p class="text-sm font-medium text-foreground">{{ t('settings.appPasswords.empty.title') }}</p>
         <p class="mt-1 text-sm text-muted-foreground">{{ t('settings.appPasswords.empty.description') }}</p>
-        <Button size="sm" type="button" class="mt-4" @click="openCreate">
+        <Button size="sm" type="button" class="mt-4" :disabled="mutationPending" @click="openCreate">
           <Plus :size="14" aria-hidden="true" />
           {{ t('settings.appPasswords.create.action') }}
         </Button>
@@ -167,15 +209,15 @@ function statusClass(status: AppPassword['status']): string {
           <h2 id="app-passwords-list-heading" class="settings-group-label mb-0">{{ t('settings.appPasswords.listTitle') }}</h2>
 
           <div class="hidden overflow-x-auto rounded-lg border border-border bg-card shadow-xs md:block" data-testid="app-passwords-table">
-            <table class="w-full min-w-[940px] table-fixed text-sm">
+            <table class="w-full min-w-[1040px] table-fixed text-sm">
               <colgroup>
-                <col class="w-[24%]" />
-                <col class="w-[10%]" />
-                <col class="w-[13%]" />
-                <col class="w-[13%]" />
                 <col class="w-[21%]" />
                 <col class="w-[9%]" />
-                <col class="w-[10%]" />
+                <col class="w-[12%]" />
+                <col class="w-[12%]" />
+                <col class="w-[18%]" />
+                <col class="w-[8%]" />
+                <col class="w-[20%]" />
               </colgroup>
               <thead class="bg-muted/50 text-muted-foreground">
                 <tr>
@@ -225,10 +267,16 @@ function statusClass(status: AppPassword['status']): string {
                   </td>
                   <td class="px-3 py-3 text-xs tabular-nums text-muted-foreground">{{ formatNumber(appPassword.activeSessions) }}</td>
                   <td class="px-3 py-3 text-end">
-                    <Button variant="destructive-ghost" size="sm" type="button" :disabled="revokingId !== null" @click="requestRevoke(appPassword)">
-                      <Trash2 :size="14" aria-hidden="true" />
-                      {{ t('settings.appPasswords.revoke.action') }}
-                    </Button>
+                    <div class="flex justify-end gap-1">
+                      <Button variant="ghost" size="sm" type="button" :disabled="mutationPending" @click="requestRotate(appPassword)">
+                        <RefreshCw :size="14" aria-hidden="true" />
+                        {{ rotationActionLabel(appPassword) }}
+                      </Button>
+                      <Button variant="destructive-ghost" size="sm" type="button" :disabled="mutationPending" @click="requestRevoke(appPassword)">
+                        <Trash2 :size="14" aria-hidden="true" />
+                        {{ t('settings.appPasswords.revoke.action') }}
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               </tbody>
@@ -270,8 +318,12 @@ function statusClass(status: AppPassword['status']): string {
                 </div>
               </dl>
 
-              <div class="mt-3 flex justify-end border-t border-border pt-3">
-                <Button variant="destructive-outline" size="sm" type="button" :disabled="revokingId !== null" @click="requestRevoke(appPassword)">
+              <div class="mt-3 flex justify-end gap-2 border-t border-border pt-3">
+                <Button variant="outline" size="sm" type="button" :disabled="mutationPending" @click="requestRotate(appPassword)">
+                  <RefreshCw :size="14" aria-hidden="true" />
+                  {{ rotationActionLabel(appPassword) }}
+                </Button>
+                <Button variant="destructive-outline" size="sm" type="button" :disabled="mutationPending" @click="requestRevoke(appPassword)">
                   <Trash2 :size="14" aria-hidden="true" />
                   {{ t('settings.appPasswords.revoke.action') }}
                 </Button>
@@ -284,7 +336,21 @@ function statusClass(status: AppPassword['status']): string {
   </div>
 
   <CreateAppPasswordDialog :open="createOpen" :saving="creating" :error="createError" @update:open="handleCreateOpenChange" @submit="handleCreate" />
-  <AppPasswordCreatedDialog :open="createdPassword.length > 0" :label="createdLabel" :password="createdPassword" @close="closeCreatedPassword" />
+  <RotateAppPasswordDialog
+    :open="rotateTarget !== null"
+    :app-password="rotateTarget"
+    :saving="rotatingId !== null"
+    :error="rotateError"
+    @update:open="handleRotateOpenChange"
+    @submit="handleRotate"
+  />
+  <AppPasswordCreatedDialog
+    :open="createdPassword.length > 0"
+    :label="createdLabel"
+    :password="createdPassword"
+    :mode="createdMode"
+    @close="closeCreatedPassword"
+  />
   <ConfirmDialog
     :open="revokeTarget !== null"
     :title="t('settings.appPasswords.revoke.title')"

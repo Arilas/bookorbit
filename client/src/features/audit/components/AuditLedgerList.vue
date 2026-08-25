@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatNumber } from '@/i18n/formatters'
 import { getAuditCategory, getAuditPerson, getAuditSourceKind, getAuditTone } from '../audit-display'
+import { getAuditAppPasswordActor } from '../audit-meta'
 import { groupByDay, type AuditEventSet } from '../audit-sets'
 import { useAuditFormat } from '../useAuditFormat'
 import AuditCategoryTile from './AuditCategoryTile.vue'
@@ -24,6 +25,10 @@ function toneClass(set: AuditEventSet) {
 
 function openSet(set: AuditEventSet) {
   emit('open', set)
+}
+
+function appIdentityLabel(set: AuditEventSet): string | null {
+  return format.appPasswordActor(getAuditAppPasswordActor(set.first))
 }
 </script>
 
@@ -64,6 +69,10 @@ function openSet(set: AuditEventSet) {
               <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                 <AuditPersonLabel :person="getAuditPerson(set.first)" size="xs" quiet :show-meta="false" class="min-w-0" />
                 <span aria-hidden="true">·</span>
+                <span v-if="appIdentityLabel(set)" class="min-w-0 truncate">
+                  {{ t('audit.viaAppPassword', { label: appIdentityLabel(set) }) }}
+                </span>
+                <span v-if="appIdentityLabel(set)" aria-hidden="true">·</span>
                 <span class="shrink-0">{{ t(`audit.source.${getAuditSourceKind(set.first.ip, set.first.actorUsername)}`) }}</span>
               </span>
             </span>

@@ -9,6 +9,7 @@ export enum AuditAction {
   AuthPasswordAdminReset = "auth.password.admin_reset",
   AuthSessionRevoke = "auth.session.revoke",
   AuthAppPasswordCreate = "auth.app_password.create",
+  AuthAppPasswordRotate = "auth.app_password.rotate",
   AuthAppPasswordRevoke = "auth.app_password.revoke",
 
   MagicLinkCreate = "magic_link.create",
@@ -183,6 +184,16 @@ export enum AuditResource {
   ReadingInsightsProfile = "reading_insights_profile",
 }
 
+export interface AuditAppPasswordActor {
+  authenticationMethod: "app_password";
+  appPasswordId: number;
+  appName: string | null;
+}
+
+export interface AuditLogMeta extends Record<string, unknown> {
+  actorAuth?: AuditAppPasswordActor | null;
+}
+
 export interface AuditLogEntry {
   id: number;
   userId: number | null;
@@ -192,7 +203,7 @@ export interface AuditLogEntry {
   resourceId: number | null;
   description: string;
   ip: string | null;
-  meta: Record<string, unknown> | null;
+  meta: AuditLogMeta | null;
   createdAt: string;
   /** The person's display name while their account exists. */
   actorName?: string | null;
@@ -276,6 +287,9 @@ export const AUDIT_SECURITY_GROUPS = {
     AuditAction.AuthPasswordResetRequest,
     AuditAction.AuthPasswordReset,
     AuditAction.AuthPasswordAdminReset,
+    AuditAction.AuthAppPasswordCreate,
+    AuditAction.AuthAppPasswordRotate,
+    AuditAction.AuthAppPasswordRevoke,
   ],
   permissions: [AuditAction.UserPermissionSet, AuditAction.UserSuperuserEnable, AuditAction.UserSuperuserDisable],
   access: [
@@ -320,6 +334,7 @@ export interface AuditSignInGroup {
   actorUsername: string;
   actorName: string | null;
   userId: number | null;
+  actorAuth?: AuditAppPasswordActor | null;
   ip: string | null;
   signIns: number;
   signOuts: number;

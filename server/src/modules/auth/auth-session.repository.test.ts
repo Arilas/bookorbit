@@ -55,6 +55,83 @@ async function fixture(options: { session?: object | null; user?: object | null;
   return { repository: module.get(AuthSessionRepository), tx, writes };
 }
 
+async function issuanceFixture(credential: object | null = { id: 17 }) {
+  const reads = [[{ active: true, tokenVersion: 3 }], credential ? [credential] : []];
+  const writes: { table: unknown; value: Record<string, unknown> }[] = [];
+  const tx = {
+    select: vi.fn(() => {
+      const result = reads.shift() ?? [];
+      return {
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        for: vi.fn().mockResolvedValue(result),
+      };
+    }),
+    update: vi.fn((table: unknown) => ({
+      set: (value: Record<string, unknown>) => {
+        writes.push({ table, value });
+        return { where: vi.fn().mockResolvedValue({ rowCount: 1 }) };
+      },
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: (value: Record<string, unknown>) => {
+        writes.push({ table, value });
+        return { returning: vi.fn().mockResolvedValue([{ id: 31, ...value }]) };
+      },
+    })),
+  };
+  const db = { transaction: vi.fn((callback: (transaction: typeof tx) => unknown) => Promise.resolve(callback(tx))) };
+  const module = await Test.createTestingModule({ providers: [AuthSessionRepository, { provide: DB, useValue: db }] }).compile();
+  return { repository: module.get(AuthSessionRepository), tx, writes };
+}
+
+describe('AuthSessionRepository issuance transactions', () => {
+  const appSession = {
+    userId: 2,
+    appPasswordId: 17,
+    tokenVersion: 3,
+    authenticationMethod: 'app_password',
+    clientKind: 'native',
+    deviceLabel: 'KOReader',
+    expiresAt,
+  } as const;
+
+  it('revalidates the verified selector and records usage in the session transaction', async () => {
+    const { repository, writes } = await issuanceFixture();
+
+    await expect(
+      repository.create(appSession, 'refresh-hash', undefined, {
+        id: 17,
+        selector: 'verified-selector',
+        lastUsedIp: '127.0.0.1',
+      }),
+    ).resolves.toMatchObject({ id: 31, appPasswordId: 17, authenticationMethod: 'app_password' });
+
+    expect(writes).toContainEqual({
+      table: schema.appPasswords,
+      value: { lastUsedAt: expect.any(Date), lastUsedIp: '127.0.0.1' },
+    });
+    const persistedSession = writes.find((write) => write.table === schema.authSessions)?.value;
+    const persistedRefresh = writes.find((write) => write.table === schema.refreshTokens)?.value;
+    expect(persistedSession).not.toHaveProperty('selector');
+    expect(persistedRefresh).not.toHaveProperty('selector');
+  });
+
+  it('refuses a session when rotation invalidated the verified selector before issuance', async () => {
+    const { repository, tx, writes } = await issuanceFixture(null);
+
+    await expect(
+      repository.create(appSession, 'refresh-hash', undefined, {
+        id: 17,
+        selector: 'stale-selector',
+      }),
+    ).resolves.toBeNull();
+
+    expect(tx.insert).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+});
+
 describe('AuthSessionRepository refresh transactions', () => {
   it('rotates once, keeps the session identity, and updates only the related OIDC lifetime', async () => {
     const { repository, writes } = await fixture();

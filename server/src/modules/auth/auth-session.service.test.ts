@@ -34,6 +34,7 @@ describe('AuthSessionService', () => {
       expect.objectContaining({ userId: 1, tokenVersion: 2, clientKind: 'native', deviceLabel: 'iOS' }),
       hashRefreshToken(result.refreshToken),
       undefined,
+      undefined,
     );
     const claims = jwt.verify(result.accessToken);
     expect(claims).toMatchObject({ sub: 1, ver: 2, sid: 9, amr: 'password' });
@@ -53,14 +54,22 @@ describe('AuthSessionService', () => {
     const { service, repository, jwt } = await fixture();
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    const result = await service.issue(1, 2, 'app_password', { clientKind: 'native' }, undefined, { id: 17, expiresAt });
+    const result = await service.issue(1, 2, 'app_password', { clientKind: 'native' }, undefined, {
+      id: 17,
+      selector: 'verified-selector',
+      expiresAt,
+      lastUsedIp: '127.0.0.1',
+    });
 
     expect(repository.create).toHaveBeenCalledWith(
       expect.objectContaining({ appPasswordId: 17, authenticationMethod: 'app_password', expiresAt }),
       hashRefreshToken(result.refreshToken),
       undefined,
+      { id: 17, selector: 'verified-selector', lastUsedIp: '127.0.0.1' },
     );
-    expect(jwt.verify(result.accessToken)).toMatchObject({ sub: 1, ver: 2, sid: 9, amr: 'app_password' });
+    const claims = jwt.verify(result.accessToken);
+    expect(claims).toMatchObject({ sub: 1, ver: 2, sid: 9, amr: 'app_password' });
+    expect(claims).not.toHaveProperty('selector');
     expect(result.refreshTokenExpiresAt).toBe(expiresAt.toISOString());
   });
 

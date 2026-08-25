@@ -226,6 +226,12 @@ export interface CreateAppPasswordResponse {
   password: string;
 }
 
+export interface RotateAppPasswordRequest {
+  expiresAt: string;
+}
+
+export type RotateAppPasswordResponse = CreateAppPasswordResponse;
+
 export interface MagicLinkToken {
   id: number;
   userId: number;

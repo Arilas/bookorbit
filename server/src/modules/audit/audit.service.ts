@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { getAuditCategory, type AuditLogSummary, type AuditSignInPage } from '@bookorbit/types';
+import { getAuditCategory, type AuditAppPasswordActor, type AuditLogMeta, type AuditLogSummary, type AuditSignInPage } from '@bookorbit/types';
 
 import { APP_SETTING_KEYS, DEFAULT_AUDIT_RETENTION_DAYS } from '../../common/constants/app-settings.constants';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
@@ -144,7 +144,11 @@ export class AuditService implements OnModuleInit, OnModuleDestroy {
   }
 
   private insert(payload: AuditEventPayload, resourceLabel: string | null): Promise<void> {
-    return this.auditRepository.insert({
+    return this.auditRepository.insert(this.buildRecord(payload, resourceLabel));
+  }
+
+  private buildRecord(payload: AuditEventPayload, resourceLabel: string | null) {
+    return {
       userId: payload.userId,
       actorUsername: payload.actorUsername,
       action: payload.action,
@@ -153,8 +157,15 @@ export class AuditService implements OnModuleInit, OnModuleDestroy {
       resourceLabel,
       description: payload.description,
       ip: payload.ip ?? null,
-      meta: payload.meta ?? null,
-    });
+      meta: this.mergeMeta(payload.meta, payload.actorAuth),
+    };
+  }
+
+  private mergeMeta(meta: AuditLogMeta | undefined, actorAuth: AuditAppPasswordActor | undefined): AuditLogMeta | null {
+    const normalizedMeta: AuditLogMeta = { ...(meta ?? {}) };
+    delete normalizedMeta.actorAuth;
+    if (actorAuth) normalizedMeta.actorAuth = actorAuth;
+    return Object.keys(normalizedMeta).length > 0 ? normalizedMeta : null;
   }
 
   getReadingInsightsAccess(subjectUserId: number, page: number, pageSize: number) {

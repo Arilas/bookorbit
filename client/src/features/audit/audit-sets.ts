@@ -1,4 +1,5 @@
 import type { AuditLogEntry } from '@bookorbit/types'
+import { getAuditAppPasswordActor } from './audit-meta'
 
 /** A row in the ledger: one person's consecutive events on one target, or a run of the same sign-in action. */
 export interface AuditEventSet {
@@ -21,14 +22,16 @@ export function localDayKey(value: string | Date): string {
 }
 
 function setKey(entry: AuditLogEntry): string {
-  if (entry.resource && entry.resourceId !== null) return `${entry.resource}:${entry.resourceId}`
-  return `action:${entry.action}:${entry.ip ?? ''}`
+  const appPasswordId = getAuditAppPasswordActor(entry)?.appPasswordId
+  const actor = appPasswordId === undefined ? `${entry.actorUsername}:primary` : `${entry.actorUsername}:app-password:${appPasswordId}`
+  if (entry.resource && entry.resourceId !== null) return `${actor}:${entry.resource}:${entry.resourceId}`
+  return `${actor}:action:${entry.action}:${entry.ip ?? ''}`
 }
 
 /**
- * Folds the page's events into rows. Events join the row above when the same person did them to the
- * same target on the same day, at most `gapMinutes` apart. Events with no target, such as sign-ins,
- * fold by action and address for the whole day.
+ * Folds the page's events into rows. Events join the row above when the same person used the same
+ * credential on the same target and day, at most `gapMinutes` apart. Events with no target, such as
+ * sign-ins, fold by credential, action and address for the whole day.
  */
 export function foldAuditEvents(entries: AuditLogEntry[], gapMinutes = 5): AuditEventSet[] {
   const sets: AuditEventSet[] = []

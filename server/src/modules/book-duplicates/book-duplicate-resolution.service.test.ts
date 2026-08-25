@@ -12,8 +12,15 @@ import { LibraryOperationGate } from '../../common/services/library-operation-ga
 import type { RequestUser } from '../../common/types/request-user';
 import { BookDuplicateResolutionService, groupStatus } from './book-duplicate-resolution.service';
 
-function userWith(permissions: Permission[]): RequestUser {
-  return { id: 7, isSuperuser: false, permissions, contentFilters: EMPTY_CONTENT_FILTER_RULES } as unknown as RequestUser;
+function userWith(permissions: Permission[], overrides: Partial<RequestUser> = {}): RequestUser {
+  return {
+    id: 7,
+    username: 'reader',
+    isSuperuser: false,
+    permissions,
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
+    ...overrides,
+  } as unknown as RequestUser;
 }
 
 const both = userWith([Permission.LibraryDeleteBooks, Permission.LibraryMergeBooks]);
@@ -279,6 +286,29 @@ describe('BookDuplicateResolutionService', () => {
     expect(auditEvents.emit).toHaveBeenCalledWith(
       'audit.log',
       expect.objectContaining({ action: 'book.bulk.delete', meta: expect.objectContaining({ total: 1 }) }),
+    );
+  });
+
+  it('attributes background resolution audit events to the initiating app password', async () => {
+    const { service, repo, auditEvents } = setup({ 5: isbn([10, 11]) });
+    const appUser = userWith([Permission.LibraryMergeBooks], {
+      authenticationMethod: 'app_password',
+      appPasswordId: 44,
+      appPasswordName: 'Desktop importer',
+    });
+
+    await service.start({ scanId: 2, groups: [{ groupId: 5, keeperId: 10, action: 'merge' }] }, appUser);
+    await finished(repo);
+
+    expect(auditEvents.emit).toHaveBeenCalledWith(
+      'audit.log',
+      expect.objectContaining({
+        actorAuth: {
+          authenticationMethod: 'app_password',
+          appPasswordId: 44,
+          appName: 'Desktop importer',
+        },
+      }),
     );
   });
 

@@ -1,4 +1,6 @@
 import { AuditAction, AuditResource } from '@bookorbit/types';
+import { sql, type SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 import { AuditRepository } from './audit.repository';
 
@@ -130,6 +132,47 @@ describe('AuditRepository', () => {
     await repo.findActors('  ', 50);
 
     expect(db._actorFrom.where).toHaveBeenCalledWith(undefined);
+  });
+
+  it('folds sign-ins by app identity and lets search match the displayed app name', async () => {
+    const groupBy = vi.fn();
+    const groupWhere = vi.fn().mockReturnValue({ groupBy });
+    const groupFrom = vi.fn().mockReturnValue({ where: groupWhere });
+    const groups = { lastAt: sql.raw('last_at'), actorUsername: sql.raw('actor_username') };
+    groupBy.mockReturnValue({ as: vi.fn().mockReturnValue(groups) });
+
+    const data = [
+      {
+        actorUsername: 'reader',
+        actorAuth: { authenticationMethod: 'app_password', appPasswordId: 12, appName: 'iPhone app' },
+      },
+    ];
+    const dataOffset = vi.fn().mockResolvedValue(data);
+    const dataLimit = vi.fn().mockReturnValue({ offset: dataOffset });
+    const dataOrderBy = vi.fn().mockReturnValue({ limit: dataLimit });
+    const dataFrom = vi.fn().mockReturnValue({ orderBy: dataOrderBy });
+    const countFrom = vi.fn().mockResolvedValue([{ total: 1 }]);
+
+    let groupSelection: Record<string, unknown> = {};
+    const select = vi
+      .fn()
+      .mockImplementationOnce((selection: Record<string, unknown>) => {
+        groupSelection = selection;
+        return { from: groupFrom };
+      })
+      .mockImplementationOnce(() => ({ from: dataFrom }))
+      .mockImplementationOnce(() => ({ from: countFrom }));
+    const repo = new AuditRepository({ select } as never);
+
+    const result = await repo.findSignInGroups({ search: 'iPhone', tz: 'UTC', page: 1, pageSize: 50 });
+
+    expect(groupSelection).toEqual(expect.objectContaining({ actorAuth: expect.anything() }));
+    expect(groupBy.mock.calls[0]).toHaveLength(5);
+    expect(groupBy.mock.calls[0][4]).toBe((groupSelection.actorAuth as { sql: unknown }).sql);
+    const compiledWhere = new PgDialect().sqlToQuery(groupWhere.mock.calls[0][0] as SQL);
+    expect(compiledWhere.sql).toContain(`"audit_log"."meta"->'actorAuth'->>'appName' ILIKE`);
+    expect(compiledWhere.params).toContain('%iPhone%');
+    expect(result).toEqual({ data, total: 1 });
   });
 
   it('deleteOlderThan removes entries before cutoff date', async () => {
