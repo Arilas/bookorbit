@@ -157,7 +157,11 @@ export class SharedReadingInsightsService {
       booksCompleted: data.status.booksCompleted,
       formatDistribution: data.formats,
       genreDistribution: data.genres,
-      sourceCoverage: data.sources,
+      sourceCoverage: data.sources.map((item) => ({
+        source: item.source,
+        readingSeconds: item.readingSeconds,
+        sessionsCount: item.sessionsCount,
+      })),
       trend: data.daily,
     };
   }

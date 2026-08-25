@@ -2,7 +2,7 @@ import { FileLockService } from '../../common/services/file-lock.service';
 import { createHash } from 'node:crypto';
 
 import { BadRequestException, ConflictException, PreconditionFailedException } from '@nestjs/common';
-import { AUDIOBOOK_MANIFEST_SCHEMA, AUDIOBOOK_MANIFEST_VERSION, type AudiobookChapter } from '@bookorbit/types';
+import { AUDIOBOOK_MANIFEST_SCHEMA, AUDIOBOOK_MANIFEST_VERSION, AuthenticationMethod, type AudiobookChapter } from '@bookorbit/types';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { AudiobookChaptersService } from '../audiobook-chapters/audiobook-chapters.service';
@@ -11,7 +11,7 @@ import { AudiobookService } from './audiobook.service';
 const FIRST_PUBLIC_ID = '11111111-1111-4111-8111-111111111111';
 const SECOND_PUBLIC_ID = '22222222-2222-4222-8222-222222222222';
 
-function makeUser(): RequestUser {
+function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
   return {
     id: 7,
     username: 'listener',
@@ -26,6 +26,7 @@ function makeUser(): RequestUser {
     isSuperuser: false,
     permissions: [],
     contentFilters: null,
+    ...overrides,
   };
 }
 
@@ -101,6 +102,7 @@ function makeFixture() {
     }),
     autoUpdateReadStatusForProgress: vi.fn().mockResolvedValue(undefined),
     syncEbookProgressForAudiobookPlayback: vi.fn().mockResolvedValue(undefined),
+    findAppPasswordLabel: vi.fn().mockResolvedValue(null),
   };
   return {
     repo,
@@ -188,7 +190,7 @@ describe('AudiobookService', () => {
 
     expect(after.revision).not.toBe(before.revision);
     expect(saved.manifestRevision).toBe(after.revision);
-    expect(repo.createPlaybackState).toHaveBeenCalledWith(7, 30, expect.objectContaining({ manifestRevision: after.revision }));
+    expect(repo.createPlaybackState).toHaveBeenCalledWith(7, 30, expect.objectContaining({ manifestRevision: after.revision }), null);
   });
 
   it('accepts a revision recorded just before a chapter write even if no client fetched it since', async () => {
@@ -247,8 +249,11 @@ describe('AudiobookService', () => {
       7,
       30,
       expect.objectContaining({ currentFileId: 12, positionSeconds: 5, percentage: saved.percentage }),
+      null,
     );
-    expect(bookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(7, { bookId: 30, libraryId: 4 }, saved.percentage, {});
+    expect(bookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(7, { bookId: 30, libraryId: 4 }, saved.percentage, {
+      origin: 'bookorbit',
+    });
     expect(bookService.syncEbookProgressForAudiobookPlayback).toHaveBeenCalledWith(
       makeUser(),
       30,
@@ -256,7 +261,41 @@ describe('AudiobookService', () => {
       5,
       saved.percentage,
       new Date('2026-02-01T00:00:00.000Z'),
+      null,
     );
+  });
+
+  it('attributes playback progress to the authenticating app password', async () => {
+    const { service, repo, bookService } = makeFixture();
+    const user = makeUser({ authenticationMethod: AuthenticationMethod.AppPassword, appPasswordId: 88 });
+    const manifest = await service.getManifest(30, user);
+    const capturedAt = new Date('2026-02-01T00:00:00.000Z');
+    repo.createPlaybackState.mockResolvedValue({ capturedAt, revision: 1, appPasswordId: 88 });
+    bookService.findAppPasswordLabel.mockResolvedValue('iPhone app');
+
+    const saved = await service.putPlaybackState(
+      30,
+      {
+        assetId: manifest.assets[0]!.assetId,
+        positionMs: 2_000,
+        capturedAt: capturedAt.toISOString(),
+        operationId: 'abababab-abab-4bab-8bab-abababababab',
+        baseRevision: 0,
+        manifestRevision: manifest.revision,
+      },
+      user,
+    );
+
+    expect(repo.createPlaybackState).toHaveBeenCalledWith(7, 30, expect.any(Object), 88);
+    expect(bookService.findAppPasswordLabel).toHaveBeenCalledWith(7, 88);
+    expect(bookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(
+      7,
+      { bookId: 30, libraryId: 4 },
+      saved.percentage,
+      expect.objectContaining({ origin: 'bookorbit', externalProvider: 'iPhone app' }),
+    );
+    expect(bookService.syncEbookProgressForAudiobookPlayback).toHaveBeenCalledWith(user, 30, 11, 2, saved.percentage, capturedAt, 88);
+    expect(saved.appName).toBe('iPhone app');
   });
 
   it('uses complete per-file durations instead of stale aggregate metadata', async () => {
@@ -297,7 +336,7 @@ describe('AudiobookService', () => {
 
     expect(saved.percentage).toBe(0);
     expect(saved.completed).toBe(false);
-    expect(bookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(7, { bookId: 30, libraryId: 4 }, 0, {});
+    expect(bookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(7, { bookId: 30, libraryId: 4 }, 0, { origin: 'bookorbit' });
   });
 
   it('syncs EPUB progress only after the revision-controlled write is accepted', async () => {
@@ -339,6 +378,7 @@ describe('AudiobookService', () => {
       revision: 4,
       operationId: '88888888-8888-4888-8888-888888888888',
       manifestRevision: manifest.revision,
+      appPasswordId: null,
     });
 
     const result = await service.putPlaybackState(
@@ -357,7 +397,7 @@ describe('AudiobookService', () => {
     expect(result).toMatchObject({ revision: 4, positionMs: 2_000 });
     expect(repo.createPlaybackState).not.toHaveBeenCalled();
     expect(repo.updatePlaybackState).not.toHaveBeenCalled();
-    expect(bookService.syncEbookProgressForAudiobookPlayback).toHaveBeenCalledWith(makeUser(), 30, 11, 2, 6.63, capturedAt);
+    expect(bookService.syncEbookProgressForAudiobookPlayback).toHaveBeenCalledWith(makeUser(), 30, 11, 2, 6.63, capturedAt, null);
   });
 
   it('rejects stale manifests, unknown assets, and revision conflicts', async () => {
@@ -400,7 +440,7 @@ describe('AudiobookService', () => {
 
     expect(manifest.assets[1]!.durationMs).toBe(20_000);
     expect(saved).toMatchObject({ positionMs: 20_000, percentage: 100 });
-    expect(repo.createPlaybackState).toHaveBeenCalledWith(7, 30, expect.objectContaining({ currentFileId: 12, positionSeconds: 20 }));
+    expect(repo.createPlaybackState).toHaveBeenCalledWith(7, 30, expect.objectContaining({ currentFileId: 12, positionSeconds: 20 }), null);
     await expect(service.putPlaybackState(30, { ...dto, positionMs: 21_001 }, makeUser())).rejects.toThrow(BadRequestException);
   });
 

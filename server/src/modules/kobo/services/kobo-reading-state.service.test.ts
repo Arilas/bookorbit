@@ -376,6 +376,7 @@ describe('KoboReadingStateService', () => {
       expect.objectContaining({
         userId: 1,
         bookFileId: 55,
+        appPasswordId: null,
         percentage: 42.5,
         cfi: null,
         pageNumber: null,
@@ -386,6 +387,9 @@ describe('KoboReadingStateService', () => {
         // A page turn on the Kobo is a text move; clients compare it with the narration stamp.
         textUpdatedAt: new Date('2026-01-01T00:00:00.000Z'),
       }),
+    );
+    expect(progressInsert.onConflictDoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ set: expect.objectContaining({ appPasswordId: null }) }),
     );
     expect(db.execute).toHaveBeenCalledTimes(1);
     expect(bookService.syncAudioProgressForExternalEbookProgress).toHaveBeenCalledWith(1, 5, 55, 42.5, {

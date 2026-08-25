@@ -1,10 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, getTableColumns, isNotNull, isNull, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { audiobookProgress, bookmarks, bookFiles } from '../../db/schema';
+import { appPasswords, audiobookProgress, bookmarks, bookFiles } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -49,26 +49,27 @@ export class AudiobookRepository {
 
   async findPlaybackState(userId: number, bookId: number) {
     const [row] = await this.db
-      .select()
+      .select({ ...getTableColumns(audiobookProgress), appName: appPasswords.label })
       .from(audiobookProgress)
+      .leftJoin(appPasswords, and(eq(appPasswords.id, audiobookProgress.appPasswordId), eq(appPasswords.userId, audiobookProgress.userId)))
       .where(and(eq(audiobookProgress.userId, userId), eq(audiobookProgress.bookId, bookId)))
       .limit(1);
     return row ?? null;
   }
 
-  async createPlaybackState(userId: number, bookId: number, values: PlaybackStateWrite) {
+  async createPlaybackState(userId: number, bookId: number, values: PlaybackStateWrite, appPasswordId: number | null = null) {
     const [row] = await this.db
       .insert(audiobookProgress)
-      .values({ userId, bookId, ...values, revision: 1 })
+      .values({ userId, bookId, appPasswordId, ...values, revision: 1 })
       .onConflictDoNothing()
       .returning();
     return row ?? null;
   }
 
-  async updatePlaybackState(userId: number, bookId: number, baseRevision: number, values: PlaybackStateWrite) {
+  async updatePlaybackState(userId: number, bookId: number, baseRevision: number, values: PlaybackStateWrite, appPasswordId: number | null = null) {
     const [row] = await this.db
       .update(audiobookProgress)
-      .set({ ...values, revision: sql`${audiobookProgress.revision} + 1`, updatedAt: new Date() })
+      .set({ ...values, appPasswordId, revision: sql`${audiobookProgress.revision} + 1`, updatedAt: new Date() })
       .where(and(eq(audiobookProgress.userId, userId), eq(audiobookProgress.bookId, bookId), eq(audiobookProgress.revision, baseRevision)))
       .returning();
     return row ?? null;

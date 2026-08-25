@@ -11,6 +11,7 @@ import { bookFormatEntries, formatKeyName, type BookFormatEntry } from '@/featur
 export interface EditionProgress {
   /** The edition's format key, as `bookFormatEntries` gives it. */
   key: string
+  appName: string | null
   percentage: number
   finished: boolean
   /** Present when this edition's progress can be reset. */
@@ -90,6 +91,14 @@ function rowMeasure(row: BookFormatEntry): string {
           :primary="row.primary"
           class="h-5 min-w-13 shrink-0 justify-center rounded-md px-1.5 text-[10px] leading-none tracking-wider"
         />
+
+        <span
+          v-if="progressFor(row)?.appName"
+          class="max-w-24 shrink-0 truncate text-[10px] text-muted-foreground"
+          :title="progressFor(row)!.appName!"
+        >
+          {{ progressFor(row)!.appName }}
+        </span>
 
         <template v-if="progressFor(row)">
           <span class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">

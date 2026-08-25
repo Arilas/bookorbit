@@ -38,6 +38,8 @@ export interface ReadingKoboLocation {
 
 export interface ReadingProgressEntry {
   fileId: number;
+  /** Name of the App Password that last saved this position, when applicable. */
+  appName: string | null;
   /** 0 to 100. */
   percentage: number;
   /** When any position on the file was last saved; null when none ever was. */

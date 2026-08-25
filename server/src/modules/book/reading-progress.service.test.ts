@@ -21,6 +21,7 @@ function storedRow(overrides: Record<string, unknown> = {}) {
     koboLocationValue: 'kobo.12.3',
     koboContentSourceProgressPercent: 50,
     koreaderProgress: '/body/DocFragment[10]/body/p[3]',
+    appName: null,
     updatedAt: new Date('2026-10-21T10:00:00.000Z'),
     ...overrides,
   };
@@ -36,6 +37,7 @@ function makeService() {
   };
   const repo = {
     findProgress: vi.fn().mockResolvedValue(storedRow()),
+    findProgressWithAppAttribution: vi.fn().mockResolvedValue(storedRow()),
     findProgressByBook: vi.fn().mockResolvedValue([]),
   };
   return { service: new ReadingProgressService(books as never, repo as never), books, repo };
@@ -46,6 +48,7 @@ describe('toReadingProgressEntry', () => {
     expect(toReadingProgressEntry(64, storedRow())).toEqual({
       fileId: 64,
       percentage: 42.5,
+      appName: null,
       updatedAt: '2026-10-21T10:00:00.000Z',
       text: { cfi: 'epubcfi(/6/22!/4/108/1:0)', page: null, updatedAt: '2026-10-21T10:00:00.000Z' },
       narration: { seconds: 812.4, fragment: 'c9R.xhtml#s12', sectionIndex: 9, percentage: 40, updatedAt: '2026-10-20T10:00:00.000Z' },
@@ -160,7 +163,7 @@ describe('ReadingProgressService', () => {
 
   it('saves a write with an edit time when nothing was stored yet', async () => {
     const { service, books, repo } = makeService();
-    repo.findProgress.mockResolvedValueOnce(null);
+    repo.findProgressWithAppAttribution.mockResolvedValueOnce(null);
     await service.save([{ fileId: 64, percentage: 8, editedAt: '2026-10-21T09:00:00.000Z' }], user);
     expect(books.saveProgress).toHaveBeenCalledTimes(1);
   });

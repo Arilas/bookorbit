@@ -2,6 +2,7 @@ import type { ReadAloudDeliveryPreference, ReadAloudDeliveryVariant, DeliveryArt
 import type { HighlightOfTheDayWidgetData, ReadingGoalWidgetData, ReadingStreakWidgetData } from "./dashboard";
 import type { SeriesIndex } from "./series-index";
 import type { AchievementRarity } from "./achievement";
+import type { ReadingSessionSourceDescriptor } from "./reading-session-source-bucket";
 
 export interface KoreaderCredentials {
   readAloudDelivery?: ReadAloudDeliveryPreference;
@@ -84,6 +85,7 @@ export interface KoreaderBookSyncInfo {
   canonicalChapterIndex: number | null;
   canonicalChapterTitle: string | null;
   canonicalSource: "koreader" | "web_reader";
+  canonicalSourceAttribution: ReadingSessionSourceDescriptor;
   canonicalUpdatedAt: string;
   devices: KoreaderBookProgress[];
   fileModifiedSinceLastSync: boolean;

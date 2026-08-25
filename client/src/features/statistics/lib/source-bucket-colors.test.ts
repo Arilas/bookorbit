@@ -3,11 +3,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   readCssColor: vi.fn<(varName: string) => string>((varName: string) => `oklch(${varName})`),
   toLegacyColor: vi.fn<(input: string) => string>(() => '#abcdef'),
+  oklchToHex: vi.fn<(_lightness: number, _chroma: number, _hue: number) => string>(() => '#abcdef'),
 }))
 
-vi.mock('@/lib/css-color', () => ({ readCssColor: mocks.readCssColor, toLegacyColor: mocks.toLegacyColor }))
+vi.mock('@/lib/css-color', () => ({
+  readCssColor: mocks.readCssColor,
+  toLegacyColor: mocks.toLegacyColor,
+  oklchToHex: mocks.oklchToHex,
+}))
 
-import { resolveSourceBucketColors, SOURCE_BUCKET_COLOR_TOKENS } from './source-bucket-colors'
+import { resolveReadingSourceColor, resolveSourceBucketColors, SOURCE_BUCKET_COLOR_TOKENS } from './source-bucket-colors'
+import { resolveReadingSourceCssColor } from '@/lib/reading-source'
 
 describe('source-bucket-colors', () => {
   beforeEach(() => {
@@ -40,5 +46,22 @@ describe('source-bucket-colors', () => {
     const second = resolveSourceBucketColors('light:violet')
     expect(first).toBe(second)
     expect(mocks.readCssColor).toHaveBeenCalledTimes(6)
+  })
+
+  it('assigns deterministic theme-aware colors to App Password sources', () => {
+    const source = { key: 'app-password:4:bookorbit', bucket: 'bookorbit', kind: 'app_password', appPasswordId: 4 } as const
+
+    expect(resolveReadingSourceColor(source, 'dark:violet')).toBe('#abcdef')
+    expect(mocks.oklchToHex).toHaveBeenLastCalledWith(0.75, 0.16, (4 * 137.508) % 360)
+
+    resolveReadingSourceColor({ ...source, key: 'app-password:5:bookorbit', appPasswordId: 5 }, 'light:violet')
+    expect(mocks.oklchToHex).toHaveBeenLastCalledWith(0.55, 0.18, (5 * 137.508) % 360)
+  })
+
+  it('returns CSS colors that adapt to the active color scheme', () => {
+    const source = { key: 'app-password:4:bookorbit', bucket: 'bookorbit', kind: 'app_password', appPasswordId: 4 } as const
+
+    expect(resolveReadingSourceCssColor(source)).toContain('light-dark(')
+    expect(resolveReadingSourceCssColor({ key: 'kobo', bucket: 'kobo', kind: 'built_in', appPasswordId: null })).toBe('var(--pill-kobo)')
   })
 })

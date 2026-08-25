@@ -263,12 +263,13 @@ export class MigrationImportRepository {
   }
 
   async upsertReadingProgress(values: typeof schema.readingProgress.$inferInsert): Promise<void> {
+    const importedValues = { ...values, appPasswordId: null };
     await this.db
       .insert(schema.readingProgress)
-      .values(values)
+      .values(importedValues)
       .onConflictDoUpdate({
         target: [schema.readingProgress.bookFileId, schema.readingProgress.userId],
-        set: omitKeys(values, 'bookFileId', 'userId'),
+        set: omitKeys(importedValues, 'bookFileId', 'userId'),
       });
   }
 
@@ -288,12 +289,13 @@ export class MigrationImportRepository {
   }
 
   async upsertAudiobookProgress(values: typeof schema.audiobookProgress.$inferInsert): Promise<void> {
+    const importedValues = { ...values, appPasswordId: null };
     await this.db
       .insert(schema.audiobookProgress)
-      .values(values)
+      .values(importedValues)
       .onConflictDoUpdate({
         target: [schema.audiobookProgress.userId, schema.audiobookProgress.bookId],
-        set: omitKeys(values, 'userId', 'bookId'),
+        set: omitKeys(importedValues, 'userId', 'bookId'),
       });
   }
 
@@ -571,12 +573,14 @@ export class MigrationImportRepository {
   async batchUpsertReadingProgress(items: Array<typeof schema.readingProgress.$inferInsert>): Promise<void> {
     if (items.length === 0) return;
     for (const batch of chunk(items, BATCH_CHUNK_SIZE)) {
+      const importedBatch = batch.map((item) => ({ ...item, appPasswordId: null }));
       await this.db
         .insert(schema.readingProgress)
-        .values(batch)
+        .values(importedBatch)
         .onConflictDoUpdate({
           target: [schema.readingProgress.bookFileId, schema.readingProgress.userId],
           set: {
+            appPasswordId: null,
             percentage: sql`excluded.percentage`,
             cfi: sql`excluded.cfi`,
             pageNumber: sql`excluded.page_number`,
@@ -591,12 +595,14 @@ export class MigrationImportRepository {
   async batchUpsertAudiobookProgress(items: Array<typeof schema.audiobookProgress.$inferInsert>): Promise<void> {
     if (items.length === 0) return;
     for (const batch of chunk(items, BATCH_CHUNK_SIZE)) {
+      const importedBatch = batch.map((item) => ({ ...item, appPasswordId: null }));
       await this.db
         .insert(schema.audiobookProgress)
-        .values(batch)
+        .values(importedBatch)
         .onConflictDoUpdate({
           target: [schema.audiobookProgress.userId, schema.audiobookProgress.bookId],
           set: {
+            appPasswordId: null,
             percentage: sql`excluded.percentage`,
             currentFileId: sql`excluded.current_file_id`,
             positionSeconds: sql`excluded.position_seconds`,
@@ -707,12 +713,14 @@ export class MigrationImportRepository {
     }
 
     for (const batch of chunk(params.items, BATCH_CHUNK_SIZE)) {
+      const importedBatch = batch.map((item) => ({ ...item, appPasswordId: null }));
       await this.db
         .insert(schema.readingSessions)
-        .values(batch)
+        .values(importedBatch)
         .onConflictDoUpdate({
           target: [schema.readingSessions.userId, schema.readingSessions.sessionId],
           set: {
+            appPasswordId: null,
             bookFileId: sql`excluded.book_file_id`,
             bookId: sql`excluded.book_id`,
             source: sql`excluded.source`,

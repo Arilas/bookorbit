@@ -1,6 +1,6 @@
 import { recordBookFileHashHistory, deleteBookFilesWithHashInvalidation, deleteBooksWithHashInvalidation } from '../../db/book-file-hash-history';
 import { BadRequestException, Inject, Injectable, Optional } from '@nestjs/common';
-import { SQL, and, asc, count, eq, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { SQL, and, asc, count, eq, getTableColumns, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import { SUPPORTED_BOOK_FORMATS } from '../upload/upload-validator.service';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
@@ -34,6 +34,7 @@ import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import {
   authors,
+  appPasswords,
   bookAuthors,
   bookCommunityRatings,
   bookFiles,
@@ -1859,6 +1860,28 @@ export class BookRepository {
     return row ?? null;
   }
 
+  async findProgressWithAppAttribution(userId: number, fileId: number) {
+    const [row] = await this.db
+      .select({
+        ...getTableColumns(readingProgress),
+        appName: appPasswords.label,
+      })
+      .from(readingProgress)
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingProgress.appPasswordId), eq(appPasswords.userId, readingProgress.userId)))
+      .where(and(eq(readingProgress.bookFileId, fileId), eq(readingProgress.userId, userId)))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async findAppPasswordLabel(userId: number, appPasswordId: number): Promise<string | null> {
+    const [row] = await this.db
+      .select({ label: appPasswords.label })
+      .from(appPasswords)
+      .where(and(eq(appPasswords.id, appPasswordId), eq(appPasswords.userId, userId)))
+      .limit(1);
+    return row?.label ?? null;
+  }
+
   async findProgressByBook(userId: number, bookId: number) {
     return this.db
       .select({
@@ -1877,11 +1900,13 @@ export class BookRepository {
         narrationPercentage: readingProgress.narrationPercentage,
         narrationUpdatedAt: readingProgress.narrationUpdatedAt,
         textUpdatedAt: readingProgress.textUpdatedAt,
+        appName: appPasswords.label,
         updatedAt: readingProgress.updatedAt,
         lastReadAt: readingProgress.lastReadAt,
       })
       .from(bookFiles)
       .leftJoin(readingProgress, and(eq(readingProgress.bookFileId, bookFiles.id), eq(readingProgress.userId, userId)))
+      .leftJoin(appPasswords, and(eq(appPasswords.id, readingProgress.appPasswordId), eq(appPasswords.userId, readingProgress.userId)))
       .where(eq(bookFiles.bookId, bookId))
       .orderBy(asc(bookFiles.sortOrder), asc(bookFiles.id));
   }
@@ -1911,6 +1936,19 @@ export class BookRepository {
     return row ?? null;
   }
 
+  async findAudioProgressWithAppAttribution(userId: number, bookId: number) {
+    const [row] = await this.db
+      .select({
+        ...getTableColumns(audiobookProgress),
+        appName: appPasswords.label,
+      })
+      .from(audiobookProgress)
+      .leftJoin(appPasswords, and(eq(appPasswords.id, audiobookProgress.appPasswordId), eq(appPasswords.userId, audiobookProgress.userId)))
+      .where(and(eq(audiobookProgress.userId, userId), eq(audiobookProgress.bookId, bookId)))
+      .limit(1);
+    return row ?? null;
+  }
+
   async upsertAudioProgress(
     userId: number,
     bookId: number,
@@ -1918,6 +1956,7 @@ export class BookRepository {
     positionSeconds: number,
     percentage: number,
     sourceUpdatedAt = new Date(),
+    appPasswordId: number | null = null,
   ) {
     const now = new Date();
     const [row] = await this.db
@@ -1925,6 +1964,7 @@ export class BookRepository {
       .values({
         userId,
         bookId,
+        appPasswordId,
         currentFileId,
         positionSeconds,
         percentage,
@@ -1936,6 +1976,7 @@ export class BookRepository {
       .onConflictDoUpdate({
         target: [audiobookProgress.userId, audiobookProgress.bookId],
         set: {
+          appPasswordId,
           currentFileId,
           positionSeconds,
           percentage,
@@ -2648,6 +2689,7 @@ export class BookRepository {
     narration?: { percentage: number; updatedAt: Date } | null,
     /** Set when this write moved the text position, so clients can tell which one is fresher. */
     textUpdatedAt?: Date | null,
+    appPasswordId: number | null = null,
   ) {
     const now = new Date();
     const normalizedKoboLocationSource = this.normalizeKoboLocationPart(koboLocationSource);
@@ -2671,6 +2713,7 @@ export class BookRepository {
       .values({
         userId,
         bookFileId: fileId,
+        appPasswordId,
         cfi,
         pageNumber,
         percentage,
@@ -2689,6 +2732,7 @@ export class BookRepository {
       .onConflictDoUpdate({
         target: [readingProgress.bookFileId, readingProgress.userId],
         set: {
+          appPasswordId,
           cfi,
           pageNumber,
           percentage,
@@ -2722,6 +2766,7 @@ export class BookRepository {
     mediaOverlaySectionIndex: number | null;
     koreaderProgress: string | null;
     sourceUpdatedAt: Date;
+    appPasswordId?: number | null;
   }): Promise<boolean> {
     // A marker moved here moves the narration's stamp with it, or a comparison of stamps would
     // prefer the text position over a newer marker.
@@ -2734,6 +2779,7 @@ export class BookRepository {
       .values({
         userId: params.userId,
         bookFileId: params.fileId,
+        appPasswordId: params.appPasswordId ?? null,
         cfi: params.cfi,
         pageNumber: null,
         percentage: params.percentage,
@@ -2749,6 +2795,7 @@ export class BookRepository {
       .onConflictDoUpdate({
         target: [readingProgress.bookFileId, readingProgress.userId],
         set: {
+          appPasswordId: params.appPasswordId ?? null,
           cfi: params.cfi,
           pageNumber: null,
           percentage: params.percentage,

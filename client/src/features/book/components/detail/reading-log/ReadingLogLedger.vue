@@ -2,12 +2,12 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ChevronDown, ChevronUp, ChevronsUpDown, Loader2, RotateCcw, Trash2, X } from '@lucide/vue'
-import type { BookReadingSession, ReadingAttempt, ReadingSessionSourceBucket } from '@bookorbit/types'
-import { toReadingSessionSourceBucket, READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
+import type { BookReadingSession, ReadingAttempt } from '@bookorbit/types'
 import { formatDate } from '@/i18n/formatters'
 import { formatColorVar } from '@/features/book/lib/format-colors'
 import { buildReadingCheckpointRoute } from '@/lib/reading-checkpoint'
 import { compareReadingOrder } from '@/features/book/lib/reading-attempt-order'
+import { getReadingSourceDisplayLabels, resolveReadingSourceCssColor } from '@/lib/reading-source'
 
 const props = defineProps<{
   bookId: number
@@ -36,15 +36,6 @@ const ROW_GRID =
   'grid items-center gap-x-2.5 grid-cols-[4.5rem_3.25rem_2.75rem_minmax(0,1fr)_3rem_1.5rem] ' +
   'sm:grid-cols-[5rem_3.5rem_3rem_3.5rem_minmax(0,1fr)_3.25rem_1.5rem] ' +
   'lg:grid-cols-[5.5rem_3.5rem_3rem_3.5rem_minmax(0,1fr)_3.25rem_4.75rem_1.5rem]'
-
-const BUCKET_TOKEN: Record<ReadingSessionSourceBucket, string> = {
-  bookorbit: '--pill-web',
-  ios: '--pill-ios',
-  watchos: '--pill-watchos',
-  android: '--pill-android',
-  koreader: '--pill-koreader',
-  kobo: '--pill-kobo',
-}
 
 /** Gaps of a day or two are the normal rhythm of reading a book; only a real stall is a fact. */
 const MIN_GAP_DAYS = 3
@@ -105,12 +96,14 @@ function checkpointRoute(session: BookReadingSession) {
   return buildReadingCheckpointRoute(props.bookId, session)
 }
 
+const sourceLabels = computed(() => getReadingSourceDisplayLabels(props.sessions.map((session) => session.sourceAttribution)))
+
 function sourceLabel(session: BookReadingSession): string {
-  return READING_SESSION_SOURCE_BUCKET_LABELS[toReadingSessionSourceBucket(session.source)]
+  return sourceLabels.value.get(session.sourceAttribution.key) ?? session.sourceAttribution.label
 }
 
 function sourceColor(session: BookReadingSession): string {
-  return `var(${BUCKET_TOKEN[toReadingSessionSourceBucket(session.source)]})`
+  return resolveReadingSourceCssColor(session.sourceAttribution)
 }
 
 function formatBadgeStyle(format: string) {

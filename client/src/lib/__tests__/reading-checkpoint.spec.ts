@@ -13,6 +13,13 @@ function makeSession(overrides: Partial<BookReadingSession> = {}): BookReadingSe
     endProgress: 42.25,
     format: 'epub',
     source: 'web',
+    sourceAttribution: {
+      key: 'bookorbit',
+      label: 'BookOrbit',
+      bucket: 'bookorbit',
+      kind: 'built_in',
+      appPasswordId: null,
+    },
     attemptId: null,
     ...overrides,
   }

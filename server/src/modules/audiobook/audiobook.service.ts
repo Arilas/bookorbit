@@ -75,6 +75,7 @@ export class AudiobookService {
       capturedAt: row.capturedAt.toISOString(),
       revision: row.revision,
       manifestRevision: row.manifestRevision ?? context.manifest.revision,
+      appName: row.appName ?? null,
     };
   }
 
@@ -102,6 +103,7 @@ export class AudiobookService {
         previous.positionSeconds,
         previous.percentage,
         previous.capturedAt,
+        previous.appPasswordId ?? null,
       );
       return existing;
     }
@@ -125,19 +127,20 @@ export class AudiobookService {
       operationId: dto.operationId,
       manifestRevision,
     };
+    const appPasswordId = user.authenticationMethod === 'app_password' ? (user.appPasswordId ?? null) : null;
     const saved =
       dto.baseRevision === 0
-        ? await this.repo.createPlaybackState(user.id, bookId, values)
-        : await this.repo.updatePlaybackState(user.id, bookId, dto.baseRevision, values);
+        ? await this.repo.createPlaybackState(user.id, bookId, values, appPasswordId)
+        : await this.repo.updatePlaybackState(user.id, bookId, dto.baseRevision, values, appPasswordId);
     if (!saved) throw new ConflictException('Playback state revision conflict');
 
     const strongRereadEvidence = previous !== null && previous.percentage - percentage >= 10;
-    await this.bookService.autoUpdateReadStatusForProgress(
-      user.id,
-      { bookId, libraryId: context.libraryId },
-      percentage,
-      strongRereadEvidence ? { origin: 'bookorbit', strongRereadEvidence: true } : {},
-    );
+    const appPasswordLabel = appPasswordId === null ? null : await this.bookService.findAppPasswordLabel(user.id, appPasswordId);
+    await this.bookService.autoUpdateReadStatusForProgress(user.id, { bookId, libraryId: context.libraryId }, percentage, {
+      origin: 'bookorbit',
+      ...(appPasswordLabel ? { externalProvider: appPasswordLabel } : {}),
+      ...(strongRereadEvidence ? { strongRereadEvidence: true } : {}),
+    });
     await this.bookService.syncEbookProgressForAudiobookPlayback(
       user,
       bookId,
@@ -145,6 +148,7 @@ export class AudiobookService {
       values.positionSeconds,
       percentage,
       saved.capturedAt,
+      saved.appPasswordId ?? appPasswordId,
     );
     return {
       assetId: dto.assetId,
@@ -154,6 +158,7 @@ export class AudiobookService {
       capturedAt: saved.capturedAt.toISOString(),
       revision: saved.revision,
       manifestRevision,
+      appName: appPasswordLabel,
     };
   }
 

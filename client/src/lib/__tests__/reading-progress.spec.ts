@@ -11,6 +11,7 @@ const mockApi = vi.mocked(api)
 
 const entry: ReadingProgressEntry = {
   fileId: 64,
+  appName: 'iPhone app',
   percentage: 7.99,
   updatedAt: '2026-10-22T09:30:00.000Z',
   text: { cfi: 'epubcfi(/6/22!/4/108/1:0)', page: null, updatedAt: '2026-10-22T09:30:00.000Z' },
@@ -31,6 +32,7 @@ describe('reading progress client', () => {
   it('flattens a grouped entry into the fields the readers work in', () => {
     expect(flattenReadingProgress(entry)).toEqual({
       fileId: 64,
+      appName: 'iPhone app',
       percentage: 7.99,
       updatedAt: '2026-10-22T09:30:00.000Z',
       cfi: 'epubcfi(/6/22!/4/108/1:0)',

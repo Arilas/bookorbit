@@ -512,6 +512,7 @@ export class HardcoverRepository {
       .values({
         userId,
         bookFileId,
+        appPasswordId: null,
         cfi: null,
         pageNumber: null,
         percentage: normalizedPercentage,
@@ -527,6 +528,7 @@ export class HardcoverRepository {
         target: [schema.readingProgress.bookFileId, schema.readingProgress.userId],
         setWhere: sql`${schema.readingProgress.percentage} <= 0`,
         set: {
+          appPasswordId: null,
           cfi: null,
           pageNumber: null,
           percentage: normalizedPercentage,

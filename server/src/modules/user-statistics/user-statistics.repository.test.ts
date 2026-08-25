@@ -88,8 +88,18 @@ describe('UserStatisticsRepository', () => {
     const db = makeDb([
       [{ day: '2026-04-15', readingSeconds: 120, progressDelta: 1.5, eventsCount: 2 }],
       [],
-      [{ hour: 9, format: 'EPUB', source: 'koreader', readingSeconds: 500, eventsCount: 3 }],
-      [{ dayOfWeek: 2, source: 'manual', format: 'EPUB', readingSeconds: 900, eventsCount: 4 }],
+      [{ hour: 9, format: 'EPUB', source: 'koreader', appPasswordId: null, appPasswordLabel: null, readingSeconds: 500, eventsCount: 3 }],
+      [
+        {
+          dayOfWeek: 2,
+          source: 'manual',
+          appPasswordId: null,
+          appPasswordLabel: null,
+          format: 'EPUB',
+          readingSeconds: 900,
+          eventsCount: 4,
+        },
+      ],
       [{ year: 2026, month: 4, count: 2 }],
       [{ year: 2026, month: 4, count: 2 }],
     ]);
@@ -100,10 +110,18 @@ describe('UserStatisticsRepository', () => {
       { day: '2026-04-15', readingSeconds: 120, progressDelta: 1.5, eventsCount: 2 },
     ]);
     await expect(repo.getPeakReadingHours(5, false, [2], 30)).resolves.toEqual([
-      { hour: 9, format: 'EPUB', source: 'koreader', readingSeconds: 500, eventsCount: 3 },
+      { hour: 9, format: 'EPUB', source: 'koreader', appPasswordId: null, appPasswordLabel: null, readingSeconds: 500, eventsCount: 3 },
     ]);
     await expect(repo.getFavoriteReadingDays(5, false, [2], 30)).resolves.toEqual([
-      { dayOfWeek: 2, source: 'manual', format: 'EPUB', readingSeconds: 900, eventsCount: 4 },
+      {
+        dayOfWeek: 2,
+        source: 'manual',
+        appPasswordId: null,
+        appPasswordLabel: null,
+        format: 'EPUB',
+        readingSeconds: 900,
+        eventsCount: 4,
+      },
     ]);
     await expect(repo.getCompletionTimeline(5, false, [2], 365)).resolves.toEqual([{ year: 2026, month: 4, count: 2 }]);
     await expect(repo.getMonthlyCompletions(5, false, [2], 365)).resolves.toEqual([{ year: 2026, month: 4, count: 2 }]);
@@ -205,12 +223,15 @@ describe('UserStatisticsRepository', () => {
   });
 
   it('returns peak reading hour buckets in the provided timezone', async () => {
-    const db = makeDb([[], [{ hour: 23, format: 'EPUB', source: 'kobo', readingSeconds: 1800, eventsCount: 1 }]]);
+    const db = makeDb([
+      [],
+      [{ hour: 23, format: 'EPUB', source: 'kobo', appPasswordId: null, appPasswordLabel: null, readingSeconds: 1800, eventsCount: 1 }],
+    ]);
     const repo = new UserStatisticsRepository(db as never);
     vi.spyOn(repo as any, 'getAccessibleLibraryIds').mockResolvedValue([2]);
 
     await expect(repo.getPeakReadingHours(5, false, [2], 30, 'Australia/Brisbane')).resolves.toEqual([
-      { hour: 23, format: 'EPUB', source: 'kobo', readingSeconds: 1800, eventsCount: 1 },
+      { hour: 23, format: 'EPUB', source: 'kobo', appPasswordId: null, appPasswordLabel: null, readingSeconds: 1800, eventsCount: 1 },
     ]);
   });
 
@@ -232,6 +253,9 @@ describe('UserStatisticsRepository', () => {
     expect(params.filter((param) => param === 'Australia/Brisbane')).toHaveLength(1);
     expect(text).toContain('"reading_sessions"."started_at" AT TIME ZONE $1');
     expect(text).toContain('from (select');
+    expect(text).toContain('left join "app_passwords" on');
+    expect(text).toContain('"app_passwords"."id" = "reading_sessions"."app_password_id"');
+    expect(text).toContain('"app_passwords"."user_id" = "reading_sessions"."user_id"');
     expect(text).toContain('group by "hour", "format", "session_buckets"."source"');
     expect(text.match(/AT TIME ZONE/g)).toHaveLength(1);
   });
@@ -266,16 +290,16 @@ describe('UserStatisticsRepository', () => {
   it('returns per-source daily reading seconds for the heatmap tooltip', async () => {
     const db = makeDb([
       [
-        { day: '2026-04-15', source: 'web', readingSeconds: 120 },
-        { day: '2026-04-15', source: 'kobo', readingSeconds: 60 },
+        { day: '2026-04-15', source: 'web', appPasswordId: 42, appPasswordLabel: 'iPhone app', readingSeconds: 120 },
+        { day: '2026-04-15', source: 'kobo', appPasswordId: null, appPasswordLabel: null, readingSeconds: 60 },
       ],
     ]);
     const repo = new UserStatisticsRepository(db as never);
     vi.spyOn(repo as any, 'getAccessibleLibraryIds').mockResolvedValue([2]);
 
     await expect(repo.getDailyReadingSecondsBySource(5, false, [2], 30)).resolves.toEqual([
-      { day: '2026-04-15', source: 'web', readingSeconds: 120 },
-      { day: '2026-04-15', source: 'kobo', readingSeconds: 60 },
+      { day: '2026-04-15', source: 'web', appPasswordId: 42, appPasswordLabel: 'iPhone app', readingSeconds: 120 },
+      { day: '2026-04-15', source: 'kobo', appPasswordId: null, appPasswordLabel: null, readingSeconds: 60 },
     ]);
   });
 
@@ -286,6 +310,8 @@ describe('UserStatisticsRepository', () => {
       bookTitle: 'Dune',
       bookFormat: 'EPUB',
       source: 'koreader',
+      appPasswordId: null,
+      appPasswordLabel: null,
       startedAt: new Date('2026-04-15T10:00:00.000Z'),
       endedAt: new Date('2026-04-15T10:30:00.000Z'),
       durationSeconds: 1800,
@@ -307,6 +333,8 @@ describe('UserStatisticsRepository', () => {
         bookTitle: 'Dune',
         bookFormat: 'EPUB',
         source: 'koreader',
+        appPasswordId: null,
+        appPasswordLabel: null,
         startedAt: new Date('2026-04-15T10:00:00.000Z'),
         endedAt: new Date('2026-04-15T10:30:00.000Z'),
         durationSeconds: 1800,
@@ -391,6 +419,8 @@ describe('UserStatisticsRepository', () => {
       bookTitle: 'Dune',
       bookFormat: 'EPUB',
       source: 'web',
+      appPasswordId: 42,
+      appPasswordLabel: 'iPhone app',
       startedAt: new Date('2026-04-15T11:00:00.000Z'),
       endedAt: new Date('2026-04-15T11:30:00.000Z'),
       durationSeconds: 1800,
@@ -470,7 +500,7 @@ describe('UserStatisticsRepository', () => {
   it('normalizes completion latency, reading pace, survival, race, and archetype points', async () => {
     const db = makeDb([
       [{ days: '3.5' }, { days: -1 }, { days: 'not-a-number' }, { days: 7 }],
-      [{ durationSeconds: 300, progressDelta: 1.25, source: 'kobo', format: 'PDF' }],
+      [{ durationSeconds: 300, progressDelta: 1.25, source: 'web', appPasswordId: 42, appPasswordLabel: 'iPhone app', format: 'PDF' }],
       [],
       [{ maxProgress: 50 }, { maxProgress: 'bad' }],
       [{ bookId: 1 }],
@@ -479,14 +509,25 @@ describe('UserStatisticsRepository', () => {
         { bookId: 1, title: 'Dune', startedAt: new Date('2026-04-02T10:00:00.000Z'), endProgress: 70 },
       ],
       [{ hour: '9.5', durationMinutes: '15', dayOfWeek: '2' }],
-      [{ genre: 'Sci-Fi', source: 'web', readingSeconds: 1200 }],
+      [{ genre: 'Sci-Fi', source: 'web', appPasswordId: 42, appPasswordLabel: 'iPhone app', readingSeconds: 1200 }],
     ]);
     const repo = new UserStatisticsRepository(db as never);
     vi.spyOn(repo as any, 'getAccessibleLibraryIds').mockResolvedValue([1]);
 
     await expect(repo.getCompletionLatencyDays(5, false, [1], 365)).resolves.toEqual([3.5, 7]);
     await expect(repo.getReadingPacePoints(5, false, [1], 365)).resolves.toEqual([
-      { durationSeconds: 300, progressDelta: 1.25, bucket: 'kobo', format: 'PDF' },
+      {
+        durationSeconds: 300,
+        progressDelta: 1.25,
+        source: {
+          key: 'app-password:42:bookorbit',
+          label: 'iPhone app',
+          bucket: 'bookorbit',
+          kind: 'app_password',
+          appPasswordId: 42,
+        },
+        format: 'PDF',
+      },
     ]);
     await expect(repo.getReadingSurvivalMaxProgress(5, false, [1], 365)).resolves.toEqual([50]);
     await expect(repo.getCompletionRaceRawSessions(5, false, [1], 365, 15)).resolves.toEqual([
@@ -494,7 +535,9 @@ describe('UserStatisticsRepository', () => {
       { bookId: 1, title: 'Dune', startedAt: new Date('2026-04-02T10:00:00.000Z'), endProgress: 70 },
     ]);
     await expect(repo.getSessionArchetypePoints(5, false, [1], 365)).resolves.toEqual([{ hour: 9.5, durationMinutes: 15, dayOfWeek: 2 }]);
-    await expect(repo.getGenreReadingTime(5, false, [1], 365)).resolves.toEqual([{ genre: 'Sci-Fi', source: 'web', readingSeconds: 1200 }]);
+    await expect(repo.getGenreReadingTime(5, false, [1], 365)).resolves.toEqual([
+      { genre: 'Sci-Fi', source: 'web', appPasswordId: 42, appPasswordLabel: 'iPhone app', readingSeconds: 1200 },
+    ]);
   });
 
   it('returns empty completion race when no top books exist', async () => {

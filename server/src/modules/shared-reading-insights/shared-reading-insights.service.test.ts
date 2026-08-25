@@ -100,6 +100,31 @@ describe('SharedReadingInsightsService', () => {
     expect(JSON.stringify(result)).not.toContain('bookTitle');
   });
 
+  it('does not expose private App Password attribution in shared source coverage', async () => {
+    const data = summaryData();
+    data.sources = [
+      {
+        source: 'ios',
+        readingSeconds: 3600,
+        sessionsCount: 2,
+        appPasswordId: 17,
+        appPasswordLabel: 'Personal iPhone',
+      } as (typeof data.sources)[number],
+    ];
+    const repository = {
+      getViewSession: vi.fn().mockResolvedValue({ id: 'session', sharingLevel: 'summary' }),
+      getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'summary' }),
+      getSummary: vi.fn().mockResolvedValue(data),
+    };
+    const service = new SharedReadingInsightsService(repository as never, {} as never);
+
+    const result = await service.getSharedSummary(makeUser(), 9, 'session', 90);
+
+    expect(result.sourceCoverage).toEqual([{ source: 'ios', readingSeconds: 3600, sessionsCount: 2 }]);
+    expect(JSON.stringify(result)).not.toContain('Personal iPhone');
+    expect(JSON.stringify(result)).not.toContain('appPassword');
+  });
+
   it('blocks detailed data after consent is downgraded', async () => {
     const repository = {
       getViewSession: vi.fn().mockResolvedValue({ id: 'session', sharingLevel: 'detailed' }),

@@ -4,6 +4,7 @@ import { api } from '@/lib/api'
 /** One file's saved position with every field at the top level, the form the readers work in. */
 export type FlatReadingProgress = {
   fileId: number
+  appName: string | null
   percentage: number
   updatedAt: string | null
   cfi: string | null
@@ -24,6 +25,7 @@ export type FlatReadingProgress = {
 export function flattenReadingProgress(entry: ReadingProgressEntry): FlatReadingProgress {
   return {
     fileId: entry.fileId,
+    appName: entry.appName,
     percentage: entry.percentage,
     updatedAt: entry.updatedAt,
     cfi: entry.text?.cfi ?? null,

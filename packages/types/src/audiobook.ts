@@ -262,6 +262,8 @@ export interface AudiobookManifest {
 
 export interface AudiobookPlaybackState {
   assetId: string;
+  /** Name of the App Password that last saved this position, when applicable. */
+  appName: string | null;
   positionMs: number;
   percentage: number;
   completed: boolean;

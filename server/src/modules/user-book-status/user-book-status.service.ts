@@ -27,6 +27,7 @@ export type AutoReadingActivity = {
   /** Saves a lookup when the caller already holds the reader's timezone. Never a default. */
   timeZone?: string;
   origin?: 'bookorbit' | 'kobo' | 'koreader';
+  externalProvider?: string;
   strongRereadEvidence?: boolean;
   meaningfulActivity?: boolean;
 };
@@ -285,6 +286,7 @@ export class UserBookStatusService {
         bookId,
         occurredOn: this.dayKeyFor(activity.occurredAt, timeZone),
         origin: activity.origin ?? 'bookorbit',
+        ...(activity.externalProvider ? { externalProvider: activity.externalProvider } : {}),
         progress: normalizedPercentage,
         finishThreshold: normalizedFinishThreshold,
         strongRereadEvidence: activity.strongRereadEvidence === true,

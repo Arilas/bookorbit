@@ -287,8 +287,9 @@ defineExpose({ openAddForm })
             </span>
             <span
               class="inline-flex h-4 items-center rounded-xs border border-border px-1 text-[9px] font-medium uppercase tracking-wider text-muted-foreground"
+              :class="{ capitalize: attempt.externalProvider == null }"
             >
-              {{ attempt.origin }}
+              {{ attempt.externalProvider ?? attempt.origin }}
             </span>
             <span class="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
               <button

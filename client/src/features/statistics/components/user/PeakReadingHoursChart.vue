@@ -3,10 +3,10 @@ import { computed, ref, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppChart from '@/components/charts/AppChart.vue'
 import { Clock3 } from '@lucide/vue'
-import type { ReadingSessionSourceBucket } from '@bookorbit/types'
 
 import { useChartTokens } from '@/composables/useChartTokens'
-import { DEFAULT_BREAKDOWN_DIMENSION, getBreakdownSeries, type BreakdownDimension } from '../../lib/breakdown'
+import { DEFAULT_BREAKDOWN_DIMENSION, getBreakdownSeries, getReadingSecondsForSource, type BreakdownDimension } from '../../lib/breakdown'
+import { escapeHtml } from '../../lib/escape-html'
 import { useUserPeakReadingHours } from '../../composables/useUserPeakReadingHours'
 import BreakdownSelect from '../BreakdownSelect.vue'
 import ChartCard from '../ChartCard.vue'
@@ -40,13 +40,15 @@ watchEffect(() => {
   if (isEmpty.value || lowConfidence.value || !data.value.length) return
 
   const formatKeys = [...new Set(data.value.flatMap((item) => Object.keys(item.byFormat)))].sort()
-  const seriesMeta = getBreakdownSeries(dimension.value, chartTokens.value.key, formatKeys)
+  const sourceDescriptors = data.value.flatMap((item) => item.bySource)
+  const seriesMeta = getBreakdownSeries(dimension.value, chartTokens.value.key, formatKeys, sourceDescriptors)
   const series = seriesMeta.map((meta) => ({
+    id: meta.key,
     type: 'bar',
     name: meta.label,
     stack: 'hours',
-    data: data.value.map(
-      (item) => ((dimension.value === 'source' ? item.bySource?.[meta.key as ReadingSessionSourceBucket] : item.byFormat?.[meta.key]) ?? 0) / 60,
+    data: data.value.map((item) =>
+      dimension.value === 'source' ? getReadingSecondsForSource(item.bySource, meta.key) / 60 : (item.byFormat[meta.key] ?? 0) / 60,
     ),
     barMaxWidth: 24,
     itemStyle: { color: meta.color },
@@ -66,7 +68,7 @@ watchEffect(() => {
         const header = `${first.axisValue}<br/><strong>${formatDuration(readingSeconds)}</strong> · ${events} ${eventLabel}`
         const rows = params
           .filter((p) => p.data > 0)
-          .map((p) => `${p.marker} ${p.seriesName}: ${formatDuration(p.data * 60)}`)
+          .map((p) => `${p.marker} ${escapeHtml(p.seriesName)}: ${formatDuration(p.data * 60)}`)
           .join('<br/>')
         return rows ? `${header}<br/>${rows}` : header
       },

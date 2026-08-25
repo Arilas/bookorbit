@@ -5,6 +5,7 @@ import {
   READING_SESSION_SOURCE_BUCKET_LABELS,
   emptySourceBucketRecord,
   toReadingSessionSourceBucket,
+  toReadingSessionSourceDescriptor,
 } from "../reading-session-source-bucket";
 
 describe("toReadingSessionSourceBucket", () => {
@@ -33,6 +34,41 @@ describe("toReadingSessionSourceBucket", () => {
   it("maps null/undefined to bookorbit", () => {
     expect(toReadingSessionSourceBucket(null)).toBe("bookorbit");
     expect(toReadingSessionSourceBucket(undefined)).toBe("bookorbit");
+  });
+});
+
+describe("toReadingSessionSourceDescriptor", () => {
+  it("uses a named App Password while preserving a native platform bucket", () => {
+    expect(toReadingSessionSourceDescriptor("ios", 12, "iPhone app")).toEqual({
+      key: "app-password:12:ios",
+      label: "iPhone app",
+      bucket: "ios",
+      kind: "app_password",
+      appPasswordId: 12,
+    });
+    expect(toReadingSessionSourceDescriptor("watchos", 13, "Watch app").bucket).toBe("watchos");
+    expect(toReadingSessionSourceDescriptor("android", 14, "Android app").bucket).toBe("android");
+  });
+
+  it("keeps one App Password distinct across platform buckets", () => {
+    expect(toReadingSessionSourceDescriptor("web", 12, "Reading app").key).toBe("app-password:12:bookorbit");
+    expect(toReadingSessionSourceDescriptor("ios", 12, "Reading app").key).toBe("app-password:12:ios");
+  });
+
+  it("keeps KOReader and Kobo authoritative", () => {
+    expect(toReadingSessionSourceDescriptor("koreader", 12, "Tablet")).toEqual({
+      key: "koreader",
+      label: "KOReader",
+      bucket: "koreader",
+      kind: "built_in",
+      appPasswordId: null,
+    });
+    expect(toReadingSessionSourceDescriptor("kobo", 12, "Tablet").key).toBe("kobo");
+  });
+
+  it("falls back to the built-in source without a complete App Password identity", () => {
+    expect(toReadingSessionSourceDescriptor("web", 12, null).key).toBe("bookorbit");
+    expect(toReadingSessionSourceDescriptor("ios", null, "iPhone app").key).toBe("ios");
   });
 });
 

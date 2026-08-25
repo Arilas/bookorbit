@@ -79,6 +79,7 @@ export class AudiobookEbookProgressSyncService {
     percentage: number;
     syncKobo: boolean;
     sourceUpdatedAt?: Date;
+    appPasswordId?: number | null;
   }): Promise<boolean> {
     const startedAt = Date.now();
     try {
@@ -101,6 +102,7 @@ export class AudiobookEbookProgressSyncService {
             mediaOverlaySectionIndex: target.mediaOverlaySectionIndex,
             koreaderProgress: target.koreaderProgress,
             sourceUpdatedAt,
+            appPasswordId: params.appPasswordId ?? null,
           })
         ) {
           acceptedTargets.push(target);
@@ -139,6 +141,7 @@ export class AudiobookEbookProgressSyncService {
     mediaOverlaySectionIndex?: number | null;
     sourceUpdatedAt?: Date;
     syncSiblingEpubs?: boolean;
+    appPasswordId?: number | null;
   }): Promise<boolean> {
     const startedAt = Date.now();
     try {
@@ -158,6 +161,7 @@ export class AudiobookEbookProgressSyncService {
           audio.positionSeconds,
           audio.percentage,
           sourceUpdatedAt,
+          params.appPasswordId ?? null,
         );
         if (!saved) return false;
       }
@@ -176,6 +180,7 @@ export class AudiobookEbookProgressSyncService {
           mediaOverlaySectionIndex: target.mediaOverlaySectionIndex,
           koreaderProgress: target.koreaderProgress,
           sourceUpdatedAt,
+          appPasswordId: params.appPasswordId ?? null,
         });
         siblingSynced ||= accepted;
       }

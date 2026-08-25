@@ -53,6 +53,13 @@ function makeHeldProgress(overrides: Partial<KoreaderBookSyncInfo> = {}): Koread
     canonicalChapterIndex: null,
     canonicalChapterTitle: null,
     canonicalSource: 'web_reader',
+    canonicalSourceAttribution: {
+      key: 'bookorbit',
+      label: 'BookOrbit',
+      bucket: 'bookorbit',
+      kind: 'built_in',
+      appPasswordId: null,
+    },
     canonicalUpdatedAt: '2026-09-10T12:00:00.000Z',
     devices: [],
     fileModifiedSinceLastSync: false,
@@ -157,6 +164,13 @@ function makeSession(overrides: Partial<BookReadingSession> = {}): BookReadingSe
     endProgress: 42,
     format: 'epub',
     source: 'web',
+    sourceAttribution: {
+      key: 'bookorbit',
+      label: 'BookOrbit',
+      bucket: 'bookorbit',
+      kind: 'built_in',
+      appPasswordId: null,
+    },
     attemptId: null,
     ...overrides,
   }
@@ -212,6 +226,13 @@ function makeKoreaderProgress(overrides: Partial<KoreaderBookSyncInfo> = {}): Ko
     canonicalChapterIndex: null,
     canonicalChapterTitle: null,
     canonicalSource: 'web_reader',
+    canonicalSourceAttribution: {
+      key: 'bookorbit',
+      label: 'BookOrbit',
+      bucket: 'bookorbit',
+      kind: 'built_in',
+      appPasswordId: null,
+    },
     canonicalUpdatedAt: '1970-01-01T00:00:00.000Z',
     devices: [],
     fileModifiedSinceLastSync: false,
@@ -286,6 +307,14 @@ describe('ReadingLogTab', () => {
     expect(text).toContain('Sessions')
     expect(text).toContain('Attempts')
     expect(text).toContain('Progress over time')
+  })
+
+  it('shows the App Password name for an attributed reading attempt', async () => {
+    mocks.api.mockImplementation(routeApi({ attempts: [makeAttempt({ externalProvider: 'iPhone app' })] }))
+    const wrapper = mountTab()
+    await flushPromises()
+
+    expect(wrapper.findComponent(ReadingLogAttempts).text()).toContain('iPhone app')
   })
 
   it('renders the quick filter buttons', async () => {

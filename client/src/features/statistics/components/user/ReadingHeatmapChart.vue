@@ -3,11 +3,12 @@ import { computed, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppChart from '@/components/charts/AppChart.vue'
 import { Calendar } from '@lucide/vue'
-import { READING_SESSION_SOURCE_BUCKETS, READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
 import { useChartTokens } from '@/composables/useChartTokens'
 
 import { buildHeatmapPalette } from '@/lib/heatmap-palette'
+import { getReadingSourceDisplayLabels } from '@/lib/reading-source'
 import { useUserReadingHeatmap } from '../../composables/useUserReadingHeatmap'
+import { escapeHtml } from '../../lib/escape-html'
 import ChartCard from '../ChartCard.vue'
 import ChartEmptyState from '../ChartEmptyState.vue'
 
@@ -56,6 +57,7 @@ watchEffect(() => {
   const palette = heatmapPaletteState.value.palette
 
   const byDay = new Map(data.value.map((item) => [item.day, item]))
+  const sourceDisplayLabels = getReadingSourceDisplayLabels(data.value.flatMap((item) => item.bySource ?? []))
   const values: Array<readonly [string, number, number]> = []
   for (const cursor = new Date(yearStart); cursor <= yearEnd; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
     const day = cursor.toISOString().slice(0, 10)
@@ -77,8 +79,9 @@ watchEffect(() => {
         const eventLabel = events === 1 ? 'event' : 'events'
         const bySource = byDay.get(day)?.bySource
         const sourceRows = bySource
-          ? READING_SESSION_SOURCE_BUCKETS.filter((bucket) => (bySource[bucket] ?? 0) > 0)
-              .map((bucket) => `${READING_SESSION_SOURCE_BUCKET_LABELS[bucket]}: ${Math.round((bySource[bucket] ?? 0) / 60)}m`)
+          ? bySource
+              .filter((source) => source.readingSeconds > 0)
+              .map((source) => `${escapeHtml(sourceDisplayLabels.get(source.key) ?? source.label)}: ${Math.round(source.readingSeconds / 60)}m`)
               .join('<br/>')
           : ''
         const base = `${day}<br/><strong>${minutes}</strong> ${minuteLabel}<br/>${events} ${eventLabel}`

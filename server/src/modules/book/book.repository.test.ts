@@ -680,19 +680,21 @@ describe('BookRepository', () => {
       insert: vi.fn().mockReturnValue(audioInsert),
     };
     const repo = new BookRepository(db as never);
+    const sourceUpdatedAt = new Date('2026-11-10T12:00:00.000Z');
 
     await expect(repo.findAudioProgress(1, 10)).resolves.toEqual({ percentage: 22 });
     await expect(repo.findAudioProgress(1, 11)).resolves.toBeNull();
-    await expect(repo.upsertAudioProgress(1, 10, 4, 120, 33)).resolves.toEqual({ bookId: 10, percentage: 33 });
+    await expect(repo.upsertAudioProgress(1, 10, 4, 120, 33, sourceUpdatedAt, 88)).resolves.toEqual({ bookId: 10, percentage: 33 });
     expect(db.insert).toHaveBeenCalledTimes(1);
     expect(audioInsert.values).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 1,
         bookId: 10,
+        appPasswordId: 88,
         currentFileId: 4,
         positionSeconds: 120,
         percentage: 33,
-        capturedAt: expect.any(Date),
+        capturedAt: sourceUpdatedAt,
         operationId: null,
         manifestRevision: null,
         updatedAt: expect.any(Date),
@@ -701,11 +703,12 @@ describe('BookRepository', () => {
     expect(onConflictDoUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         set: expect.objectContaining({
+          appPasswordId: 88,
           currentFileId: 4,
           positionSeconds: 120,
           percentage: 33,
           revision: expect.anything(),
-          capturedAt: expect.any(Date),
+          capturedAt: sourceUpdatedAt,
           operationId: null,
           manifestRevision: null,
           updatedAt: expect.any(Date),
@@ -866,6 +869,20 @@ describe('BookRepository', () => {
     ).resolves.toBe(false);
 
     expect(db.delete).not.toHaveBeenCalled();
+  });
+
+  it('resolves App Password names on file and audio progress reads', async () => {
+    const fileProgress = { percentage: 42, appPasswordId: 17, appName: 'iPhone app' };
+    const audioProgress = { percentage: 24, appPasswordId: 18, appName: 'Car app' };
+    const fileChain = makeSelectChain('limit', [fileProgress]);
+    const audioChain = makeSelectChain('limit', [audioProgress]);
+    const db = { select: vi.fn().mockReturnValueOnce(fileChain).mockReturnValueOnce(audioChain) };
+    const repo = new BookRepository(db as never);
+
+    await expect(repo.findProgressWithAppAttribution(7, 10)).resolves.toEqual(fileProgress);
+    await expect(repo.findAudioProgressWithAppAttribution(7, 20)).resolves.toEqual(audioProgress);
+    expect(fileChain.leftJoin).toHaveBeenCalledOnce();
+    expect(audioChain.leftJoin).toHaveBeenCalledOnce();
   });
 
   it('maps hasCover from coverSource and aggregates authors per book in recommendation rows', async () => {
@@ -1326,6 +1343,9 @@ describe('BookRepository', () => {
       'kobo.25.1',
       25,
       '/body/DocFragment[2]/body/p[1]/text()[1].0',
+      null,
+      null,
+      88,
     );
 
     expect(insert).toHaveBeenCalledTimes(1);
@@ -1333,6 +1353,7 @@ describe('BookRepository', () => {
       expect.objectContaining({
         userId: 5,
         bookFileId: 9,
+        appPasswordId: 88,
         cfi: 'epubcfi(/6/2)',
         pageNumber: 7,
         percentage: 80,
@@ -1349,6 +1370,7 @@ describe('BookRepository', () => {
       expect.objectContaining({
         target: expect.any(Array),
         set: expect.objectContaining({
+          appPasswordId: 88,
           cfi: 'epubcfi(/6/2)',
           pageNumber: 7,
           percentage: 80,

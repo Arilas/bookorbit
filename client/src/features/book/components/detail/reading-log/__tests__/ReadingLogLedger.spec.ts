@@ -14,6 +14,13 @@ function makeSession(overrides: Partial<BookReadingSession> = {}): BookReadingSe
     endProgress: 42,
     format: 'epub',
     source: 'web',
+    sourceAttribution: {
+      key: 'bookorbit',
+      label: 'BookOrbit',
+      bucket: 'bookorbit',
+      kind: 'built_in',
+      appPasswordId: null,
+    },
     attemptId: 1,
     ...overrides,
   }
@@ -71,6 +78,25 @@ describe('ReadingLogLedger', () => {
     expect(text).toContain('1h 1m')
     expect(text).toContain('+5.5%')
     expect(text).toContain('-12.0%')
+  })
+
+  it('uses the App Password name as the session source label', () => {
+    const wrapper = mountLedger({
+      sessions: [
+        makeSession({
+          source: 'ios',
+          sourceAttribution: {
+            key: 'app-password:7:ios',
+            label: 'iPhone app',
+            bucket: 'ios',
+            kind: 'app_password',
+            appPasswordId: 7,
+          },
+        }),
+      ],
+    })
+
+    expect(wrapper.find('[title="iPhone app"]').exists()).toBe(true)
   })
 
   it('marks a stall of three days or more between two sessions', () => {

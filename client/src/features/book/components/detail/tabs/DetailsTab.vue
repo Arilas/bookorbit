@@ -100,6 +100,7 @@ import ReadAloudSparkles from '@/features/read-aloud/components/ReadAloudSparkle
 import { useReadAloudInvite } from '@/features/read-aloud/composables/useReadAloudInvite'
 
 type FileProgress = {
+  appName: string | null
   percentage: number
   cfi: string | null
   pageNumber: number | null
@@ -861,7 +862,14 @@ function cancelReadingDateEdit(field: 'startedAt' | 'finishedAt') {
 }
 
 const fileProgressById = ref<Record<number, FileProgress>>({})
-const audiobookProgress = ref<{ percentage: number; assetId: string; positionMs: number; capturedAt: string; revision: number } | null>(null)
+const audiobookProgress = ref<{
+  percentage: number
+  assetId: string
+  positionMs: number
+  capturedAt: string
+  revision: number
+  appName: string | null
+} | null>(null)
 const collections = ref<CollectionMembership[]>([])
 const koboState = ref<BookKoboState | null>(null)
 const supplementalLoading = ref(false)
@@ -899,6 +907,7 @@ const fileProgressRows = computed(() =>
   props.book.files.map((file) => ({
     file,
     progress: fileProgressById.value[file.id] ?? {
+      appName: null,
       percentage: 0,
       cfi: null,
       pageNumber: null,
@@ -941,17 +950,23 @@ const detailProgressRows = computed(() =>
  */
 const editionProgress = computed<EditionProgress[]>(() => {
   const byKey = new Map<string, EditionProgress>()
-  for (const { file, percentage } of detailProgressRows.value) {
+  for (const { file, progress, percentage } of detailProgressRows.value) {
     const key = fileFormatKey(file)
     if (!key) continue
     const current = byKey.get(key)
     if (current && current.percentage >= percentage) continue
-    byKey.set(key, { key, percentage, finished: percentage >= 100, resetFileId: file.id })
+    byKey.set(key, { key, appName: progress.appName, percentage, finished: percentage >= 100, resetFileId: file.id })
   }
   const audioEntry = formatEntries.value.find((entry) => entry.audio)
   const audioPercentage = audiobookProgress.value?.percentage ?? 0
   if (audioEntry && audioPercentage > 0) {
-    byKey.set(audioEntry.key, { key: audioEntry.key, percentage: audioPercentage, finished: audioPercentage >= 100, resetFileId: -props.book.id })
+    byKey.set(audioEntry.key, {
+      key: audioEntry.key,
+      appName: audiobookProgress.value?.appName ?? null,
+      percentage: audioPercentage,
+      finished: audioPercentage >= 100,
+      resetFileId: -props.book.id,
+    })
   }
   return [...byKey.values()]
 })
@@ -1288,6 +1303,7 @@ async function loadSupplemental() {
     for (const row of progressRows) {
       if (!Number.isFinite(row.fileId)) continue
       progressMap[row.fileId] = {
+        appName: row.appName ?? null,
         percentage: typeof row.percentage === 'number' && Number.isFinite(row.percentage) ? row.percentage : 0,
         cfi: row.cfi,
         pageNumber: row.pageNumber,
@@ -1309,6 +1325,7 @@ async function loadSupplemental() {
             positionMs: data.positionMs,
             capturedAt: data.capturedAt,
             revision: data.revision,
+            appName: data.appName ?? null,
           }
         : null
     } else {

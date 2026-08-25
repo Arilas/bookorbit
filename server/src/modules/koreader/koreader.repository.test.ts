@@ -1248,6 +1248,7 @@ describe('KoreaderRepository', () => {
       );
 
       expect(conflictSet(onConflictDoUpdate)?.['updatedAt']).toBeDefined();
+      expect(conflictSet(onConflictDoUpdate)).toHaveProperty('appPasswordId', null);
     });
 
     it('persists a paged position on both the insert and the conflict update', async () => {

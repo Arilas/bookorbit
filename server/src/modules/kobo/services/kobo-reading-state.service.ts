@@ -839,6 +839,7 @@ export class KoboReadingStateService {
       {
         userId,
         bookFileId: fileId,
+        appPasswordId: null,
         percentage,
         cfi: nextCfi,
         pageNumber: null,

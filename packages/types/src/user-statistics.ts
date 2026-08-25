@@ -1,4 +1,4 @@
-import type { ReadingSessionSourceBucket } from "./reading-session-source-bucket";
+import type { ReadingSessionSourceDescriptor, ReadingSessionSourceUsage } from "./reading-session-source-bucket";
 
 export interface UserStatisticsSummary {
   trackedBooks: number;
@@ -15,13 +15,10 @@ export interface UserDailyReadingStat {
   eventsCount: number;
   // Populated only by the reading heatmap (per-source tooltip); other daily-stat
   // consumers leave it undefined.
-  bySource?: Record<ReadingSessionSourceBucket, number>;
+  bySource?: ReadingSessionSourceUsage[];
 }
 
-export interface UserReadingSourceDistributionSlice {
-  bucket: ReadingSessionSourceBucket;
-  readingSeconds: number;
-}
+export type UserReadingSourceDistributionSlice = ReadingSessionSourceUsage;
 
 export interface UserReadingSourceDistribution {
   totalSeconds: number;
@@ -33,7 +30,7 @@ export interface UserPeakHourStat {
   readingSeconds: number;
   eventsCount: number;
   byFormat: Record<string, number>;
-  bySource: Record<ReadingSessionSourceBucket, number>;
+  bySource: ReadingSessionSourceUsage[];
 }
 
 export interface UserFavoriteDayStat {
@@ -41,7 +38,7 @@ export interface UserFavoriteDayStat {
   readingSeconds: number;
   eventsCount: number;
   byFormat: Record<string, number>;
-  bySource: Record<ReadingSessionSourceBucket, number>;
+  bySource: ReadingSessionSourceUsage[];
 }
 
 export interface UserCompletionTimelinePoint {
@@ -94,7 +91,7 @@ export interface UserCompletionLatencyDistribution {
 export interface UserGenreReadingTimeItem {
   genre: string;
   readingSeconds: number;
-  bySource: Record<ReadingSessionSourceBucket, number>;
+  bySource: ReadingSessionSourceUsage[];
 }
 
 export interface UserReadingSessionTimelineItem {
@@ -102,7 +99,7 @@ export interface UserReadingSessionTimelineItem {
   bookId: number;
   bookTitle: string | null;
   bookFormat: string | null;
-  bookSource: ReadingSessionSourceBucket;
+  bookSource: ReadingSessionSourceDescriptor;
   startedAt: string;
   endedAt: string;
   durationSeconds: number;
@@ -119,7 +116,7 @@ export interface UserReadingSessionTimeline {
 export interface UserReadingPacePoint {
   durationSeconds: number;
   progressDelta: number;
-  bucket: ReadingSessionSourceBucket;
+  source: ReadingSessionSourceDescriptor;
   format: string;
 }
 

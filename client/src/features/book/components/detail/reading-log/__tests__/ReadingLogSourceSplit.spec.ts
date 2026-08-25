@@ -1,8 +1,37 @@
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
-import type { BookReadingSessionStats, BookReadingSourceSlice } from '@bookorbit/types'
+import {
+  READING_SESSION_SOURCE_BUCKET_LABELS,
+  type BookReadingSessionStats,
+  type BookReadingSourceSlice,
+  type ReadingSessionSourceBucket,
+} from '@bookorbit/types'
 
 import ReadingLogSourceSplit from '../ReadingLogSourceSplit.vue'
+
+function builtIn(bucket: ReadingSessionSourceBucket, totalSeconds: number, totalSessions: number): BookReadingSourceSlice {
+  return {
+    key: bucket,
+    label: READING_SESSION_SOURCE_BUCKET_LABELS[bucket],
+    bucket,
+    kind: 'built_in',
+    appPasswordId: null,
+    totalSeconds,
+    totalSessions,
+  }
+}
+
+function app(id: number, label: string, bucket: ReadingSessionSourceBucket, totalSeconds: number): BookReadingSourceSlice {
+  return {
+    key: `app-password:${id}:${bucket}`,
+    label,
+    bucket,
+    kind: 'app_password',
+    appPasswordId: id,
+    totalSeconds,
+    totalSessions: 1,
+  }
+}
 
 function makeStats(bySource: BookReadingSourceSlice[]): BookReadingSessionStats {
   return {
@@ -31,60 +60,64 @@ describe('ReadingLogSourceSplit', () => {
 
   it('renders nothing when the book was read from a single source', () => {
     const wrapper = mount(ReadingLogSourceSplit, {
-      props: { stats: makeStats([{ bucket: 'koreader', totalSeconds: 100, totalSessions: 2 }]) },
+      props: { stats: makeStats([builtIn('koreader', 100, 2)]) },
     })
     expect(wrapper.find('div').exists()).toBe(false)
   })
 
-  it('stays hidden when buckets exist but carry no reading time', () => {
+  it('stays hidden when sources exist but carry no reading time', () => {
     const wrapper = mount(ReadingLogSourceSplit, {
-      props: {
-        stats: makeStats([
-          { bucket: 'bookorbit', totalSeconds: 0, totalSessions: 1 },
-          { bucket: 'kobo', totalSeconds: 0, totalSessions: 1 },
-        ]),
-      },
+      props: { stats: makeStats([builtIn('bookorbit', 0, 1), builtIn('kobo', 0, 1)]) },
     })
     expect(wrapper.find('div').exists()).toBe(false)
   })
 
-  it('renders a labelled split with percentages and durations across sources', () => {
+  it('renders named apps alongside every native and integration source', () => {
     const wrapper = mount(ReadingLogSourceSplit, {
       props: {
         stats: makeStats([
-          { bucket: 'bookorbit', totalSeconds: 3600, totalSessions: 4 },
-          { bucket: 'ios', totalSeconds: 60, totalSessions: 1 },
-          { bucket: 'watchos', totalSeconds: 60, totalSessions: 1 },
-          { bucket: 'koreader', totalSeconds: 120, totalSessions: 1 },
-          { bucket: 'kobo', totalSeconds: 30, totalSessions: 1 },
+          app(7, 'iPhone app', 'ios', 3600),
+          builtIn('watchos', 60, 1),
+          builtIn('android', 60, 1),
+          builtIn('koreader', 120, 1),
+          builtIn('kobo', 30, 1),
         ]),
       },
     })
 
     const text = wrapper.text()
     expect(text).toContain('Reading sources')
-    expect(text).toContain('BookOrbit')
-    expect(text).toContain('iOS app')
+    expect(text).toContain('iPhone app')
     expect(text).toContain('Apple Watch')
+    expect(text).toContain('Android app')
     expect(text).toContain('KOReader')
     expect(text).toContain('Kobo')
-    // total = 3870s, with visible independent native-client segments.
-    expect(text).toContain('93%')
-    expect(text).toContain('3%')
-    expect(text).toContain('1%')
     expect(text).toContain('1h 0m')
     expect(text).toContain('2m')
     expect(text).toContain('30s')
   })
 
+  it('disambiguates duplicate App Password labels by id', () => {
+    const wrapper = mount(ReadingLogSourceSplit, {
+      props: { stats: makeStats([app(2, 'Phone', 'ios', 300), app(4, 'Phone', 'android', 100)]) },
+    })
+
+    expect(wrapper.text()).toContain('Phone (#2)')
+    expect(wrapper.text()).toContain('Phone (#4)')
+  })
+
+  it('disambiguates one App Password used across platform buckets', () => {
+    const wrapper = mount(ReadingLogSourceSplit, {
+      props: { stats: makeStats([app(7, 'Reader', 'ios', 300), app(7, 'Reader', 'android', 100)]) },
+    })
+
+    expect(wrapper.text()).toContain('Reader (#7, iOS app)')
+    expect(wrapper.text()).toContain('Reader (#7, Android app)')
+  })
+
   it('sizes each bar segment proportionally to its reading time', () => {
     const wrapper = mount(ReadingLogSourceSplit, {
-      props: {
-        stats: makeStats([
-          { bucket: 'bookorbit', totalSeconds: 300, totalSessions: 2 },
-          { bucket: 'kobo', totalSeconds: 100, totalSessions: 1 },
-        ]),
-      },
+      props: { stats: makeStats([app(7, 'Phone', 'ios', 300), builtIn('kobo', 100, 1)]) },
     })
 
     const segments = wrapper.findAll('.h-full')
@@ -97,10 +130,7 @@ describe('ReadingLogSourceSplit', () => {
     const wrapper = mount(ReadingLogSourceSplit, {
       props: {
         variant: 'stacked',
-        stats: makeStats([
-          { bucket: 'bookorbit', totalSeconds: 300, totalSessions: 2 },
-          { bucket: 'kobo', totalSeconds: 100, totalSessions: 1 },
-        ]),
+        stats: makeStats([app(7, 'Phone', 'ios', 300), builtIn('kobo', 100, 1)]),
       },
     })
     expect(wrapper.find('section').exists()).toBe(false)

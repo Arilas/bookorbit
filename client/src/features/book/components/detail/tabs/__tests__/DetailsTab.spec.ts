@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { defineComponent, ref } from 'vue'
-import type { BookDetail } from '@bookorbit/types'
+import type { BookDetail, BookReadingSession } from '@bookorbit/types'
 import DetailsTab from '../DetailsTab.vue'
 import BookReadingActivityCard from '../../details/BookReadingActivityCard.vue'
 import ReadAloudSyncMeter from '../../details/ReadAloudSyncMeter.vue'
 import BookCoverStack from '../../details/BookCoverStack.vue'
+import BookEditionsCard from '../../details/BookEditionsCard.vue'
 import BookCoverLightbox from '@/features/book/components/BookCoverLightbox.vue'
 import ReadAloudInviteChip from '@/features/read-aloud/components/ReadAloudInviteChip.vue'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
@@ -249,6 +250,42 @@ describe('DetailsTab cover surface', () => {
     expect(spineLayers[0]!.attributes('style')).toContain('translateY(-50%)')
   })
 
+  it('shows the App Password name that last wrote reading progress', async () => {
+    mocks.api.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/metadata-score/weights')) return response({})
+      if (url.includes('/playback-state')) return response(null)
+      if (url.includes('/collections/membership')) return response([])
+      if (url.includes('/kobo-state')) {
+        return response({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshots: [] })
+      }
+      if (url.includes('/koreader/books/')) return response(null)
+      if (url.startsWith('/api/v1/reading-progress')) {
+        return response({
+          items: [
+            {
+              fileId: 101,
+              appName: 'iPhone app',
+              percentage: 42,
+              updatedAt: '2026-08-25T12:00:00.000Z',
+              text: { cfi: null, page: null, updatedAt: '2026-08-25T12:00:00.000Z' },
+              narration: { seconds: null, fragment: null, sectionIndex: null, percentage: null, updatedAt: null },
+              kobo: { source: null, type: null, value: null, contentPercent: null },
+              koreader: null,
+            },
+          ],
+        })
+      }
+      return response({})
+    })
+
+    const wrapper = mountDetails(makeBook())
+    await flushPromises()
+
+    const progress = wrapper.getComponent(BookEditionsCard).props('progress') as Array<{ appName: string | null }>
+    expect(progress[0]?.appName).toBe('iPhone app')
+  })
+
   it('shrinks natural-bottom detail cover surfaces to the loaded cover ratio', async () => {
     bookCoverDisplayMode.value = 'natural-bottom'
 
@@ -453,7 +490,7 @@ describe('DetailsTab cover surface', () => {
   })
 
   it('lists the three most recent reading sessions', () => {
-    const sessions = Array.from({ length: 5 }, (_, index) => ({
+    const sessions: BookReadingSession[] = Array.from({ length: 5 }, (_, index) => ({
       id: index + 1,
       bookFileId: 101,
       startedAt: `2026-01-0${index + 1}T10:00:00.000Z`,
@@ -463,6 +500,13 @@ describe('DetailsTab cover surface', () => {
       endProgress: (index + 1) * 10,
       format: 'epub',
       source: null,
+      sourceAttribution: {
+        key: 'bookorbit',
+        label: 'BookOrbit',
+        bucket: 'bookorbit',
+        kind: 'built_in',
+        appPasswordId: null,
+      },
       attemptId: null,
     }))
     const wrapper = shallowMount(BookReadingActivityCard, {

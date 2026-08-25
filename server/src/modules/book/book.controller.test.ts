@@ -929,6 +929,7 @@ describe('BookController', () => {
       positionSeconds: null,
       mediaOverlayFragment: null,
       mediaOverlaySectionIndex: null,
+      appName: null,
       koboLocationSource: null,
       koboLocationType: null,
       koboLocationValue: null,

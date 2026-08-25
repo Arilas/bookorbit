@@ -3,10 +3,11 @@ import { computed, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppChart from '@/components/charts/AppChart.vue'
 import { Tag } from '@lucide/vue'
-import { READING_SESSION_SOURCE_BUCKETS, READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
 
 import { useChartTokens } from '@/composables/useChartTokens'
+import { getReadingSourceDisplayLabels } from '@/lib/reading-source'
 import { useUserGenreReadingTime } from '../../composables/useUserGenreReadingTime'
+import { escapeHtml } from '../../lib/escape-html'
 import ChartCard from '../ChartCard.vue'
 import ChartEmptyState from '../ChartEmptyState.vue'
 
@@ -30,6 +31,7 @@ watchEffect(() => {
   const palette = chartTokens.value.palette(0.8, 0.8)
   const background = chartTokens.value.color('--background')
   const bySourceByGenre = new Map(data.value.map((item) => [item.genre, item.bySource]))
+  const sourceDisplayLabels = getReadingSourceDisplayLabels(data.value.flatMap((item) => item.bySource))
 
   option.value = {
     tooltip: {
@@ -40,11 +42,12 @@ watchEffect(() => {
         const pct = totalSeconds.value > 0 ? ((params.value / totalSeconds.value) * 100).toFixed(1) : '0'
         const bySource = bySourceByGenre.get(params.name)
         const sourceRows = bySource
-          ? READING_SESSION_SOURCE_BUCKETS.filter((bucket) => (bySource[bucket] ?? 0) > 0)
-              .map((bucket) => `${READING_SESSION_SOURCE_BUCKET_LABELS[bucket]}: ${((bySource[bucket] ?? 0) / 3600).toFixed(1)}h`)
+          ? bySource
+              .filter((source) => source.readingSeconds > 0)
+              .map((source) => `${escapeHtml(sourceDisplayLabels.get(source.key) ?? source.label)}: ${(source.readingSeconds / 3600).toFixed(1)}h`)
               .join('<br/>')
           : ''
-        const base = `<strong>${params.name}</strong><br/>${hours}h reading time<br/>${pct}% of total`
+        const base = `<strong>${escapeHtml(params.name)}</strong><br/>${hours}h reading time<br/>${pct}% of total`
         return sourceRows ? `${base}<br/>${sourceRows}` : base
       },
     },

@@ -263,6 +263,51 @@ describe('ScannerRepository', () => {
     expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the winning App Password attribution when reassigned audio progress collides', async () => {
+    const { repo, queues, chains, db } = makeRepo();
+    const sourceCapturedAt = new Date('2026-11-10T12:00:00.000Z');
+
+    queues.select.push([{ fileHash: 'audio-hash', bookId: 1 }]);
+    queues.update.push([{ id: 300, bookId: 2, fileHash: 'audio-hash' }]);
+    queues.select.push([
+      {
+        userId: 7,
+        bookId: 1,
+        appPasswordId: 88,
+        currentFileId: 300,
+        positionSeconds: 120,
+        percentage: 40,
+        capturedAt: sourceCapturedAt,
+      },
+    ]);
+    queues.select.push([
+      {
+        userId: 7,
+        bookId: 2,
+        appPasswordId: 99,
+        currentFileId: 301,
+        positionSeconds: 30,
+        percentage: 10,
+        capturedAt: new Date('2026-11-10T11:00:00.000Z'),
+      },
+    ]);
+    queues.update.push([]);
+    queues.delete.push([]);
+
+    await expect(repo.updateBookFile(300, { bookId: 2 })).resolves.toEqual({ id: 300, bookId: 2, fileHash: 'audio-hash' });
+
+    expect(chains.update[1].mocks.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appPasswordId: 88,
+        currentFileId: 300,
+        positionSeconds: 120,
+        percentage: 40,
+        capturedAt: sourceCapturedAt,
+      }),
+    );
+    expect(db.delete).toHaveBeenCalledOnce();
+  });
+
   it('handles missing/present transitions and moving books across libraries', async () => {
     const { repo, queues, db } = makeRepo();
     queues.select.push([

@@ -450,6 +450,7 @@ export class ScannerRepository {
         await tx
           .update(audiobookProgress)
           .set({
+            appPasswordId: source.appPasswordId,
             currentFileId: source.currentFileId,
             positionSeconds: source.positionSeconds,
             percentage: source.percentage,

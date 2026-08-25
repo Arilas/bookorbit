@@ -2,10 +2,11 @@
 import { computed, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppChart from '@/components/charts/AppChart.vue'
-import type { BookReadingSession, BookReadingSessionStats, ReadingSessionSourceBucket } from '@bookorbit/types'
-import { toReadingSessionSourceBucket, READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
+import type { BookReadingSession, BookReadingSessionStats } from '@bookorbit/types'
 import { formatDate } from '@/i18n/formatters'
 import { useChartTokens } from '@/composables/useChartTokens'
+import { getReadingSourceDisplayLabels, resolveAppPasswordSourceColor, SOURCE_BUCKET_COLOR_TOKENS } from '@/lib/reading-source'
+import { escapeHtml } from '@/features/statistics/lib/escape-html'
 
 const props = defineProps<{
   sessions: BookReadingSession[]
@@ -18,15 +19,6 @@ const chartTokens = useChartTokens()
 const option = shallowRef({})
 
 const DAY_MS = 24 * 60 * 60 * 1000
-const BUCKET_TOKEN: Record<ReadingSessionSourceBucket, string> = {
-  bookorbit: '--pill-web',
-  ios: '--pill-ios',
-  watchos: '--pill-watchos',
-  android: '--pill-android',
-  koreader: '--pill-koreader',
-  kobo: '--pill-kobo',
-}
-
 function localDayKey(iso: string): string {
   const value = new Date(iso)
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -88,6 +80,7 @@ watchEffect(() => {
   }
 
   const ordered = [...props.sessions].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt))
+  const sourceDisplayLabels = getReadingSourceDisplayLabels(ordered.map((session) => session.sourceAttribution))
 
   let categories: string[]
   let indexOf: (session: BookReadingSession) => number
@@ -122,7 +115,9 @@ watchEffect(() => {
     const backwards = delta < -0.5
     const color = backwards
       ? chartTokens.value.color('--pill-warning')
-      : chartTokens.value.color(BUCKET_TOKEN[toReadingSessionSourceBucket(session.source)])
+      : session.sourceAttribution.kind === 'app_password'
+        ? resolveAppPasswordSourceColor(session.sourceAttribution, chartTokens.value.dark)
+        : chartTokens.value.color(SOURCE_BUCKET_COLOR_TOKENS[session.sourceAttribution.bucket])
     return {
       value: [index, Math.min(from, end), Math.max(from, end), slot, perSlot.get(index) ?? 1],
       itemStyle: { color, opacity: backwards ? 0.95 : 0.85 },
@@ -131,7 +126,7 @@ watchEffect(() => {
       from,
       end,
       backwards,
-      sourceLabel: READING_SESSION_SOURCE_BUCKET_LABELS[toReadingSessionSourceBucket(session.source)],
+      sourceLabel: sourceDisplayLabels.get(session.sourceAttribution.key) ?? session.sourceAttribution.label,
     }
   })
 
@@ -156,7 +151,7 @@ watchEffect(() => {
           `<strong>${singleSitting.value ? timeLabel(data.startedAt) : `${dayLabel(localDayKey(data.startedAt))} ${timeLabel(data.startedAt)}`}</strong>`,
           t('book.detail.readingLog.band.tooltipCovered', { from: data.from.toFixed(1), to: data.end.toFixed(1) }),
           t('book.detail.readingLog.band.tooltipMinutes', { minutes }),
-          data.sourceLabel,
+          escapeHtml(data.sourceLabel),
         ].join('<br/>')
       },
     },

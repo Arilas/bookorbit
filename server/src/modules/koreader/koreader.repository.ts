@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, lte, notExists, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, inArray, lte, notExists, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import type { ContentFilterRules, ReadAloudDeliveryPreference } from '@bookorbit/types';
@@ -799,8 +799,15 @@ export class KoreaderRepository {
 
   async getReadingProgress(bookFileId: number, userId: number) {
     const [row] = await this.db
-      .select()
+      .select({
+        ...getTableColumns(schema.readingProgress),
+        appPasswordLabel: schema.appPasswords.label,
+      })
       .from(schema.readingProgress)
+      .leftJoin(
+        schema.appPasswords,
+        and(eq(schema.appPasswords.id, schema.readingProgress.appPasswordId), eq(schema.appPasswords.userId, schema.readingProgress.userId)),
+      )
       .where(and(eq(schema.readingProgress.bookFileId, bookFileId), eq(schema.readingProgress.userId, userId)))
       .limit(1);
     return row ?? null;
@@ -811,7 +818,7 @@ export class KoreaderRepository {
 
     await this.db
       .insert(schema.readingProgress)
-      .values({ bookFileId, userId, percentage, cfi, pageNumber, koreaderProgress: xpointer, textUpdatedAt: readAt, lastReadAt })
+      .values({ bookFileId, userId, appPasswordId: null, percentage, cfi, pageNumber, koreaderProgress: xpointer, textUpdatedAt: readAt, lastReadAt })
       .onConflictDoUpdate({
         target: [schema.readingProgress.bookFileId, schema.readingProgress.userId],
         // Deliberately do NOT update updatedAt here. reading_progress.updatedAt must only
@@ -824,6 +831,7 @@ export class KoreaderRepository {
         // older location. Kobo location fields clear because the position no longer matches the
         // device's bookmark; the Kobo pull path recomputes a precise Location from the cfi.
         set: {
+          appPasswordId: null,
           percentage,
           cfi,
           pageNumber,

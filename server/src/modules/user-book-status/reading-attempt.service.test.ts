@@ -214,6 +214,22 @@ describe('ReadingAttemptService', () => {
     expect(fake.rows[0]?.outcome).toBe(expectedOutcome);
   });
 
+  it('records the named app that started an automatic attempt', async () => {
+    await service.recordActivity({
+      userId: 1,
+      bookId: 10,
+      occurredOn: '2026-07-12',
+      origin: 'bookorbit',
+      externalProvider: 'iPhone app',
+      progress: 12,
+      finishThreshold: 98,
+      strongRereadEvidence: false,
+      meaningfulActivity: true,
+    });
+
+    expect(fake.rows[0]).toMatchObject({ origin: 'bookorbit', externalProvider: 'iPhone app' });
+  });
+
   it('keeps repeated manual read operations idempotent', async () => {
     const first = await service.applyManualStatus(1, 10, 'read', '2026-01-01', '2026-01-10', '2026-07-12');
     const second = await service.applyManualStatus(1, 10, 'read', undefined, undefined, '2026-07-12');

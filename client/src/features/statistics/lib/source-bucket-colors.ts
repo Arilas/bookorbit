@@ -1,16 +1,8 @@
 import { readCssColor, toLegacyColor } from '@/lib/css-color'
-import type { ReadingSessionSourceBucket } from '@bookorbit/types'
+import { resolveAppPasswordSourceColor, SOURCE_BUCKET_COLOR_TOKENS } from '@/lib/reading-source'
+import type { ReadingSessionSourceBucket, ReadingSessionSourceDescriptor } from '@bookorbit/types'
 
-// Reading-source buckets use fixed light/dark pill tokens so the same source has the
-// same identity in every chart and reading-log surface.
-export const SOURCE_BUCKET_COLOR_TOKENS: Record<ReadingSessionSourceBucket, string> = {
-  bookorbit: '--pill-web',
-  ios: '--pill-ios',
-  watchos: '--pill-watchos',
-  android: '--pill-android',
-  koreader: '--pill-koreader',
-  kobo: '--pill-kobo',
-}
+export { SOURCE_BUCKET_COLOR_TOKENS } from '@/lib/reading-source'
 
 const cache = new Map<string, Record<ReadingSessionSourceBucket, string>>()
 
@@ -30,4 +22,14 @@ export function resolveSourceBucketColors(themeKey: string): Record<ReadingSessi
   }
   cache.set(themeKey, colors)
   return colors
+}
+
+export function resolveReadingSourceColor(
+  source: Pick<ReadingSessionSourceDescriptor, 'key' | 'bucket' | 'kind' | 'appPasswordId'>,
+  themeKey: string,
+): string {
+  if (source.kind === 'built_in') return resolveSourceBucketColors(themeKey)[source.bucket]
+
+  const dark = themeKey.split(':', 1)[0] === 'dark'
+  return resolveAppPasswordSourceColor(source, dark)
 }

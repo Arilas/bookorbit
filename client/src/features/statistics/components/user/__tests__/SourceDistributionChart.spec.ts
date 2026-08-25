@@ -10,7 +10,7 @@ vi.mock('vue-echarts', () => ({
 }))
 
 vi.mock('@/stores/theme', () => ({
-  useThemeStore: () => ({ theme: 'dark', accent: 'blue' }),
+  useThemeStore: () => ({ resolvedTheme: 'dark', appearanceKey: 'dark:blue' }),
 }))
 
 vi.mock('@/features/statistics/composables/useStatisticsConfig', () => ({
@@ -67,10 +67,8 @@ describe('SourceDistributionChart', () => {
       makeResponse({
         totalSeconds: 6000,
         slices: [
-          { bucket: 'bookorbit', readingSeconds: 3600 },
-          { bucket: 'ios', readingSeconds: 600 },
-          { bucket: 'watchos', readingSeconds: 600 },
-          { bucket: 'kobo', readingSeconds: 1200 },
+          { key: 'app-password:7:ios', label: 'iPhone app', bucket: 'ios', kind: 'app_password', appPasswordId: 7, readingSeconds: 3600 },
+          { key: 'kobo', label: 'Kobo', bucket: 'kobo', kind: 'built_in', appPasswordId: null, readingSeconds: 1200 },
         ],
       }),
     )
@@ -81,24 +79,32 @@ describe('SourceDistributionChart', () => {
     expect(chart.exists()).toBe(true)
 
     const option = chart.props('option') as {
-      series: { data: { name: string; value: number }[] }[]
+      series: { data: { id: string; name: string; value: number; itemStyle: { color: string } }[] }[]
       tooltip: { formatter: (p: { name: string; value: number; percent: number; color: string }) => string }
     }
     const data = option.series[0]!.data
-    expect(data.map((d) => d.name)).toEqual(['BookOrbit', 'iOS app', 'Apple Watch', 'Kobo'])
-    expect(data.map((d) => d.value)).toEqual([3600, 600, 600, 1200])
+    expect(data.map((d) => d.id)).toEqual(['app-password:7:ios', 'kobo'])
+    expect(data.map((d) => d.name)).toEqual(['iPhone app', 'Kobo'])
+    expect(data.map((d) => d.value)).toEqual([3600, 1200])
+    expect(data[0]!.itemStyle.color).not.toBe(data[1]!.itemStyle.color)
 
     // The tooltip formatter exercises the duration helper across all 3 branches.
     const fmt = option.tooltip.formatter
-    expect(fmt({ name: 'BookOrbit', value: 3661, percent: 75, color: '#abc' })).toContain('1h 1m')
+    expect(fmt({ name: 'iPhone app', value: 3661, percent: 75, color: '#abc' })).toContain('1h 1m')
     expect(fmt({ name: 'Kobo', value: 120, percent: 20, color: '#def' })).toContain('2m')
     expect(fmt({ name: 'Kobo', value: 30, percent: 5, color: '#def' })).toContain('30s')
-    expect(fmt({ name: 'BookOrbit', value: 3661, percent: 75, color: '#abc' })).toContain('75%')
+    expect(fmt({ name: 'iPhone app', value: 3661, percent: 75, color: '#abc' })).toContain('75%')
+    expect(fmt({ name: '<img onerror="boom">', value: 30, percent: 5, color: '#abc' })).toContain('&lt;img onerror=&quot;boom&quot;&gt;')
   })
 
   it('uses the desktop legend and centre layout at >= md width', async () => {
     stubMatchMedia(true)
-    apiMock.mockResolvedValue(makeResponse({ totalSeconds: 1200, slices: [{ bucket: 'kobo', readingSeconds: 1200 }] }))
+    apiMock.mockResolvedValue(
+      makeResponse({
+        totalSeconds: 1200,
+        slices: [{ key: 'kobo', label: 'Kobo', bucket: 'kobo', kind: 'built_in', appPasswordId: null, readingSeconds: 1200 }],
+      }),
+    )
     const wrapper = mount(SourceDistributionChart)
     await flushPromises()
 

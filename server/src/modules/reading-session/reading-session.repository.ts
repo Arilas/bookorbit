@@ -8,9 +8,10 @@ import type {
   BookReadingSessionStats,
   BookReadingSourceSlice,
   ReadingSessionSource,
+  ReadingSessionSourceDescriptor,
   ReadingSessionType,
 } from '@bookorbit/types';
-import { READING_SESSION_SOURCE_BUCKETS, READING_SESSION_TYPES, emptySourceBucketRecord, toReadingSessionSourceBucket } from '@bookorbit/types';
+import { READING_SESSION_TYPES, toReadingSessionSourceDescriptor } from '@bookorbit/types';
 import {
   aggregateReadingSessionDailyStats,
   getDayRangeForDateKeys,
@@ -22,7 +23,15 @@ import { parseKoreaderSessionId } from '../../common/utils/koreader-session-id.u
 import { resolveTimeZone, toDateKeyInTimeZone } from '../../common/utils/timezone.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { bookFiles, books, koreaderSessionTombstones, readingSessionSyncCursors, readingSessions, userReadingDailyStats } from '../../db/schema';
+import {
+  appPasswords,
+  bookFiles,
+  books,
+  koreaderSessionTombstones,
+  readingSessionSyncCursors,
+  readingSessions,
+  userReadingDailyStats,
+} from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -86,6 +95,15 @@ function groupDateKeysByMaxSpan(days: Iterable<string>): string[][] {
   return groups;
 }
 
+function compareSourceDescriptors(a: ReadingSessionSourceDescriptor, b: ReadingSessionSourceDescriptor): number {
+  const bucketOrder = { bookorbit: 0, ios: 1, watchos: 2, android: 3, koreader: 4, kobo: 5 } as const;
+  return (
+    bucketOrder[a.bucket] - bucketOrder[b.bucket] ||
+    Number(a.kind === 'app_password') - Number(b.kind === 'app_password') ||
+    a.label.localeCompare(b.label) ||
+    (a.appPasswordId ?? 0) - (b.appPasswordId ?? 0)
+  );
+}
 export type SaveReadingSessionResult =
   | { kind: 'saved' }
   | { kind: 'superseded'; addedSeconds: number }
@@ -125,6 +143,7 @@ export interface RecordCumulativeReadingSessionParams {
 
 export interface InsertManualSessionParams {
   userId: number;
+  appPasswordId: number | null;
   bookId: number;
   libraryId: number;
   bookFileId: number | null;
@@ -154,6 +173,7 @@ export class ReadingSessionRepository {
     timeZone = 'UTC',
     sync?: ReadingSessionSyncOptions,
     sessionType: 'read' | 'tts' | 'listen' = 'read',
+    appPasswordId: number | null = null,
   ): Promise<SaveReadingSessionResult> {
     if (durationSeconds < MIN_READING_SESSION_SECONDS) {
       return { kind: 'skipped', reason: 'duration_below_minimum' };
@@ -171,6 +191,7 @@ export class ReadingSessionRepository {
     }
 
     const { bookId, libraryId } = fileRow;
+    const attributedAppPasswordId = source === 'koreader' || source === 'kobo' ? null : appPasswordId;
 
     return this.db.transaction(async (tx): Promise<SaveReadingSessionResult> => {
       if (sync) await this.lockSyncSource(tx, userId, bookId, sync.sourceDeviceKey);
@@ -179,6 +200,7 @@ export class ReadingSessionRepository {
         .insert(readingSessions)
         .values({
           userId,
+          appPasswordId: attributedAppPasswordId,
           bookFileId,
           bookId,
           attemptId: sql`(select id from reading_attempts where user_id = ${userId} and book_id = ${bookId} and outcome is null and deleted_at is null limit 1)`,
@@ -407,13 +429,27 @@ export class ReadingSessionRepository {
   }
 
   async insertManualSession(params: InsertManualSessionParams): Promise<{ id: number; attemptId: number | null }> {
-    const { userId, bookId, libraryId, bookFileId, sessionId, startedAt, endedAt, durationSeconds, progressDelta, endProgress, timeZone } = params;
+    const {
+      userId,
+      appPasswordId,
+      bookId,
+      libraryId,
+      bookFileId,
+      sessionId,
+      startedAt,
+      endedAt,
+      durationSeconds,
+      progressDelta,
+      endProgress,
+      timeZone,
+    } = params;
 
     return this.db.transaction(async (tx) => {
       const [inserted] = await tx
         .insert(readingSessions)
         .values({
           userId,
+          appPasswordId,
           bookId,
           bookFileId,
           attemptId: sql`(select id from reading_attempts where user_id = ${userId} and book_id = ${bookId} and outcome is null and deleted_at is null limit 1)`,
@@ -526,9 +562,12 @@ export class ReadingSessionRepository {
           source: readingSessions.source,
           attemptId: readingSessions.attemptId,
           sessionType: readingSessions.sessionType,
+          appPasswordId: readingSessions.appPasswordId,
+          appPasswordLabel: appPasswords.label,
         })
         .from(readingSessions)
         .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
+        .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
         .where(whereClause)
         .orderBy(orderExpr)
         .limit(pageSize)
@@ -566,13 +605,16 @@ export class ReadingSessionRepository {
       this.db
         .select({
           source: readingSessions.source,
+          appPasswordId: readingSessions.appPasswordId,
+          appPasswordLabel: appPasswords.label,
           totalSeconds: sql<number>`coalesce(sum(${readingSessions.durationSeconds}), 0)::int`,
           totalSessions: count(),
         })
         .from(readingSessions)
         .leftJoin(bookFiles, eq(bookFiles.id, readingSessions.bookFileId))
+        .leftJoin(appPasswords, and(eq(appPasswords.id, readingSessions.appPasswordId), eq(appPasswords.userId, readingSessions.userId)))
         .where(whereClause)
-        .groupBy(readingSessions.source),
+        .groupBy(readingSessions.source, readingSessions.appPasswordId, appPasswords.label),
 
       this.findLatestEndProgress(userId, bookId),
     ]);
@@ -580,18 +622,22 @@ export class ReadingSessionRepository {
     const total = countRows[0]?.total ?? 0;
     const statsRow = statsRows[0];
 
-    const bucketSeconds = emptySourceBucketRecord();
-    const bucketSessions = emptySourceBucketRecord();
+    const sourceTotals = new Map<string, BookReadingSourceSlice>();
     for (const row of sourceRows) {
-      const bucket = toReadingSessionSourceBucket(row.source);
-      bucketSeconds[bucket] += row.totalSeconds;
-      bucketSessions[bucket] += row.totalSessions;
+      const descriptor = toReadingSessionSourceDescriptor(row.source, row.appPasswordId, row.appPasswordLabel);
+      const existing = sourceTotals.get(descriptor.key);
+      if (existing) {
+        existing.totalSeconds += row.totalSeconds;
+        existing.totalSessions += row.totalSessions;
+      } else {
+        sourceTotals.set(descriptor.key, {
+          ...descriptor,
+          totalSeconds: row.totalSeconds,
+          totalSessions: row.totalSessions,
+        });
+      }
     }
-    const bySource: BookReadingSourceSlice[] = READING_SESSION_SOURCE_BUCKETS.filter((bucket) => bucketSessions[bucket] > 0).map((bucket) => ({
-      bucket,
-      totalSeconds: bucketSeconds[bucket],
-      totalSessions: bucketSessions[bucket],
-    }));
+    const bySource = [...sourceTotals.values()].sort(compareSourceDescriptors);
 
     const dailySummary = aggregateReadingSessionDailyStats(
       summaryRows.map((row) => ({
@@ -662,6 +708,7 @@ export class ReadingSessionRepository {
       source: r.source ?? null,
       attemptId: r.attemptId ?? null,
       sessionType: toReadingSessionType(r.sessionType),
+      sourceAttribution: toReadingSessionSourceDescriptor(r.source, r.appPasswordId, r.appPasswordLabel),
     }));
 
     return { items, total, page, pageSize, stats };

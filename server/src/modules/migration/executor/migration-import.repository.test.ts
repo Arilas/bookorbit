@@ -392,10 +392,69 @@ describe('MigrationImportRepository', () => {
     const setReadingProgress = onConflictDoUpdate.mock.calls[1][0].set as Record<string, unknown>;
     expect(setReadingProgress).not.toHaveProperty('bookFileId');
     expect(setReadingProgress).not.toHaveProperty('userId');
+    expect(setReadingProgress.appPasswordId).toBeNull();
+    expect(values.mock.calls[1][0]).toEqual(expect.objectContaining({ appPasswordId: null }));
 
     const setAudiobookProgress = onConflictDoUpdate.mock.calls[2][0].set as Record<string, unknown>;
     expect(setAudiobookProgress).not.toHaveProperty('userId');
     expect(setAudiobookProgress).not.toHaveProperty('bookId');
+    expect(setAudiobookProgress.appPasswordId).toBeNull();
+    expect(values.mock.calls[2][0]).toEqual(expect.objectContaining({ appPasswordId: null }));
+  });
+
+  it('clears app password attribution when importing reading sessions', async () => {
+    const existingWhere = vi.fn().mockResolvedValue([]);
+    const innerJoin = vi.fn().mockReturnValue({ where: existingWhere });
+    const from = vi.fn().mockReturnValue({ innerJoin });
+    const select = vi.fn().mockReturnValue({ from });
+    const onConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
+    const values = vi.fn().mockReturnValue({ onConflictDoUpdate });
+    const insert = vi.fn().mockReturnValue({ values });
+    const repo = new MigrationImportRepository({ insert, select } as never);
+    const repoInternals = repo as unknown as {
+      fetchTimeZonesByUserIds(userIds: number[]): Promise<Map<number, string>>;
+      recomputeReadingDailyStats(userId: number, libraryId: number, days: string[], timeZone: string): Promise<void>;
+    };
+    const startedAt = new Date('2026-08-01T10:00:00.000Z');
+    const endedAt = new Date('2026-08-01T10:05:00.000Z');
+
+    vi.spyOn(repo, 'fetchLibraryIdsByBookIds').mockResolvedValue(new Map([[2, 3]]));
+    vi.spyOn(repoInternals, 'fetchTimeZonesByUserIds').mockResolvedValue(new Map([[1, 'UTC']]));
+    vi.spyOn(repoInternals, 'recomputeReadingDailyStats').mockResolvedValue(undefined);
+
+    await repo.syncImportedReadingSessions({
+      items: [
+        {
+          userId: 1,
+          appPasswordId: 99,
+          bookFileId: 4,
+          bookId: 2,
+          sessionId: 'migration:session-1',
+          source: 'web',
+          startedAt,
+          endedAt,
+          durationSeconds: 300,
+          progressDelta: 5,
+          endProgress: 25,
+        },
+      ],
+      userIds: [1],
+      bookIds: [2],
+      sessionIdPrefix: 'migration:',
+    });
+
+    expect(values).toHaveBeenCalledWith([
+      expect.objectContaining({
+        userId: 1,
+        sessionId: 'migration:session-1',
+        appPasswordId: null,
+      }),
+    ]);
+    expect(onConflictDoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        set: expect.objectContaining({ appPasswordId: null }),
+      }),
+    );
   });
 
   it('clear reading/bookmark/annotation methods short-circuit empty targets', async () => {

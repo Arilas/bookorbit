@@ -23,6 +23,7 @@ interface ProgressRow {
   koboContentSourceProgressPercent: number | null;
   koreaderProgress: string | null;
   updatedAt: Date | null;
+  appName?: string | null;
 }
 
 function iso(value: Date | null | undefined): string | null {
@@ -49,6 +50,7 @@ export function toReadingProgressEntry(fileId: number, row: ProgressRow | null):
       contentPercent: row?.koboContentSourceProgressPercent ?? null,
     },
     koreader: row?.koreaderProgress ?? null,
+    appName: row?.appName ?? null,
   };
 }
 
@@ -106,13 +108,13 @@ export class ReadingProgressService {
 
   private async saveOne(write: ReadingProgressWriteDto, user: RequestUser): Promise<ReadingProgressWriteResult> {
     if (write.editedAt) {
-      const stored = await this.bookRepo.findProgress(user.id, write.fileId);
+      const stored = await this.bookRepo.findProgressWithAppAttribution(user.id, write.fileId);
       if (stored?.updatedAt && stored.updatedAt.getTime() > Date.parse(write.editedAt)) {
         return { fileId: write.fileId, status: 'superseded', progress: toReadingProgressEntry(write.fileId, stored) };
       }
     }
     await this.books.saveProgress(user.id, write.fileId, toSaveProgressDto(write), user);
-    const saved = await this.bookRepo.findProgress(user.id, write.fileId);
+    const saved = await this.bookRepo.findProgressWithAppAttribution(user.id, write.fileId);
     return { fileId: write.fileId, status: 'saved', progress: toReadingProgressEntry(write.fileId, saved) };
   }
 }

@@ -44,13 +44,16 @@ const mockRepo = {
           string,
           ReadingSessionSyncOptions | undefined,
           'read' | 'tts' | 'listen',
+          number | null,
         ]
       ) => Promise<SaveReadingSessionResult>
     >(),
 };
 
 const mockBookService = {
-  verifyFileAccess: vi.fn<(...args: [number, RequestUser]) => Promise<void>>(),
+  verifyFileAccess: vi.fn<(...args: [number, RequestUser]) => Promise<unknown>>(),
+  autoUpdateReadStatusForProgress: vi.fn(),
+  findAppPasswordLabel: vi.fn().mockResolvedValue('iPhone app'),
 };
 
 const mockUserStatistics = { invalidateUser: vi.fn() };
@@ -100,6 +103,7 @@ describe('ReadingSessionService', () => {
       'UTC',
       undefined,
       'read',
+      null,
     );
     expect(mockUserStatistics.invalidateUser).toHaveBeenCalledWith(12);
   });
@@ -131,19 +135,58 @@ describe('ReadingSessionService', () => {
       'UTC',
       undefined,
       'read',
+      null,
     );
   });
 
-  it('forwards an explicit source to the repository', async () => {
+  it('attributes a web session to the authenticating app password', async () => {
+    mockBookService.verifyFileAccess.mockResolvedValueOnce({ bookId: 10, libraryId: 2 } as never);
+    await service.save(
+      42,
+      {
+        sessionId: 'app-session',
+        startedAt: '2026-04-15T10:00:00.000Z',
+        endedAt: '2026-04-15T10:05:00.000Z',
+        durationSeconds: 300,
+        endProgress: 12,
+      },
+      makeUser({ id: 21, authenticationMethod: 'app_password', appPasswordId: 88 }),
+    );
+
+    expect(mockRepo.saveSession).toHaveBeenCalledWith(
+      21,
+      42,
+      'app-session',
+      new Date('2026-04-15T10:00:00.000Z'),
+      new Date('2026-04-15T10:05:00.000Z'),
+      300,
+      null,
+      12,
+      'web',
+      'UTC',
+      undefined,
+      'read',
+      88,
+    );
+    expect(mockBookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(
+      21,
+      expect.objectContaining({ bookId: 10 }),
+      12,
+      expect.objectContaining({ origin: 'bookorbit', externalProvider: 'iPhone app', meaningfulActivity: true }),
+    );
+  });
+
+  it('attributes Kobo progress to Kobo while forwarding the explicit source', async () => {
+    mockBookService.verifyFileAccess.mockResolvedValueOnce({ bookId: 10, libraryId: 2 } as never);
     await service.save(
       42,
       {
         sessionId: 'kobo-session',
         startedAt: '2026-04-15T10:00:00.000Z',
-        endedAt: '2026-04-15T10:01:00.000Z',
-        durationSeconds: 60,
-        progressDelta: null,
-        endProgress: null,
+        endedAt: '2026-04-15T10:05:00.000Z',
+        durationSeconds: 300,
+        progressDelta: 5,
+        endProgress: 25,
       },
       makeUser({ id: 33 }),
       'kobo',
@@ -154,15 +197,62 @@ describe('ReadingSessionService', () => {
       42,
       'kobo-session',
       new Date('2026-04-15T10:00:00.000Z'),
-      new Date('2026-04-15T10:01:00.000Z'),
-      60,
-      null,
-      null,
+      new Date('2026-04-15T10:05:00.000Z'),
+      300,
+      5,
+      25,
       'kobo',
       'UTC',
       undefined,
       'read',
+      null,
     );
+    expect(mockBookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(
+      33,
+      expect.objectContaining({ bookId: 10 }),
+      25,
+      expect.objectContaining({ origin: 'kobo', meaningfulActivity: true }),
+    );
+  });
+
+  it('keeps explicit Kobo attribution ahead of an authenticating app password', async () => {
+    mockBookService.verifyFileAccess.mockResolvedValueOnce({ bookId: 10, libraryId: 2 } as never);
+    await service.save(
+      42,
+      {
+        sessionId: 'kobo-app-password-session',
+        startedAt: '2026-04-15T10:00:00.000Z',
+        endedAt: '2026-04-15T10:05:00.000Z',
+        durationSeconds: 300,
+        progressDelta: 5,
+        endProgress: 25,
+      },
+      makeUser({ id: 33, authenticationMethod: 'app_password', appPasswordId: 88 }),
+      'kobo',
+    );
+
+    expect(mockRepo.saveSession).toHaveBeenCalledWith(
+      33,
+      42,
+      'kobo-app-password-session',
+      new Date('2026-04-15T10:00:00.000Z'),
+      new Date('2026-04-15T10:05:00.000Z'),
+      300,
+      5,
+      25,
+      'kobo',
+      'UTC',
+      undefined,
+      'read',
+      null,
+    );
+    expect(mockBookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(
+      33,
+      expect.objectContaining({ bookId: 10 }),
+      25,
+      expect.objectContaining({ origin: 'kobo', meaningfulActivity: true }),
+    );
+    expect(mockBookService.autoUpdateReadStatusForProgress.mock.calls[0]?.[3]).not.toHaveProperty('externalProvider');
   });
 
   it('rejects sessions where endedAt is before startedAt', async () => {
@@ -248,6 +338,7 @@ const mockRepoExtended = {
 const mockBookServiceExtended = {
   verifyFileAccess: vi.fn(),
   verifyBookAccess: vi.fn(),
+  findAppPasswordLabel: vi.fn().mockResolvedValue('iPhone app'),
 };
 
 function makeServiceExtended() {
@@ -361,6 +452,7 @@ describe('ReadingSessionService - createManualSession', () => {
     expect(mockRepoExtended.insertManualSession).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 5,
+        appPasswordId: null,
         bookId: 10,
         libraryId: 3,
         bookFileId: 42,
@@ -375,6 +467,24 @@ describe('ReadingSessionService - createManualSession', () => {
     expect(sessionId.startsWith('manual:')).toBe(true);
     expect(result).toMatchObject({ id: 555, bookFileId: 42, durationSeconds: 2700, format: 'epub', source: 'manual' });
     expect(mockUserStatistics.invalidateUser).toHaveBeenCalledWith(5);
+  });
+
+  it('attributes a manual session to the authenticating app password', async () => {
+    const svc = makeManualService();
+    const result = await svc.createManualSession(
+      10,
+      { startedAt: '2026-04-15T10:00:00.000Z', durationMinutes: 30 },
+      makeUser({ id: 5, authenticationMethod: 'app_password', appPasswordId: 88 }),
+    );
+
+    expect(mockRepoExtended.insertManualSession).toHaveBeenCalledWith(expect.objectContaining({ appPasswordId: 88 }));
+    expect(result.sourceAttribution).toEqual({
+      key: 'app-password:88:bookorbit',
+      label: 'iPhone app',
+      bucket: 'bookorbit',
+      kind: 'app_password',
+      appPasswordId: 88,
+    });
   });
 
   it('computes progressDelta from the latest prior endProgress', async () => {

@@ -15,6 +15,13 @@ function makeBookProgress(overrides: Partial<KoreaderBookSyncInfo> = {}): Koread
     canonicalChapterIndex: 11,
     canonicalChapterTitle: 'The Turn',
     canonicalSource: 'koreader',
+    canonicalSourceAttribution: {
+      key: 'koreader',
+      label: 'KOReader',
+      bucket: 'koreader',
+      kind: 'built_in',
+      appPasswordId: null,
+    },
     canonicalUpdatedAt: '2026-01-02T00:00:00.000Z',
     devices: [
       {

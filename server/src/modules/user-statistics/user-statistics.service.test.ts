@@ -1,6 +1,33 @@
 import { ReadingAttemptEventsService } from '../user-book-status/reading-attempt-events.service';
 import { UserStatisticsService } from './user-statistics.service';
 
+function builtInSource(bucket: 'bookorbit' | 'ios' | 'watchos' | 'android' | 'koreader' | 'kobo') {
+  const labels = {
+    bookorbit: 'BookOrbit',
+    ios: 'iOS app',
+    watchos: 'Apple Watch',
+    android: 'Android app',
+    koreader: 'KOReader',
+    kobo: 'Kobo',
+  } as const;
+  return { key: bucket, label: labels[bucket], bucket, kind: 'built_in' as const, appPasswordId: null };
+}
+
+function builtInUsage(bucket: 'bookorbit' | 'ios' | 'watchos' | 'android' | 'koreader' | 'kobo', readingSeconds: number) {
+  return { ...builtInSource(bucket), readingSeconds };
+}
+
+function appUsage(appPasswordId: number, label: string, readingSeconds: number, bucket: 'bookorbit' | 'ios' | 'watchos' | 'android' = 'bookorbit') {
+  return {
+    key: `app-password:${appPasswordId}:${bucket}`,
+    label,
+    bucket,
+    kind: 'app_password' as const,
+    appPasswordId,
+    readingSeconds,
+  };
+}
+
 describe('UserStatisticsService', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -304,10 +331,9 @@ describe('UserStatisticsService', () => {
     const repo = {
       getDailyReadingStats: vi.fn().mockResolvedValue([{ day: '2026-04-06', readingSeconds: 120, progressDelta: 1.23456, eventsCount: 2 }]),
       getDailyReadingSecondsBySource: vi.fn().mockResolvedValue([
-        { day: '2026-04-06', source: 'web', readingSeconds: 60 },
-        { day: '2026-04-06', source: 'ios', readingSeconds: 10 },
-        { day: '2026-04-06', source: 'watchos', readingSeconds: 20 },
-        { day: '2026-04-06', source: 'kobo', readingSeconds: 30 },
+        { day: '2026-04-06', source: 'web', appPasswordId: null, appPasswordLabel: null, readingSeconds: 40 },
+        { day: '2026-04-06', source: 'web', appPasswordId: 7, appPasswordLabel: 'iPhone app', readingSeconds: 50 },
+        { day: '2026-04-06', source: 'kobo', appPasswordId: null, appPasswordLabel: null, readingSeconds: 30 },
       ]),
     };
 
@@ -322,34 +348,24 @@ describe('UserStatisticsService', () => {
         readingSeconds: 120,
         progressDelta: 1.2346,
         eventsCount: 2,
-        bySource: { bookorbit: 60, ios: 10, watchos: 20, android: 0, koreader: 0, kobo: 30 },
+        bySource: [builtInUsage('bookorbit', 40), appUsage(7, 'iPhone app', 50), builtInUsage('kobo', 30)],
       },
-      {
-        day: '2026-04-07',
-        readingSeconds: 0,
-        progressDelta: 0,
-        eventsCount: 0,
-        bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 0 },
-      },
-      {
-        day: '2026-04-08',
-        readingSeconds: 0,
-        progressDelta: 0,
-        eventsCount: 0,
-        bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 0 },
-      },
+      { day: '2026-04-07', readingSeconds: 0, progressDelta: 0, eventsCount: 0, bySource: [] },
+      { day: '2026-04-08', readingSeconds: 0, progressDelta: 0, eventsCount: 0, bySource: [] },
     ]);
   });
 
-  it('buckets the reading-source distribution and excludes empty buckets', async () => {
+  it('keeps App Password source ids distinct in the reading-source distribution', async () => {
     const repo = {
       getDailyReadingSecondsBySource: vi.fn().mockResolvedValue([
-        { day: '2026-04-06', source: 'web', readingSeconds: 100 },
-        { day: '2026-04-06', source: 'manual', readingSeconds: 50 },
-        { day: '2026-04-07', source: null, readingSeconds: 30 },
-        { day: '2026-04-06', source: 'ios', readingSeconds: 70 },
-        { day: '2026-04-06', source: 'watchos', readingSeconds: 40 },
-        { day: '2026-04-06', source: 'kobo', readingSeconds: 200 },
+        { day: '2026-04-06', source: 'web', appPasswordId: null, appPasswordLabel: null, readingSeconds: 100 },
+        { day: '2026-04-06', source: 'manual', appPasswordId: null, appPasswordLabel: null, readingSeconds: 50 },
+        { day: '2026-04-07', source: null, appPasswordId: null, appPasswordLabel: null, readingSeconds: 30 },
+        { day: '2026-04-06', source: 'web', appPasswordId: 7, appPasswordLabel: 'Reader app', readingSeconds: 40 },
+        { day: '2026-04-07', source: 'manual', appPasswordId: 7, appPasswordLabel: 'Reader app', readingSeconds: 20 },
+        { day: '2026-04-07', source: 'ios', appPasswordId: 7, appPasswordLabel: 'Reader app', readingSeconds: 15 },
+        { day: '2026-04-06', source: 'web', appPasswordId: 8, appPasswordLabel: 'Reader app', readingSeconds: 10 },
+        { day: '2026-04-06', source: 'kobo', appPasswordId: 7, appPasswordLabel: 'Reader app', readingSeconds: 200 },
       ]),
     };
 
@@ -357,14 +373,14 @@ describe('UserStatisticsService', () => {
     const result = await service.getReadingSourceDistribution({ id: 123, isSuperuser: false } as any, { libraryIds: [] });
 
     expect(repo.getDailyReadingSecondsBySource).toHaveBeenCalledWith(123, false, [], 365);
-    // web + manual + null collapse into bookorbit; koreader has no activity and is omitted.
     expect(result).toEqual({
-      totalSeconds: 490,
+      totalSeconds: 465,
       slices: [
-        { bucket: 'bookorbit', readingSeconds: 180 },
-        { bucket: 'ios', readingSeconds: 70 },
-        { bucket: 'watchos', readingSeconds: 40 },
-        { bucket: 'kobo', readingSeconds: 200 },
+        builtInUsage('bookorbit', 180),
+        appUsage(7, 'Reader app', 60),
+        appUsage(8, 'Reader app', 10),
+        appUsage(7, 'Reader app', 15, 'ios'),
+        builtInUsage('kobo', 200),
       ],
     });
   });
@@ -394,20 +410,21 @@ describe('UserStatisticsService', () => {
     service.invalidateUser(7);
     const refreshed = await service.getReadingSourceDistribution(user, { libraryIds: [] });
 
-    expect(first.slices).toEqual([{ bucket: 'bookorbit', readingSeconds: 60 }]);
+    expect(first.slices).toEqual([builtInUsage('bookorbit', 60)]);
     expect(cached).toEqual(first);
-    expect(refreshed.slices).toEqual([{ bucket: 'watchos', readingSeconds: 90 }]);
+    expect(refreshed.slices).toEqual([builtInUsage('watchos', 90)]);
     expect(repo.getDailyReadingSecondsBySource).toHaveBeenCalledTimes(2);
   });
 
   it('returns all 24 hour buckets for peak reading hours', async () => {
     const repo = {
       getPeakReadingHours: vi.fn().mockResolvedValue([
-        { hour: 8, format: 'EPUB', source: 'web', readingSeconds: 400, eventsCount: 2 },
-        { hour: 8, format: 'EPUB', source: 'ios', readingSeconds: 100, eventsCount: 1 },
-        { hour: 8, format: 'AUDIOBOOK', source: 'watchos', readingSeconds: 300, eventsCount: 1 },
-        { hour: 8, format: 'EPUB', source: 'kobo', readingSeconds: 200, eventsCount: 1 },
-        { hour: 21, format: 'EPUB', source: 'koreader', readingSeconds: 900, eventsCount: 4 },
+        { hour: 8, format: 'EPUB', source: 'web', appPasswordId: null, appPasswordLabel: null, readingSeconds: 400, eventsCount: 2 },
+        { hour: 8, format: 'EPUB', source: 'ios', appPasswordId: null, appPasswordLabel: null, readingSeconds: 100, eventsCount: 1 },
+        { hour: 8, format: 'AUDIOBOOK', source: 'watchos', appPasswordId: null, appPasswordLabel: null, readingSeconds: 300, eventsCount: 1 },
+        { hour: 8, format: 'EPUB', source: 'web', appPasswordId: 7, appPasswordLabel: 'iPhone app', readingSeconds: 300, eventsCount: 1 },
+        { hour: 8, format: 'EPUB', source: 'kobo', appPasswordId: 7, appPasswordLabel: 'iPhone app', readingSeconds: 200, eventsCount: 1 },
+        { hour: 21, format: 'EPUB', source: 'koreader', appPasswordId: null, appPasswordLabel: null, readingSeconds: 900, eventsCount: 4 },
       ]),
     };
 
@@ -419,27 +436,19 @@ describe('UserStatisticsService', () => {
     expect(result[8]).toEqual(
       expect.objectContaining({
         hour: 8,
-        readingSeconds: 1000,
-        eventsCount: 5,
-        bySource: { bookorbit: 400, ios: 100, watchos: 300, android: 0, koreader: 0, kobo: 200 },
+        readingSeconds: 1300,
+        eventsCount: 6,
+        bySource: [
+          builtInUsage('bookorbit', 400),
+          appUsage(7, 'iPhone app', 300),
+          builtInUsage('ios', 100),
+          builtInUsage('watchos', 300),
+          builtInUsage('kobo', 200),
+        ],
       }),
     );
-    expect(result[21]).toEqual(
-      expect.objectContaining({
-        hour: 21,
-        readingSeconds: 900,
-        eventsCount: 4,
-        bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 900, kobo: 0 },
-      }),
-    );
-    expect(result[0]).toEqual(
-      expect.objectContaining({
-        hour: 0,
-        readingSeconds: 0,
-        eventsCount: 0,
-        bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 0 },
-      }),
-    );
+    expect(result[21]).toEqual(expect.objectContaining({ hour: 21, readingSeconds: 900, eventsCount: 4, bySource: [builtInUsage('koreader', 900)] }));
+    expect(result[0]).toEqual(expect.objectContaining({ hour: 0, readingSeconds: 0, eventsCount: 0, bySource: [] }));
   });
 
   it('passes the resolved user timezone to peak reading hours', async () => {
@@ -478,8 +487,9 @@ describe('UserStatisticsService', () => {
   it('returns all weekday buckets for favorite reading days', async () => {
     const repo = {
       getFavoriteReadingDays: vi.fn().mockResolvedValue([
-        { dayOfWeek: 1, source: 'koreader', format: 'EPUB', readingSeconds: 1200, eventsCount: 4 },
-        { dayOfWeek: 1, source: 'web', format: 'PDF', readingSeconds: 600, eventsCount: 2 },
+        { dayOfWeek: 1, source: 'koreader', appPasswordId: null, appPasswordLabel: null, format: 'EPUB', readingSeconds: 1200, eventsCount: 4 },
+        { dayOfWeek: 1, source: 'web', appPasswordId: null, appPasswordLabel: null, format: 'PDF', readingSeconds: 600, eventsCount: 2 },
+        { dayOfWeek: 1, source: 'manual', appPasswordId: 7, appPasswordLabel: 'iPhone app', format: 'EPUB', readingSeconds: 300, eventsCount: 1 },
       ]),
     };
 
@@ -490,17 +500,17 @@ describe('UserStatisticsService', () => {
     expect(result).toHaveLength(7);
     expect(result[1]).toEqual({
       dayOfWeek: 1,
-      readingSeconds: 1800,
-      eventsCount: 6,
-      byFormat: { EPUB: 1200, PDF: 600 },
-      bySource: { bookorbit: 600, ios: 0, watchos: 0, android: 0, koreader: 1200, kobo: 0 },
+      readingSeconds: 2100,
+      eventsCount: 7,
+      byFormat: { EPUB: 1500, PDF: 600 },
+      bySource: [builtInUsage('bookorbit', 600), appUsage(7, 'iPhone app', 300), builtInUsage('koreader', 1200)],
     });
     expect(result[0]).toEqual({
       dayOfWeek: 0,
       readingSeconds: 0,
       eventsCount: 0,
       byFormat: {},
-      bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 0 },
+      bySource: [],
     });
   });
 
@@ -663,7 +673,9 @@ describe('UserStatisticsService', () => {
           bookId: 55,
           bookTitle: 'Deep Work',
           bookFormat: 'EPUB',
-          source: 'kobo',
+          source: 'web',
+          appPasswordId: 42,
+          appPasswordLabel: 'iPhone app',
           startedAt: new Date('2026-04-07T02:30:00.000Z'),
           endedAt: new Date('2026-04-07T03:00:00.000Z'),
           durationSeconds: 1800,
@@ -683,7 +695,13 @@ describe('UserStatisticsService', () => {
       bookId: 55,
       bookTitle: 'Deep Work',
       bookFormat: 'EPUB',
-      bookSource: 'kobo',
+      bookSource: {
+        key: 'app-password:42:bookorbit',
+        label: 'iPhone app',
+        bucket: 'bookorbit',
+        kind: 'app_password',
+        appPasswordId: 42,
+      },
       startedAt: '2026-04-07T02:30:00.000Z',
       endedAt: '2026-04-07T03:00:00.000Z',
       durationSeconds: 1800,
@@ -703,6 +721,9 @@ describe('UserStatisticsService', () => {
       bookId: 44,
       bookTitle: 'Atomic Habits',
       bookFormat: 'EPUB',
+      source: 'web',
+      appPasswordId: 42,
+      appPasswordLabel: 'iPhone app',
       startedAt: new Date('2026-04-07T08:00:00.000Z'),
       endedAt: new Date('2026-04-07T08:30:00.000Z'),
       durationSeconds: 1800,
@@ -957,10 +978,17 @@ describe('UserStatisticsService', () => {
     const repo = {
       getSessionArchetypePoints: vi.fn().mockResolvedValue([{ hour: 9, durationMinutes: 20, dayOfWeek: 2 }]),
       getGenreReadingTime: vi.fn().mockResolvedValue([
-        { genre: 'Sci-Fi', source: 'web', readingSeconds: 200 },
-        { genre: 'Sci-Fi', source: 'kobo', readingSeconds: 100 },
+        { genre: 'Sci-Fi', source: 'web', appPasswordId: 42, appPasswordLabel: 'iPhone app', readingSeconds: 200 },
+        { genre: 'Sci-Fi', source: 'kobo', appPasswordId: null, appPasswordLabel: null, readingSeconds: 100 },
       ]),
-      getReadingPacePoints: vi.fn().mockResolvedValue([{ durationSeconds: 240, progressDelta: 1.4, bucket: 'bookorbit', format: 'EPUB' }]),
+      getReadingPacePoints: vi.fn().mockResolvedValue([
+        {
+          durationSeconds: 240,
+          progressDelta: 1.4,
+          source: { ...builtInSource('bookorbit') },
+          format: 'EPUB',
+        },
+      ]),
       getAuthorGenreChord: vi.fn().mockResolvedValue({ nodes: [{ name: 'A' }, { name: 'G' }], links: [{ source: 'A', target: 'G', value: 10 }] }),
     };
     const service = new UserStatisticsService(repo as any, new ReadingAttemptEventsService());
@@ -968,10 +996,10 @@ describe('UserStatisticsService', () => {
 
     await expect(service.getSessionArchetypes(user, { libraryIds: [1] })).resolves.toEqual([{ hour: 9, durationMinutes: 20, dayOfWeek: 2 }]);
     await expect(service.getGenreReadingTime(user, { libraryIds: [1] })).resolves.toEqual([
-      { genre: 'Sci-Fi', readingSeconds: 300, bySource: { bookorbit: 200, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 100 } },
+      { genre: 'Sci-Fi', readingSeconds: 300, bySource: [appUsage(42, 'iPhone app', 200), builtInUsage('kobo', 100)] },
     ]);
     await expect(service.getReadingPace(user, { libraryIds: [1] })).resolves.toEqual([
-      { durationSeconds: 240, progressDelta: 1.4, bucket: 'bookorbit', format: 'EPUB' },
+      { durationSeconds: 240, progressDelta: 1.4, source: builtInSource('bookorbit'), format: 'EPUB' },
     ]);
     await expect(service.getAuthorGenreChord(user, { libraryIds: [1] })).resolves.toEqual({
       nodes: [{ name: 'A' }, { name: 'G' }],
@@ -996,6 +1024,9 @@ describe('UserStatisticsService', () => {
       bookId: 1,
       bookTitle: 'Book',
       bookFormat: 'EPUB',
+      source: 'web',
+      appPasswordId: null,
+      appPasswordLabel: null,
       startedAt: new Date('2026-04-07T08:00:00.000Z'),
       endedAt: new Date('2026-04-07T08:30:00.000Z'),
       durationSeconds: 1800,

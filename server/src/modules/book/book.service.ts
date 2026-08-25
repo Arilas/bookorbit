@@ -366,6 +366,27 @@ export class BookService {
     return user.isSuperuser || user.permissions.includes(permissionName);
   }
 
+  private requestAppPasswordId(user: RequestUser): number | null {
+    return user.authenticationMethod === 'app_password' ? (user.appPasswordId ?? null) : null;
+  }
+
+  private withoutAppPasswordId<T extends object>(row: T): Omit<T, 'appPasswordId'> {
+    const publicRow = { ...row };
+    Reflect.deleteProperty(publicRow, 'appPasswordId');
+    return publicRow;
+  }
+
+  async findAppPasswordLabel(userId: number, appPasswordId: number): Promise<string | null> {
+    return this.bookRepo.findAppPasswordLabel(userId, appPasswordId);
+  }
+
+  private async appPasswordReadingActivity(user: RequestUser): Promise<AutoReadingActivity> {
+    const appPasswordId = this.requestAppPasswordId(user);
+    if (appPasswordId === null) return {};
+    const label = await this.findAppPasswordLabel(user.id, appPasswordId);
+    return label ? { origin: 'bookorbit', externalProvider: label } : {};
+  }
+
   private async checkBookPassesContentFilters(bookId: number, contentFilters: ContentFilterRules): Promise<boolean> {
     return this.bookRepo.checkBookPassesContentFilters(bookId, contentFilters);
   }
@@ -2394,7 +2415,8 @@ export class BookService {
 
   async getProgress(userId: number, fileId: number, user: RequestUser) {
     await this.verifyFileAccess(fileId, user);
-    return this.bookRepo.findProgress(userId, fileId);
+    const row = await this.bookRepo.findProgressWithAppAttribution(userId, fileId);
+    return row ? this.withoutAppPasswordId(row) : null;
   }
 
   async getBookProgress(userId: number, bookId: number, user: RequestUser) {
@@ -2413,13 +2435,15 @@ export class BookService {
       koboLocationValue: row.koboLocationValue ?? null,
       koboContentSourceProgressPercent: row.koboContentSourceProgressPercent ?? null,
       koreaderProgress: row.koreaderProgress ?? null,
+      appName: row.appName ?? null,
       updatedAt: row.updatedAt ?? null,
     }));
   }
 
   async getAudioProgress(userId: number, bookId: number, user: RequestUser) {
     await this.verifyBookAccess(bookId, user);
-    return this.bookRepo.findAudioProgress(userId, bookId);
+    const row = await this.bookRepo.findAudioProgressWithAppAttribution(userId, bookId);
+    return row ? this.withoutAppPasswordId(row) : null;
   }
 
   async saveAudioProgress(userId: number, bookId: number, dto: UpsertAudioProgressDto, user: RequestUser) {
@@ -2431,7 +2455,16 @@ export class BookService {
       throw new BadRequestException(`currentFileId ${dto.currentFileId} does not belong to book ${bookId}`);
     }
     const previous = await this.bookRepo.findAudioProgress(userId, bookId);
-    const saved = await this.bookRepo.upsertAudioProgress(userId, bookId, dto.currentFileId, dto.positionSeconds, dto.percentage);
+    const appPasswordId = this.requestAppPasswordId(user);
+    const saved = await this.bookRepo.upsertAudioProgress(
+      userId,
+      bookId,
+      dto.currentFileId,
+      dto.positionSeconds,
+      dto.percentage,
+      undefined,
+      appPasswordId,
+    );
     if (!saved) return;
     await this.audiobookEbookProgressSync?.syncFromAudioProgress({
       userId,
@@ -2441,9 +2474,11 @@ export class BookService {
       percentage: dto.percentage,
       syncKobo: this.hasPermission(user, Permission.KoboSync),
       sourceUpdatedAt: saved.capturedAt,
+      appPasswordId,
     });
     const strongRereadEvidence = previous != null && previous.percentage - dto.percentage >= 10;
     await this.autoUpdateReadStatusForProgress(userId, { bookId, libraryId }, dto.percentage, {
+      ...(await this.appPasswordReadingActivity(user)),
       origin: 'bookorbit',
       timeZone: this.resolveUserTimeZone(user),
       strongRereadEvidence,
@@ -2457,6 +2492,7 @@ export class BookService {
     positionSeconds: number,
     percentage: number,
     sourceUpdatedAt: Date,
+    appPasswordId?: number | null,
   ): Promise<void> {
     await this.audiobookEbookProgressSync?.syncFromAudioProgress({
       userId: user.id,
@@ -2466,6 +2502,7 @@ export class BookService {
       percentage,
       syncKobo: this.hasPermission(user, Permission.KoboSync),
       sourceUpdatedAt,
+      appPasswordId: appPasswordId === undefined ? this.requestAppPasswordId(user) : appPasswordId,
     });
   }
 
@@ -2572,6 +2609,7 @@ export class BookService {
     const dto = this.withNarrationPercentage(file, request);
     const previous = await this.bookRepo.findProgress(userId, fileId);
     const now = new Date();
+    const appPasswordId = this.requestAppPasswordId(user);
     const text = await this.resolveTextPosition(fileId, dto, previous ?? null);
     await this.bookRepo.upsertProgress(
       userId,
@@ -2590,6 +2628,7 @@ export class BookService {
       dto.koreaderProgress ?? null,
       dto.source === 'narration' ? { percentage: dto.percentage, updatedAt: now } : null,
       text.moved ? now : null,
+      appPasswordId,
     );
     // Everything downstream reads the position the file now holds, not the one the client sent.
     // A narration write that did not move the text position must not move a Kobo bookmark, an
@@ -2621,6 +2660,7 @@ export class BookService {
       mediaOverlaySectionIndex: dto.source === 'text' ? null : (dto.mediaOverlaySectionIndex ?? null),
       sourceUpdatedAt: now,
       syncSiblingEpubs: text.moved,
+      appPasswordId,
     });
     if (dto.source !== 'narration') {
       await this.audiobookEbookProgressSync?.advanceNarrationToText({
@@ -2635,6 +2675,7 @@ export class BookService {
     }
     const strongRereadEvidence = previous != null && previous.percentage - text.percentage >= 10;
     await this.autoUpdateReadStatusForProgress(userId, file, text.percentage, {
+      ...(await this.appPasswordReadingActivity(user)),
       origin: 'bookorbit',
       timeZone: this.resolveUserTimeZone(user),
       strongRereadEvidence,
@@ -2668,6 +2709,7 @@ export class BookService {
       mediaOverlaySectionIndex: locators.mediaOverlaySectionIndex ?? null,
       sourceUpdatedAt: locators.sourceUpdatedAt,
       syncSiblingEpubs: locators.syncSiblingEpubs,
+      appPasswordId: null,
     });
     await this.audiobookEbookProgressSync?.advanceNarrationToText({
       userId,
