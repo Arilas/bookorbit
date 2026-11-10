@@ -13,7 +13,7 @@ type CompatibilityResult = {
  * migrations for good. A hash belongs here only when a released migration recreates its effect
  * idempotently, which makes dropping the row safe.
  */
-const UNRELEASED_MIGRATION_HASHES = [
+export const UNRELEASED_MIGRATION_HASHES = [
   // `server_identity`, created by local connection-address builds before
   // 0112_add_server_connection_identity, which creates the same table if it is missing.
   '1ec15e36d30f9bf4e79f92cb59eb461e5f76f53f43293d1b08a15253f22f35cf',
