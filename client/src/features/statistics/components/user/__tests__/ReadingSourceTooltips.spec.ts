@@ -12,8 +12,8 @@ import type {
 const mocks = vi.hoisted(() => ({
   genreData: { value: [] as unknown[] },
   heatmapData: { value: [] as unknown[] },
-  fetchTimeline: vi.fn(),
-  updateTimeline: vi.fn(),
+  fetchTimeline: vi.fn<typeof import('@/features/statistics/api/statistics.api').fetchUserReadingSessionTimeline>(),
+  updateTimeline: vi.fn<typeof import('@/features/statistics/api/statistics.api').updateUserReadingSessionTimelineSession>(),
 }))
 
 vi.mock('@/components/charts/AppChart.vue', () => ({
