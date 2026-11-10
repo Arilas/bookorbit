@@ -28,10 +28,13 @@ function makeService(db: any = {}) {
     scanBookFolderAsync: vi.fn(),
     scanBookDirectoryAsync: vi.fn(),
     isScanRunning: vi.fn().mockReturnValue(false),
+    ownsPath: vi.fn().mockResolvedValue(true),
     bufferWatcherNotification: vi.fn(),
     bufferBookMissingEvent: vi.fn(),
     bufferBooksUnavailableNotification: vi.fn(),
     bufferBooksRestoredNotification: vi.fn(),
+    reconcileCoverSlotsAsync: vi.fn(),
+    refreshRegexMetadataAfterMoveAsync: vi.fn(),
   } as unknown as ScannerService;
 
   const selfWriteRegistry = new SelfWriteRegistry();
@@ -65,6 +68,21 @@ describe('onApplicationBootstrap()', () => {
 // ── process() routing ─────────────────────────────────────────────────────────
 
 describe('process()', () => {
+  it('leaves an event under a folder another library owns to that library', async () => {
+    const { service, processor, scannerService } = makeService();
+    (scannerService as any).ownsPath = vi.fn().mockResolvedValue(false);
+    processor.handleCreate = vi.fn();
+    processor.handleUnlink = vi.fn();
+
+    await (service as any).process('create', '/books/comics/Saga/saga.cbz', 1);
+    await (service as any).process('delete', '/books/comics/Saga/saga.cbz', 1);
+
+    expect((scannerService as any).ownsPath).toHaveBeenCalledWith(1, '/books/comics/Saga/saga.cbz');
+    expect(processor.handleCreate).not.toHaveBeenCalled();
+    expect(processor.handleUnlink).not.toHaveBeenCalled();
+    expect(scannerService.scanBookFolderAsync).not.toHaveBeenCalled();
+  });
+
   it('buffers book-missing when handleUnlink returns book-missing', async () => {
     const { service, processor, gateway, scannerService } = makeService();
     const missing = { type: 'book-missing', libraryId: 1, bookIds: [10, 11] };
@@ -102,6 +120,7 @@ describe('process()', () => {
     expect(processor.handleCreate).toHaveBeenCalledWith('/books/Author/book.epub', 1);
     expect((gateway as any).emitBookRestored).toHaveBeenCalledWith({ libraryId: 1, bookIds: [7] });
     expect((scannerService as any).bufferBooksRestoredNotification).toHaveBeenCalledWith(1, [7]);
+    expect((scannerService as any).reconcileCoverSlotsAsync).toHaveBeenCalledWith([7]);
     expect(gateway.emitBookMissing).not.toHaveBeenCalled();
   });
 
@@ -162,6 +181,7 @@ describe('process()', () => {
 
     expect((gateway as any).emitBookMoved).toHaveBeenCalledWith({ libraryId: 1, bookIds: [5] });
     expect(scheduleFolderScanSpy).toHaveBeenCalledWith('/books/moved.epub', 1);
+    expect(scannerService.refreshRegexMetadataAfterMoveAsync).toHaveBeenCalledWith([5]);
     expect(scannerService.startScanAsync).not.toHaveBeenCalled();
   });
 
@@ -229,6 +249,37 @@ describe('schedule() debounce', () => {
 
     expect(processSpy).toHaveBeenCalledTimes(1);
     expect(processSpy).toHaveBeenCalledWith('create', '/books/file.epub', 1);
+  });
+
+  it("ignores a hidden entry below the library root - the write path's own temp file", async () => {
+    const { service } = makeService();
+    (service as any).subscriptions.set(1, []);
+    (service as any).watchedLibraryPaths.set(1, ['/books']);
+    const processSpy = vi.spyOn(service as any, 'process').mockResolvedValue(undefined);
+
+    (service as any).schedule('create', '/books/Author/Book/.bookorbit-write-abc.mp3', 1);
+    (service as any).schedule('delete', '/books/Author/Book/.bookorbit-write-abc.mp3', 1);
+    (service as any).schedule('create', '/books/Author/.hidden/book.mp3', 1);
+    (service as any).schedule('create', '/books/Author/Book/.DS_Store', 1);
+
+    vi.runAllTimers();
+    await Promise.resolve();
+
+    expect(processSpy).not.toHaveBeenCalled();
+  });
+
+  it('still processes events under a library root that is itself hidden', async () => {
+    const { service } = makeService();
+    (service as any).subscriptions.set(1, []);
+    (service as any).watchedLibraryPaths.set(1, ['/mnt/.private/books']);
+    const processSpy = vi.spyOn(service as any, 'process').mockResolvedValue(undefined);
+
+    (service as any).schedule('create', '/mnt/.private/books/Author/book.mp3', 1);
+
+    vi.runAllTimers();
+    await Promise.resolve();
+
+    expect(processSpy).toHaveBeenCalledWith('create', '/mnt/.private/books/Author/book.mp3', 1);
   });
 
   it('does not debounce events for different paths', async () => {
@@ -352,6 +403,9 @@ describe('reconcile()', () => {
     expect((scannerService as any).bufferBooksUnavailableNotification).toHaveBeenCalledWith(1, [20]);
     expect(gateway.emitBookMoved).toHaveBeenCalledWith({ libraryId: 1, bookIds: [30] });
     expect((gateway as any).emitBookTransferred).toHaveBeenCalledWith({ fromLibraryId: 1, toLibraryId: 2, bookIds: [40] });
+    expect((scannerService as any).reconcileCoverSlotsAsync).toHaveBeenCalledWith([30]);
+    expect((scannerService as any).reconcileCoverSlotsAsync).toHaveBeenCalledWith([40]);
+    expect((scannerService as any).reconcileCoverSlotsAsync).not.toHaveBeenCalledWith([20]);
   });
 
   it('emits book-transferred from cross-library reconcile results', async () => {
@@ -486,4 +540,134 @@ describe('dir-level coalescing', () => {
 
     expect(processSpy).toHaveBeenCalledTimes(1);
   });
+});
+
+// ── pause / resume ────────────────────────────────────────────────────────────
+
+// Bulk rename and book move stop the watcher only so it will not react to their own writes. They
+// used to do that with stopWatcher, whose close() releases one operating system handle per watched
+// directory: 9.5s of blocking work across 944 directories on a real library, before a single file
+// moved, and then a full re-walk to rebuild it. Event delivery is gated on library membership in
+// `subscriptions`, so dropping the entry gives the same isolation at no cost.
+describe('pauseWatcher() / resumeWatcher()', () => {
+  it('drops events while paused and delivers them again after resuming', async () => {
+    const { service } = makeService();
+    (service as any).subscriptions.set(1, []);
+    const processSpy = vi.spyOn(service as any, 'process').mockResolvedValue(undefined);
+
+    expect(service.pauseWatcher(1)).toBe(true);
+
+    (service as any).schedule('create', '/books/during-pause.epub', 1);
+    vi.runAllTimers();
+    await Promise.resolve();
+    expect(processSpy).not.toHaveBeenCalled();
+
+    expect(service.resumeWatcher(1)).toBe(true);
+
+    (service as any).schedule('create', '/books/after-resume.epub', 1);
+    vi.runAllTimers();
+    await Promise.resolve();
+    expect(processSpy).toHaveBeenCalledTimes(1);
+    expect(processSpy).toHaveBeenCalledWith('create', '/books/after-resume.epub', 1);
+  });
+
+  it('discards events that were already pending when the pause began', async () => {
+    const { service } = makeService();
+    (service as any).subscriptions.set(1, []);
+    const processSpy = vi.spyOn(service as any, 'process').mockResolvedValue(undefined);
+
+    (service as any).schedule('create', '/books/inflight.epub', 1);
+    service.pauseWatcher(1);
+    service.resumeWatcher(1);
+
+    vi.runAllTimers();
+    await Promise.resolve();
+
+    expect(processSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps the watcher instance rather than closing it', () => {
+    const { service } = makeService();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const sub = { close } as any;
+    (service as any).subscriptions.set(1, [sub]);
+
+    service.pauseWatcher(1);
+
+    // Closing is the blocking work this whole change exists to avoid.
+    expect(close).not.toHaveBeenCalled();
+    expect((service as any).pausedWatchers.get(1)).toEqual([sub]);
+
+    service.resumeWatcher(1);
+
+    expect(close).not.toHaveBeenCalled();
+    expect((service as any).subscriptions.get(1)).toEqual([sub]);
+    expect((service as any).pausedWatchers.has(1)).toBe(false);
+  });
+
+  it('reports when there was no live watcher to pause', () => {
+    const { service } = makeService();
+
+    expect(service.pauseWatcher(7)).toBe(false);
+    expect(service.resumeWatcher(7)).toBe(false);
+  });
+
+  it('closes a paused watcher when the library is stopped outright', async () => {
+    const { service } = makeService();
+    const close = vi.fn().mockResolvedValue(undefined);
+    (service as any).subscriptions.set(1, [{ close } as any]);
+
+    service.pauseWatcher(1);
+    await service.stopWatcher(1);
+
+    // A paused watcher still owns handles, so a real stop must release them.
+    expect(close).toHaveBeenCalledTimes(1);
+    expect((service as any).pausedWatchers.has(1)).toBe(false);
+  });
+
+  it('closes a paused watcher on shutdown', async () => {
+    const { service } = makeService();
+    const close = vi.fn().mockResolvedValue(undefined);
+    (service as any).subscriptions.set(1, [{ close } as any]);
+
+    service.pauseWatcher(1);
+    await service.onModuleDestroy();
+
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+
+// A real chokidar watcher over a real directory, because the whole fix rests on the claim that a
+// paused watcher delivers nothing and a resumed one delivers again.
+describe('pauseWatcher() against a real filesystem', () => {
+  it('ignores a file created while paused and sees one created after resuming', async () => {
+    vi.useRealTimers();
+    const { writeFile } = await import('fs/promises');
+    const dir = await mkdtemp(join(tmpdir(), 'bookorbit-watcher-'));
+    const { service } = makeService();
+    const processSpy = vi.spyOn(service as any, 'process').mockResolvedValue(undefined);
+
+    const settle = () => new Promise((resolve) => setTimeout(resolve, WATCHER_DEBOUNCE_MS * 4));
+
+    try {
+      await service.startWatcher(1, [dir]);
+
+      service.pauseWatcher(1);
+      await writeFile(join(dir, 'while-paused.epub'), 'x');
+      await settle();
+      expect(processSpy).not.toHaveBeenCalled();
+
+      service.resumeWatcher(1);
+      await writeFile(join(dir, 'after-resume.epub'), 'x');
+      await settle();
+
+      const seen = processSpy.mock.calls.map((call) => call[1]);
+      expect(seen).toContain(join(dir, 'after-resume.epub'));
+      expect(seen).not.toContain(join(dir, 'while-paused.epub'));
+    } finally {
+      await service.onModuleDestroy();
+      await rm(dir, { recursive: true, force: true });
+      vi.useFakeTimers();
+    }
+  }, 20000);
 });

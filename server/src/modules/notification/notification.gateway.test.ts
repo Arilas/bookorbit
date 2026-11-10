@@ -1,4 +1,4 @@
-import { Permission } from '@bookorbit/types';
+import { AuthenticationMethod, Permission } from '@bookorbit/types';
 import { WS_UNAUTHORIZED_EVENT } from '../../common/utils/ws-auth.utils';
 
 import type { RequestUser } from '../../common/types/request-user';
@@ -6,13 +6,7 @@ import { NotificationGateway } from './notification.gateway';
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 function makeGateway() {
-  return new NotificationGateway(
-    {} as never,
-    {} as never,
-    {} as never,
-    { get: vi.fn().mockReturnValue('http://localhost:5173') } as never,
-    {} as never,
-  );
+  return new NotificationGateway({} as never, {} as never, {} as never, { appUrl: 'http://localhost:6263' } as never, {} as never);
 }
 
 function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
@@ -90,11 +84,10 @@ describe('NotificationGateway handshake rejection', () => {
     };
     const userService = { findByIdWithPermissions: vi.fn().mockResolvedValue(overrides.user ?? null) };
     const notificationRepo = { countUnread: vi.fn().mockResolvedValue(0) };
-    const config = { get: vi.fn().mockReturnValue('http://localhost:5173') };
+    const config = { appUrl: 'http://localhost:6263' };
     const db = {
       query: {
-        refreshTokens: { findFirst: vi.fn().mockResolvedValue({ id: 1 }) },
-        appPasswords: { findFirst: vi.fn().mockResolvedValue({ id: 12 }) },
+        authSessions: { findFirst: vi.fn().mockResolvedValue({ id: 12, appPasswordId: null }) },
       },
     };
     const gateway = new NotificationGateway(jwtService as never, userService as never, notificationRepo as never, config as never, db as never);
@@ -113,7 +106,7 @@ describe('NotificationGateway handshake rejection', () => {
 
   it('closes without an invitation when the user simply lacks notification access', async () => {
     const { gateway, client } = makeConnectingGateway({
-      verify: vi.fn(() => ({ sub: 7, ver: 1 })),
+      verify: vi.fn(() => ({ sub: 7, ver: 1, amr: 'password', sid: 12 })),
       user: makeUser({ permissions: [] }),
     });
 
@@ -124,23 +117,26 @@ describe('NotificationGateway handshake rejection', () => {
     expect(client.disconnect).toHaveBeenCalledTimes(1);
   });
 
-  it('passes app-password and session-family claims through central validation', async () => {
+  it('validates an app-password socket against its durable auth session', async () => {
     const { gateway, client, userService, db } = makeConnectingGateway({
       verify: vi.fn(() => ({
         sub: 7,
         ver: 1,
-        am: 'app_password',
-        aid: 12,
-        sid: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
+        amr: 'app_password',
+        sid: 12,
       })),
-      user: makeUser({ permissions: [Permission.NotificationAccess], authMethod: 'app_password', appPasswordId: 12 }),
+      user: makeUser({
+        permissions: [Permission.NotificationAccess],
+        authenticationMethod: AuthenticationMethod.AppPassword,
+        appPasswordId: 12,
+      }),
     });
+    db.query.authSessions.findFirst.mockResolvedValue({ id: 12, appPasswordId: 12 });
 
     await gateway.handleConnection(client as never);
 
     expect(userService.findByIdWithPermissions).toHaveBeenCalledWith(7);
-    expect(db.query.refreshTokens.findFirst).toHaveBeenCalled();
-    expect(db.query.appPasswords.findFirst).toHaveBeenCalled();
+    expect(db.query.authSessions.findFirst).toHaveBeenCalled();
     expect(client.join).toHaveBeenCalledWith('user:7');
   });
 });

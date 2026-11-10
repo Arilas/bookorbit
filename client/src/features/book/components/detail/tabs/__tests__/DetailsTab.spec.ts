@@ -1,9 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
-import { defineComponent } from 'vue'
-import type { BookDetail } from '@bookorbit/types'
+import { defineComponent, ref } from 'vue'
+import type { BookDetail, BookReadingSession } from '@bookorbit/types'
 import DetailsTab from '../DetailsTab.vue'
+import BookReadingActivityCard from '../../details/BookReadingActivityCard.vue'
+import ReadAloudSyncMeter from '../../details/ReadAloudSyncMeter.vue'
+import BookCoverStack from '../../details/BookCoverStack.vue'
+import BookEditionsCard from '../../details/BookEditionsCard.vue'
+import BookCoverLightbox from '@/features/book/components/BookCoverLightbox.vue'
+import ReadAloudInviteChip from '@/features/read-aloud/components/ReadAloudInviteChip.vue'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
+import { useProviderLinkSettings } from '@/features/book/composables/useProviderLinkSettings'
 
 const mocks = vi.hoisted(() => ({
   api: vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(),
@@ -24,8 +31,17 @@ vi.mock('@/lib/api', () => ({
   api: mocks.api,
 }))
 
+vi.mock('@/features/library/composables/useLibraries', () => ({
+  useLibraries: () => ({
+    libraries: ref([
+      { id: 1, accessLevel: 'editor' },
+      { id: 2, accessLevel: 'viewer' },
+    ]),
+  }),
+}))
+
 vi.mock('@/features/auth/composables/usePermissions', () => ({
-  usePermissions: () => ({ hasPermission: mocks.hasPermission }),
+  usePermissions: () => ({ hasPermission: mocks.hasPermission, isSuperuser: { value: false }, isDemoRestrictedAccount: { value: false } }),
 }))
 
 vi.mock('@/features/auth/composables/useAuth', () => ({
@@ -58,6 +74,9 @@ function makeBook(overrides: Partial<BookDetail> = {}): BookDetail {
     personalNoteUpdatedAt: null,
     communityRatings: [],
     coverSource: 'extracted',
+    coverMedia: ['ebook'],
+    covers: { ebook: null, audio: null },
+    coverVersion: 'legacy:2024-01-01T00:00:00.000Z',
     hardcoverEditionId: null,
     providerIds: {},
     authors: [{ id: 1, name: 'Author One', sortName: null }],
@@ -79,6 +98,17 @@ function makeBook(overrides: Partial<BookDetail> = {}): BookDetail {
     metadataScore: null,
     readStatus: null,
     audioMetadata: null,
+    readAloudSync: {
+      mode: 'auto',
+      state: 'unavailable',
+      unavailableReason: 'no_media_overlay_epub',
+      overlayFileId: null,
+      audioDurationSeconds: null,
+      overlayDurationSeconds: null,
+      durationDifferenceSeconds: null,
+      durationDifferenceRatio: null,
+      koreaderDownloadAvailable: false,
+    },
     formatPriority: [],
     comicMetadata: null,
     customMetadata: [],
@@ -108,6 +138,7 @@ const RouterLinkStub = defineComponent({
 })
 
 let mountedWrappers: Array<{ unmount: () => void }> = []
+let resizeObserverCallbacks: ResizeObserverCallback[] = []
 
 function mountDetails(book: BookDetail) {
   const wrapper = shallowMount(DetailsTab, {
@@ -116,6 +147,7 @@ function mountDetails(book: BookDetail) {
       stubs: {
         BookCoverArtwork: false,
         BookCoverSurface: false,
+        BookReadingActivityCard: false,
         RouterLink: RouterLinkStub,
         Popover: { template: '<div><slot /><slot name="content" /></div>' },
         PopoverTrigger: { template: '<div><slot /></div>' },
@@ -132,7 +164,7 @@ function mountDetails(book: BookDetail) {
 
 async function loadCoverImages(wrapper: ReturnType<typeof mountDetails>, naturalWidth = 1000, naturalHeight = 1000) {
   const imgs = wrapper.findAll(`img[alt="${wrapper.props('book').title}"]`)
-  expect(imgs.length).toBe(2)
+  expect(imgs.length).toBe(1)
 
   for (const img of imgs) {
     Object.defineProperty(img.element, 'naturalWidth', { configurable: true, value: naturalWidth })
@@ -145,16 +177,19 @@ describe('DetailsTab cover surface', () => {
   const { bookSpineOverlay, bookCoverDisplayMode } = useDisplaySettings()
 
   beforeEach(() => {
+    resizeObserverCallbacks = []
     mocks.api.mockReset()
     mocks.push.mockReset()
     mocks.hasPermission.mockReset()
     mocks.hasPermission.mockReturnValue(true)
     mocks.user.value.settings.timezone = 'UTC'
+    useProviderLinkSettings().settings.value = { amazonDomain: 'amazon.com' }
 
     mocks.api.mockImplementation(async (input) => {
       const url = String(input)
+      if (url.includes('/metadata-preferences/provider-links')) return response({ amazonDomain: 'amazon.com' })
       if (url.includes('/metadata-score/weights')) return response({})
-      if (url.includes('/audio-progress')) return response(null)
+      if (url.includes('/playback-state')) return response(null)
       if (url.includes('/collections/membership')) return response([])
       if (url.includes('/kobo-state')) {
         return response({
@@ -165,6 +200,7 @@ describe('DetailsTab cover surface', () => {
         })
       }
       if (url.includes('/koreader/books/')) return response(null)
+      if (url.startsWith('/api/v1/reading-progress')) return response({ items: [] })
       if (url.includes('/progress')) return response([])
       return response({})
     })
@@ -172,6 +208,10 @@ describe('DetailsTab cover surface', () => {
     vi.stubGlobal(
       'ResizeObserver',
       class {
+        constructor(callback: ResizeObserverCallback) {
+          resizeObserverCallbacks.push(callback)
+        }
+
         observe() {}
         unobserve() {}
         disconnect() {}
@@ -199,14 +239,14 @@ describe('DetailsTab cover surface', () => {
     await flushPromises()
 
     const surfaces = wrapper.findAll('.book-cover-surface')
-    expect(surfaces.length).toBe(2)
+    expect(surfaces.length).toBe(1)
     expect(surfaces.every((surface) => surface.attributes('data-cover-spine') === 'strong')).toBe(true)
     expect(wrapper.findAll('.book-cover-spine-layer').length).toBe(0)
 
     await loadCoverImages(wrapper)
 
     const spineLayers = wrapper.findAll('.book-cover-spine-layer')
-    expect(spineLayers.length).toBe(2)
+    expect(spineLayers.length).toBe(1)
     expect(spineLayers[0]!.attributes('style')).toContain('translateY(-50%)')
   })
 
@@ -214,23 +254,27 @@ describe('DetailsTab cover surface', () => {
     mocks.api.mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/metadata-score/weights')) return response({})
-      if (url.includes('/audio-progress')) return response(null)
+      if (url.includes('/playback-state')) return response(null)
       if (url.includes('/collections/membership')) return response([])
       if (url.includes('/kobo-state')) {
         return response({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshots: [] })
       }
       if (url.includes('/koreader/books/')) return response(null)
-      if (url.endsWith('/books/12/progress')) {
-        return response([
-          {
-            fileId: 101,
-            percentage: 42,
-            cfi: null,
-            pageNumber: null,
-            updatedAt: '2026-08-25T12:00:00.000Z',
-            appName: 'iPhone app',
-          },
-        ])
+      if (url.startsWith('/api/v1/reading-progress')) {
+        return response({
+          items: [
+            {
+              fileId: 101,
+              appName: 'iPhone app',
+              percentage: 42,
+              updatedAt: '2026-08-25T12:00:00.000Z',
+              text: { cfi: null, page: null, updatedAt: '2026-08-25T12:00:00.000Z' },
+              narration: { seconds: null, fragment: null, sectionIndex: null, percentage: null, updatedAt: null },
+              kobo: { source: null, type: null, value: null, contentPercent: null },
+              koreader: null,
+            },
+          ],
+        })
       }
       return response({})
     })
@@ -238,7 +282,8 @@ describe('DetailsTab cover surface', () => {
     const wrapper = mountDetails(makeBook())
     await flushPromises()
 
-    expect(wrapper.text()).toContain('iPhone app')
+    const progress = wrapper.getComponent(BookEditionsCard).props('progress') as Array<{ appName: string | null }>
+    expect(progress[0]?.appName).toBe('iPhone app')
   })
 
   it('shrinks natural-bottom detail cover surfaces to the loaded cover ratio', async () => {
@@ -249,8 +294,77 @@ describe('DetailsTab cover surface', () => {
     await loadCoverImages(wrapper, 1200, 600)
 
     const surfaces = wrapper.findAll('.book-cover-surface')
-    expect(surfaces.length).toBe(2)
+    expect(surfaces.length).toBe(1)
     expect(surfaces.every((surface) => surface.attributes('style')?.includes('aspect-ratio: 2 / 1'))).toBe(true)
+  })
+
+  it('constrains cover width to the column height remaining above its actions', async () => {
+    const wrapper = mountDetails(makeBook())
+    await flushPromises()
+
+    const surface = wrapper.get('.book-cover-surface')
+    const frame = surface.element.parentElement as HTMLElement
+    const column = wrapper.get<HTMLElement>('[data-test="cover-column"]')
+    const actions = wrapper.get<HTMLElement>('[data-test="cover-actions"]')
+
+    Object.defineProperty(column.element, 'clientHeight', { configurable: true, value: 320 })
+    vi.spyOn(actions.element, 'getBoundingClientRect').mockReturnValue({ height: 84 } as DOMRect)
+
+    resizeObserverCallbacks.at(-1)?.([], {} as ResizeObserver)
+    await flushPromises()
+
+    expect(frame.style.maxWidth).toBe('')
+    expect(frame.style.getPropertyValue('--detail-cover-max-width')).toBe('146px')
+    expect(frame.classList).toContain('@min-[46rem]/book-detail:max-w-[var(--detail-cover-max-width)]')
+  })
+
+  it('anchors wide-layout covers beside the top of the metadata column', async () => {
+    const wrapper = mountDetails(makeBook())
+    await flushPromises()
+
+    const surface = wrapper.get('.book-cover-surface')
+    const slot = surface.element.parentElement?.parentElement as HTMLElement
+
+    expect(slot.classList).toContain('@min-[46rem]/book-detail:items-start')
+    expect(slot.classList).toContain('@min-[46rem]/book-detail:justify-end')
+    expect(slot.classList).not.toContain('@min-[46rem]/book-detail:items-center')
+  })
+
+  it('keeps wide-layout actions immediately after the cover instead of at the bottom of the column', async () => {
+    const wrapper = mountDetails(makeBook())
+    await flushPromises()
+
+    const column = wrapper.get<HTMLElement>('[data-test="cover-column"]')
+    const actions = wrapper.get<HTMLElement>('[data-test="cover-actions"]')
+    const coverRow = column.element.firstElementChild as HTMLElement
+
+    expect(actions.element.parentElement).toBe(column.element)
+    expect(coverRow.nextElementSibling).toBe(actions.element)
+    expect(coverRow.classList).not.toContain('@min-[46rem]/book-detail:flex-1')
+  })
+
+  it('lets the discovery shelf follow the natural height of the detail content', async () => {
+    const wrapper = mountDetails(makeBook())
+    await flushPromises()
+
+    const layout = wrapper.get<HTMLElement>('[data-test="details-layout"]')
+    const shelf = wrapper.get<HTMLElement>('[data-test="discovery-shelf"]')
+
+    expect(shelf.element.parentElement).toBe(layout.element)
+    expect(layout.element.classList).toContain('@min-[46rem]/book-detail:content-start')
+    expect(layout.element.classList).not.toContain('@min-[46rem]/book-detail:h-full')
+    expect(layout.element.classList).not.toContain('@min-[46rem]/book-detail:grid-rows-[minmax(0,1fr)_clamp(11.25rem,29%,17.5rem)]')
+  })
+
+  it('uses the responsive synopsis clamp until the full description is opened', async () => {
+    const wrapper = mountDetails(makeBook({ description: '<p>A synopsis</p>' }))
+    await flushPromises()
+
+    const synopsis = wrapper.get<HTMLElement>('[data-test="synopsis-copy"]')
+
+    expect(synopsis.element.classList).toContain('synopsis-copy--clamped')
+    await wrapper.get(`[aria-controls="book-${wrapper.props('book').id}-synopsis"]`).trigger('click')
+    expect(synopsis.element.classList).not.toContain('synopsis-copy--clamped')
   })
 
   it('forces spine overlay off for audiobook details covers', async () => {
@@ -275,7 +389,7 @@ describe('DetailsTab cover surface', () => {
     await flushPromises()
 
     const surfaces = wrapper.findAll('.book-cover-surface')
-    expect(surfaces.length).toBe(2)
+    expect(surfaces.length).toBe(1)
     expect(surfaces.every((surface) => surface.attributes('data-cover-spine') === 'off')).toBe(true)
 
     await loadCoverImages(wrapper)
@@ -335,11 +449,96 @@ describe('DetailsTab cover surface', () => {
     expect(wrapper.get('[data-test="hidden-genres"]').text()).toContain('Mystery')
   })
 
+  it('fully expands the synopsis without creating a nested scroll area', async () => {
+    const wrapper = mountDetails(
+      makeBook({
+        description: '<p>First paragraph.</p><p>Second paragraph with enough content to continue beyond the collapsed preview.</p>',
+      }),
+    )
+    await flushPromises()
+
+    const synopsis = wrapper.get('[data-test="synopsis-copy"]')
+    expect(synopsis.html()).toContain('Second paragraph')
+
+    const toggle = wrapper.findAll('button').find((button) => button.text() === 'Show more')
+    expect(toggle).toBeDefined()
+    expect(toggle!.attributes('aria-controls')).toBe('book-12-synopsis')
+    expect(toggle!.attributes('aria-expanded')).toBe('false')
+    expect(synopsis.attributes('id')).toBe('book-12-synopsis')
+    await toggle!.trigger('click')
+
+    expect(synopsis.classes()).not.toContain('synopsis-copy--clamped')
+    expect(synopsis.classes()).not.toContain('max-h-44')
+    expect(synopsis.classes()).not.toContain('overflow-y-auto')
+    expect(toggle!.text()).toBe('Show less')
+    expect(toggle!.attributes('aria-expanded')).toBe('true')
+
+    await toggle!.trigger('click')
+
+    expect(synopsis.classes()).toContain('synopsis-copy--clamped')
+    expect(toggle!.text()).toBe('Show more')
+    expect(toggle!.attributes('aria-expanded')).toBe('false')
+  })
+
+  it('keeps the reading activity card tall enough for its content', async () => {
+    const wrapper = mountDetails(makeBook())
+    await flushPromises()
+
+    const activityCard = wrapper.getComponent(BookReadingActivityCard)
+    expect(activityCard.classes()).toContain('@min-[46rem]/book-detail:flex-1')
+    expect(activityCard.classes().some((className) => className.includes('min-h-0'))).toBe(false)
+  })
+
+  it('lists the three most recent reading sessions', () => {
+    const sessions: BookReadingSession[] = Array.from({ length: 5 }, (_, index) => ({
+      id: index + 1,
+      bookFileId: 101,
+      startedAt: `2026-01-0${index + 1}T10:00:00.000Z`,
+      endedAt: `2026-01-0${index + 1}T10:30:00.000Z`,
+      durationSeconds: 1800,
+      progressDelta: 5,
+      endProgress: (index + 1) * 10,
+      format: 'epub',
+      source: null,
+      sourceAttribution: {
+        key: 'bookorbit',
+        label: 'BookOrbit',
+        bucket: 'bookorbit',
+        kind: 'built_in',
+        appPasswordId: null,
+      },
+      attemptId: null,
+    }))
+    const wrapper = shallowMount(BookReadingActivityCard, {
+      props: {
+        stats: {
+          totalSessions: 5,
+          totalSeconds: 9000,
+          avgDurationSeconds: 1800,
+          firstSessionAt: sessions[0]!.startedAt,
+          lastSessionAt: sessions[4]!.startedAt,
+          dailySummary: [],
+          paceProgressDelta: 0,
+          paceDurationSeconds: 0,
+          progressSummary: [],
+          latestEndProgress: 50,
+          bySource: [],
+          longestSessionSeconds: 1800,
+          longestSessionAt: sessions[0]!.startedAt,
+          backtrackCount: 0,
+        },
+        sessions,
+      },
+    })
+
+    expect(wrapper.findAll('li')).toHaveLength(3)
+  })
+
   it('summarizes pending Kobo sync state for each affected device', async () => {
     mocks.api.mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/metadata-score/weights')) return response({})
-      if (url.includes('/audio-progress')) return response(null)
+      if (url.includes('/playback-state')) return response(null)
       if (url.includes('/collections/membership')) return response([])
       if (url.includes('/kobo-state')) {
         return response({
@@ -377,6 +576,7 @@ describe('DetailsTab cover surface', () => {
         })
       }
       if (url.includes('/koreader/books/')) return response(null)
+      if (url.startsWith('/api/v1/reading-progress')) return response({ items: [] })
       if (url.includes('/progress')) return response([])
       return response({})
     })
@@ -393,11 +593,11 @@ describe('DetailsTab cover surface', () => {
       makeBook({
         seriesId: 20,
         seriesName: 'Mistborn Era 2',
-        seriesIndex: 4,
+        seriesIndex: '4',
         seriesMemberships: [
           { seriesId: 22, seriesName: 'Cosmere', seriesIndex: null, displayOrder: 2, expectedBookCount: null },
-          { seriesId: 20, seriesName: 'Mistborn Era 2', seriesIndex: 4, displayOrder: 0, expectedBookCount: null },
-          { seriesId: 21, seriesName: 'Mistborn Saga', seriesIndex: 7.5, displayOrder: 1, expectedBookCount: null },
+          { seriesId: 20, seriesName: 'Mistborn Era 2', seriesIndex: '4', displayOrder: 0, expectedBookCount: null },
+          { seriesId: 21, seriesName: 'Mistborn Saga', seriesIndex: '7.5', displayOrder: 1, expectedBookCount: null },
         ],
       }),
     )
@@ -419,7 +619,7 @@ describe('DetailsTab cover surface', () => {
       makeBook({
         seriesId: 20,
         seriesName: 'Mistborn Era 2',
-        seriesIndex: 4,
+        seriesIndex: '4',
       }),
     )
     await flushPromises()
@@ -455,6 +655,19 @@ describe('DetailsTab cover surface', () => {
     expect(tooltips.some((t) => t.includes('4.3 / 5') && t.includes('12,345'))).toBe(true)
   })
 
+  it('uses the configured Amazon domain for the book provider link', async () => {
+    const defaultImplementation = mocks.api.getMockImplementation()!
+    mocks.api.mockImplementation(async (input, init) => {
+      if (String(input).includes('/metadata-preferences/provider-links')) return response({ amazonDomain: 'amazon.de' })
+      return defaultImplementation(input, init)
+    })
+
+    const wrapper = mountDetails(makeBook({ providerIds: { amazon: 'B012345678' } }))
+    await flushPromises()
+
+    expect(wrapper.find('a[href="https://www.amazon.de/dp/B012345678"]').exists()).toBe(true)
+  })
+
   it('places the sync grid items with the current book id', async () => {
     const wrapper = mountDetails(makeBook())
     await flushPromises()
@@ -474,7 +687,7 @@ describe('DetailsTab cover surface', () => {
     await flushPromises()
 
     const sendButtons = wrapper.findAll('button[aria-label="Send via Email"]')
-    expect(sendButtons).toHaveLength(2)
+    expect(sendButtons).toHaveLength(1)
 
     // Find the stubbed SendBookDialog
     const sendDialog = wrapper.findComponent({ name: 'SendBookDialog' })
@@ -494,7 +707,7 @@ describe('DetailsTab cover surface', () => {
     expect(sendButtons.length).toBe(0)
   })
 
-  it('offers reset in both overflow menus and refreshes supplemental reading state after confirmation', async () => {
+  it('offers reset in the overflow menu and refreshes supplemental reading state after confirmation', async () => {
     mocks.hasPermission.mockImplementation(
       (permission) => permission === 'library_edit_metadata' || permission === 'kobo_sync' || permission === 'koreader_sync',
     )
@@ -502,7 +715,7 @@ describe('DetailsTab cover surface', () => {
     await flushPromises()
 
     const resetButtons = wrapper.findAll('button').filter((button) => button.text().includes('Reset reading state'))
-    expect(resetButtons).toHaveLength(2)
+    expect(resetButtons).toHaveLength(1)
 
     const resetDialog = wrapper.findComponent({ name: 'ResetReadingStateDialog' })
     expect(resetDialog.exists()).toBe(true)
@@ -530,6 +743,7 @@ describe('DetailsTab cover surface', () => {
         return response({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshots: [] })
       }
       if (url.includes('/koreader/books/')) return response(null)
+      if (url.startsWith('/api/v1/reading-progress')) return response({ items: [] })
       if (url.includes('/progress')) return response([])
       return response({})
     })
@@ -538,7 +752,7 @@ describe('DetailsTab cover surface', () => {
     await flushPromises()
 
     expect(mocks.api).toHaveBeenNthCalledWith(1, '/api/v1/books/12/reset-reading-state', { method: 'POST' })
-    expect(mocks.api).toHaveBeenCalledWith('/api/v1/books/12/progress')
+    expect(mocks.api).toHaveBeenCalledWith('/api/v1/reading-progress?bookId=12')
     expect(mocks.api).toHaveBeenCalledWith('/api/v1/books/12/kobo-state')
     expect(mocks.api).toHaveBeenCalledWith('/api/v1/koreader/books/12/progress')
     expect(wrapper.emitted('saved')).toEqual([
@@ -556,6 +770,50 @@ describe('DetailsTab cover surface', () => {
     ])
   })
 
+  it('hands held KOReader devices to the reset hold notice and releases them for this book', async () => {
+    const heldDevice = { device: 'Kindle', deviceId: 'kindle-1', percentage: 26.67, updatedAt: '2026-10-12T00:00:00.000Z' }
+    let held = [heldDevice]
+    const baseRoute = mocks.api.getMockImplementation()!
+    mocks.api.mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.endsWith('/reset-hold/release')) {
+        held = []
+        return { ok: true, status: 204, json: async () => ({}) } as Response
+      }
+      if (url.includes('/koreader/books/')) return response({ bookId: 12, heldByReset: held })
+      return baseRoute(input, init)
+    })
+    const wrapper = mountDetails(makeBook())
+    await flushPromises()
+
+    const notice = wrapper.findComponent({ name: 'KoreaderResetHoldNotice' })
+    expect(notice.props('held')).toEqual([heldDevice])
+
+    const released = await (notice.props('release') as (deviceId: string) => Promise<boolean>)('kindle-1')
+    await flushPromises()
+
+    expect(released).toBe(true)
+    expect(mocks.api).toHaveBeenCalledWith(
+      '/api/v1/koreader/books/12/reset-hold/release',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ deviceId: 'kindle-1' }) }),
+    )
+    expect(wrapper.findComponent({ name: 'KoreaderResetHoldNotice' }).exists()).toBe(false)
+  })
+
+  it('shows no reset hold notice without the KOReader permission', async () => {
+    mocks.hasPermission.mockImplementation((permission) => permission !== 'koreader_sync')
+    const baseRoute = mocks.api.getMockImplementation()!
+    mocks.api.mockImplementation(async (input, init) => {
+      if (String(input).includes('/koreader/books/'))
+        return response({ bookId: 12, heldByReset: [{ device: 'Kindle', deviceId: 'k', percentage: 40, updatedAt: '' }] })
+      return baseRoute(input, init)
+    })
+    const wrapper = mountDetails(makeBook())
+    await flushPromises()
+
+    expect(wrapper.findComponent({ name: 'KoreaderResetHoldNotice' }).exists()).toBe(false)
+  })
+
   it('hides reset reading state when the user cannot edit metadata', async () => {
     mocks.hasPermission.mockReturnValue(false)
     const wrapper = mountDetails(makeBook())
@@ -564,16 +822,27 @@ describe('DetailsTab cover surface', () => {
     expect(wrapper.findAll('button').some((button) => button.text().includes('Reset reading state'))).toBe(false)
   })
 
+  it('keeps personal reading reset available to viewers while hiding library metadata controls', async () => {
+    mocks.hasPermission.mockImplementation((permission) => permission === 'library_edit_metadata')
+    const wrapper = mountDetails(makeBook({ libraryId: 2 }))
+    await flushPromises()
+
+    expect(wrapper.findAll('button').some((button) => button.text().includes('Reset reading state'))).toBe(true)
+    expect(wrapper.find('button[aria-label="Edit date added"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="Edit cover"]').exists()).toBe(false)
+  })
+
   it('edits and saves the added date inline', async () => {
     const updated = makeBook({ addedAt: '2020-06-15T00:00:00.000Z', updatedAt: '2026-08-05T12:00:00.000Z' })
     mocks.api.mockImplementation(async (input) => {
       const url = String(input)
       if (url.endsWith('/added-at')) return response(updated)
       if (url.includes('/metadata-score/weights')) return response({})
-      if (url.includes('/audio-progress')) return response(null)
+      if (url.includes('/playback-state')) return response(null)
       if (url.includes('/collections/membership')) return response([])
       if (url.includes('/kobo-state')) return response({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshots: [] })
       if (url.includes('/koreader/books/')) return response(null)
+      if (url.startsWith('/api/v1/reading-progress')) return response({ items: [] })
       if (url.includes('/progress')) return response([])
       return response({})
     })
@@ -609,11 +878,321 @@ describe('DetailsTab cover surface', () => {
     expect((wrapper.get('input[aria-label="Added"]').element as HTMLInputElement).value).toBe('2022-07-13')
   })
 
+  it('keeps projected reading dates on their canonical day west of UTC', async () => {
+    mocks.user.value.settings.timezone = 'America/Sao_Paulo'
+    const wrapper = mountDetails(
+      makeBook({
+        readStatus: {
+          status: 'read',
+          source: 'auto',
+          startedAt: '2026-09-07T00:00:00.000Z',
+          finishedAt: '2026-09-07T00:00:00Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      }),
+    )
+    await flushPromises()
+
+    expect(wrapper.text().match(/Sep 7, 2026/g)).toHaveLength(2)
+    expect(wrapper.text()).not.toContain('Sep 6, 2026')
+  })
+
   it('hides added date editing when the user cannot edit metadata', async () => {
     mocks.hasPermission.mockReturnValue(false)
     const wrapper = mountDetails(makeBook())
     await flushPromises()
 
     expect(wrapper.find('button[aria-label="Edit date added"]').exists()).toBe(false)
+  })
+
+  it('shows read-aloud sync state and persists the toggle', async () => {
+    const book = makeBook({
+      files: [
+        {
+          ...makeBook().files[0]!,
+          mediaOverlay: { available: true, durationSeconds: 3600 },
+        },
+        {
+          id: 102,
+          format: 'm4b',
+          role: 'content',
+          sizeBytes: 5000,
+          absolutePath: '/books/cover-behavior-test.m4b',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          filename: 'cover-behavior-test.m4b',
+          durationSeconds: 3600,
+        },
+      ],
+      readAloudSync: {
+        mode: 'auto',
+        state: 'enabled',
+        unavailableReason: null,
+        overlayFileId: 101,
+        audioDurationSeconds: 3600,
+        overlayDurationSeconds: 3600,
+        durationDifferenceSeconds: 0,
+        durationDifferenceRatio: 0,
+        koreaderDownloadAvailable: true,
+      },
+    })
+    const updated = makeBook({ ...book, readAloudSync: { ...book.readAloudSync, mode: 'disabled', state: 'disabled' } })
+    mocks.api.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/read-aloud-sync')) return response(updated)
+      if (url.includes('/metadata-preferences/provider-links')) return response({ amazonDomain: 'amazon.com' })
+      if (url.includes('/metadata-score/weights')) return response({})
+      if (url.includes('/playback-state')) return response(null)
+      if (url.includes('/collections/membership')) return response([])
+      if (url.includes('/kobo-state')) return response({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshots: [] })
+      if (url.includes('/koreader/books/')) return response(null)
+      if (url.startsWith('/api/v1/reading-progress')) return response({ items: [] })
+      if (url.includes('/progress')) return response([])
+      return response({})
+    })
+    const wrapper = mountDetails(book)
+    await flushPromises()
+
+    const trigger = wrapper.get('[data-test="read-aloud-sync-trigger"]')
+    expect(trigger.text()).toBe('Synced')
+    expect(trigger.attributes('aria-label')).toBe('Read-aloud progress sync: Synced')
+    expect(wrapper.getComponent(ReadAloudSyncMeter).props()).toEqual({ aligned: true, muted: false })
+    expect(wrapper.find('[data-test="read-aloud-sync-attention"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="read-aloud-sync"]').text()).toContain('Enabled')
+    await wrapper.get('[data-test="read-aloud-sync-toggle"]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api).toHaveBeenCalledWith('/api/v1/books/12/read-aloud-sync', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'disabled' }),
+    })
+    expect(wrapper.get('[data-test="read-aloud-sync"]').text()).toContain('Disabled')
+    expect(wrapper.get('[data-test="read-aloud-sync-trigger"]').text()).toBe('Sync off')
+    expect(wrapper.getComponent(ReadAloudSyncMeter).props()).toEqual({ aligned: false, muted: true })
+    expect(wrapper.emitted('saved')).toEqual([[updated]])
+  })
+
+  it('explains a duration mismatch and exposes a localized save failure', async () => {
+    const book = makeBook({
+      files: [
+        { ...makeBook().files[0]!, mediaOverlay: { available: true, durationSeconds: 3600 } },
+        {
+          id: 102,
+          format: 'mp3',
+          role: 'content',
+          sizeBytes: 5000,
+          absolutePath: '/books/audio.mp3',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          filename: 'audio.mp3',
+          durationSeconds: 4000,
+        },
+      ],
+      readAloudSync: {
+        mode: 'auto',
+        state: 'unavailable',
+        unavailableReason: 'duration_mismatch',
+        overlayFileId: 101,
+        audioDurationSeconds: 4000,
+        overlayDurationSeconds: 3600,
+        durationDifferenceSeconds: 400,
+        durationDifferenceRatio: 400 / 3600,
+        koreaderDownloadAvailable: true,
+      },
+    })
+    const wrapper = mountDetails(book)
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="read-aloud-sync-trigger"]').text()).toBe('Sync issue')
+    expect(wrapper.find('[data-test="read-aloud-sync-attention"]').exists()).toBe(true)
+    expect(wrapper.get('[data-test="read-aloud-sync"]').text()).toContain('audiobook 1h 6m, read-aloud EPUB 1h')
+    mocks.api.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) } as Response)
+    await wrapper.get('[data-test="read-aloud-sync-toggle"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="status"]').text()).toBe('Could not update read-aloud progress sync.')
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+
+  describe('read-aloud sync with a second EPUB beside the read-along file', () => {
+    const readAlongEpub = { ...makeBook().files[0]!, mediaOverlay: { available: true, durationSeconds: 3600 } }
+    const originalEpub = {
+      id: 103,
+      format: 'epub',
+      role: 'content',
+      sizeBytes: 1200,
+      absolutePath: '/books/Title.epub',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      filename: 'Title.epub',
+      durationSeconds: null,
+    }
+    const unavailable = (unavailableReason: 'no_audio_files' | 'duration_mismatch', audioDurationSeconds: number | null) => ({
+      mode: 'auto' as const,
+      state: 'unavailable' as const,
+      unavailableReason,
+      overlayFileId: 101,
+      audioDurationSeconds,
+      overlayDurationSeconds: 3600,
+      durationDifferenceSeconds: audioDurationSeconds === null ? null : audioDurationSeconds - 3600,
+      durationDifferenceRatio: audioDurationSeconds === null ? null : (audioDurationSeconds - 3600) / 3600,
+      koreaderDownloadAvailable: true,
+    })
+
+    it('reports the EPUB copies as in sync when no audiobook is imported', async () => {
+      const wrapper = mountDetails(makeBook({ files: [readAlongEpub, originalEpub], readAloudSync: unavailable('no_audio_files', null) }))
+      await flushPromises()
+
+      const panel = wrapper.get('[data-test="read-aloud-sync"]').text()
+      expect(panel).toContain('EPUB copies only')
+      expect(panel).toContain('Web reader, Kobo, and KOReader positions stay in sync across the EPUB copies.')
+      expect(panel).not.toContain('Unavailable')
+      expect(wrapper.get('[data-test="read-aloud-sync-trigger"]').text()).toBe('Synced')
+      expect(wrapper.find('[data-test="read-aloud-sync-attention"]').exists()).toBe(false)
+      // A missing audiobook is already what the description asks for, so there is nothing to add.
+      expect(wrapper.find('[data-test="read-aloud-sync-audiobook-note"]').exists()).toBe(false)
+    })
+
+    it('keeps the reason an existing audiobook is left out beside the EPUB copies status', async () => {
+      const audiobook = { ...originalEpub, id: 104, format: 'mp3', absolutePath: '/books/audio.mp3', filename: 'audio.mp3', durationSeconds: 4000 }
+      const wrapper = mountDetails(
+        makeBook({ files: [readAlongEpub, originalEpub, audiobook], readAloudSync: unavailable('duration_mismatch', 4000) }),
+      )
+      await flushPromises()
+
+      expect(wrapper.get('[data-test="read-aloud-sync"]').text()).toContain('EPUB copies only')
+      expect(wrapper.get('[data-test="read-aloud-sync-trigger"]').text()).toBe('Partly synced')
+      expect(wrapper.getComponent(ReadAloudSyncMeter).props()).toEqual({ aligned: false, muted: false })
+      expect(wrapper.get('[data-test="read-aloud-sync-audiobook-note"]').text()).toContain('audiobook 1h 6m, read-aloud EPUB 1h')
+      expect(wrapper.find('[data-test="read-aloud-sync-attention"]').exists()).toBe(true)
+    })
+
+    it('shows no sync control for a lone read-along EPUB, which has nothing to sync with', async () => {
+      const wrapper = mountDetails(makeBook({ files: [readAlongEpub], readAloudSync: unavailable('no_audio_files', null) }))
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="read-aloud-sync-trigger"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="read-aloud-sync"]').exists()).toBe(false)
+    })
+  })
+
+  it('shows no sync control for an audiobook without a read-along EPUB', async () => {
+    const wrapper = mountDetails(
+      makeBook({
+        files: [
+          {
+            id: 102,
+            format: 'm4b',
+            role: 'primary',
+            sizeBytes: 5000,
+            absolutePath: '/books/audio.m4b',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            filename: 'audio.m4b',
+            durationSeconds: 3600,
+          },
+        ],
+        readAloudSync: {
+          mode: 'auto',
+          state: 'unavailable',
+          unavailableReason: 'no_media_overlay_epub',
+          overlayFileId: null,
+          audioDurationSeconds: 3600,
+          overlayDurationSeconds: null,
+          durationDifferenceSeconds: null,
+          durationDifferenceRatio: null,
+          koreaderDownloadAvailable: false,
+        },
+      }),
+    )
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="read-aloud-sync-trigger"]').exists()).toBe(false)
+  })
+
+  describe('read-aloud invitation and cover stack', () => {
+    const epub = makeBook().files[0]!
+    const m4b = { ...epub, id: 102, format: 'm4b', role: 'content', absolutePath: '/books/audio.m4b', filename: 'audio.m4b', durationSeconds: 3600 }
+    const slot = { source: 'extracted' as const, updatedAt: '2026-01-01T00:00:00.000Z', width: null, height: null }
+    const createRoute = { name: 'book-detail', params: { bookId: 12 }, query: { tab: 'files', readAloud: 'create' } }
+
+    function answerCapability(capability: Record<string, unknown>) {
+      const previous = mocks.api.getMockImplementation()!
+      mocks.api.mockImplementation(async (input, init) =>
+        String(input).endsWith('/books/12/read-aloud') ? response(capability) : previous(input, init),
+      )
+    }
+
+    const canCreate = { workerConfigured: true, eligible: true, reason: null, existingReadAlongs: [] }
+
+    it('offers a read-aloud beside the format chips and in the sync row, and sends both to the Files tab', async () => {
+      answerCapability(canCreate)
+      const wrapper = mountDetails(makeBook({ files: [epub, m4b] }))
+      await flushPromises()
+
+      const sync = wrapper.get('[data-test="read-aloud-sync"]')
+      expect(sync.text()).toContain('No read-aloud EPUB yet')
+      expect(sync.text()).not.toContain('A read-aloud EPUB with media overlays is required.')
+      expect(wrapper.find('[data-test="read-aloud-sync-toggle"]').exists()).toBe(false)
+
+      await wrapper.get('[data-test="read-aloud-sync-create"]').trigger('click')
+      expect(mocks.push).toHaveBeenLastCalledWith(createRoute)
+
+      wrapper.findComponent(ReadAloudInviteChip).vm.$emit('create')
+      expect(mocks.push).toHaveBeenLastCalledWith(createRoute)
+    })
+
+    it.each([
+      ['the worker is offline', { workerConfigured: true, eligible: false, reason: 'worker_unavailable', existingReadAlongs: [] }],
+      ['no worker is configured', { workerConfigured: false, eligible: false, reason: 'worker_not_configured', existingReadAlongs: [] }],
+      ['a read-aloud already exists', { ...canCreate, existingReadAlongs: [{ fileId: 9 }] }],
+    ])('keeps the unavailable sync control hidden when %s', async (_name, capability) => {
+      answerCapability(capability)
+      const wrapper = mountDetails(makeBook({ files: [epub, m4b] }))
+      await flushPromises()
+
+      expect(wrapper.findComponent(ReadAloudInviteChip).exists()).toBe(false)
+      expect(wrapper.find('[data-test="read-aloud-sync-create"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="read-aloud-sync"]').exists()).toBe(false)
+    })
+
+    it('does not ask, or offer, without the permission', async () => {
+      mocks.hasPermission.mockImplementation((name) => name !== 'library_generate_read_aloud')
+      answerCapability(canCreate)
+      const wrapper = mountDetails(makeBook({ files: [epub, m4b] }))
+      await flushPromises()
+
+      expect(mocks.api).not.toHaveBeenCalledWith('/api/v1/books/12/read-aloud', expect.anything())
+      expect(wrapper.findComponent(ReadAloudInviteChip).exists()).toBe(false)
+      expect(wrapper.find('[data-test="read-aloud-sync-create"]').exists()).toBe(false)
+    })
+
+    it('stacks the two covers when both slots hold art, the audiobook in front for a square book', async () => {
+      const wrapper = mountDetails(
+        makeBook({ files: [epub, m4b], coverMedia: ['ebook', 'audio'], covers: { ebook: slot, audio: slot }, coverAspectRatio: '1/1' }),
+      )
+      await flushPromises()
+
+      expect(wrapper.findComponent(BookCoverStack).props('face')).toBe('audio')
+    })
+
+    it('opens the lightbox on the cover that was in front when it was chosen', async () => {
+      const wrapper = mountDetails(makeBook({ files: [epub, m4b], coverMedia: ['ebook', 'audio'], covers: { ebook: slot, audio: slot } }))
+      await flushPromises()
+
+      wrapper.findComponent(BookCoverStack).vm.$emit('open', 'ebook')
+      await flushPromises()
+
+      const lightbox = wrapper.findComponent(BookCoverLightbox)
+      expect(lightbox.props('open')).toBe(true)
+      expect(lightbox.props('medium')).toBe('ebook')
+    })
+
+    it.each([
+      ['only the book', { ebook: slot, audio: null }],
+      ['only the audiobook', { ebook: null, audio: slot }],
+    ])('keeps the single cover with %s', async (_name, covers) => {
+      const wrapper = mountDetails(makeBook({ files: [epub, m4b], covers }))
+      await flushPromises()
+
+      expect(wrapper.findComponent(BookCoverStack).exists()).toBe(false)
+    })
   })
 })

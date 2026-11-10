@@ -1,9 +1,10 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { Permission } from '@bookorbit/types';
+import { AuthenticationMethod, Permission } from '@bookorbit/types';
 
 import { FORBIDDEN_PERMISSION_KEY, type ForbiddenPermissionRule } from '../decorators/forbid-permission.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { ANY_PERMISSION_KEY } from '../decorators/require-any-permission.decorator';
 import { PERMISSION_KEY } from '../decorators/require-permission.decorator';
 import { PermissionService } from '../services/permission.service';
 import { RequestUser } from '../types/request-user';
@@ -40,6 +41,17 @@ export class PermissionGuard implements CanActivate {
       throw new ForbiddenException(forbidden.message ?? `Forbidden permission: ${forbidden.permission}`);
     }
 
+    const anyOf = this.reflector.getAllAndOverride<Permission[] | undefined>(ANY_PERMISSION_KEY, [context.getHandler()]);
+    if (anyOf) {
+      const allowed =
+        user.authenticationMethod === AuthenticationMethod.AppPassword
+          ? anyOf.filter((permission) => !PRIMARY_AUTH_ONLY_PERMISSIONS.has(permission))
+          : anyOf;
+      if (allowed.some((permission) => this.permissionService.userHas(user, permission))) return true;
+      if (allowed.length === 0) throw new ForbiddenException('Primary authentication required for administrative operations');
+      throw new ForbiddenException(`Missing permission: ${anyOf.join(' or ')}`);
+    }
+
     const required = this.reflector.getAllAndOverride<Permission | Permission[] | undefined>(PERMISSION_KEY, [
       context.getHandler(),
       context.getClass(),
@@ -47,7 +59,10 @@ export class PermissionGuard implements CanActivate {
     if (!required) return true;
 
     const permissions = Array.isArray(required) ? required : [required];
-    if (user.authMethod === 'app_password' && permissions.some((permission) => PRIMARY_AUTH_ONLY_PERMISSIONS.has(permission))) {
+    if (
+      user.authenticationMethod === AuthenticationMethod.AppPassword &&
+      permissions.some((permission) => PRIMARY_AUTH_ONLY_PERMISSIONS.has(permission))
+    ) {
       throw new ForbiddenException('Primary authentication required for administrative operations');
     }
     const missing = permissions.find((permission) => !this.permissionService.userHas(user, permission));

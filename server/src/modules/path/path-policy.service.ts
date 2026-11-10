@@ -10,14 +10,28 @@ const MAX_BROWSE_PATH_LENGTH = 4096;
 @Injectable()
 export class PathPolicyService {
   private readonly browseRoot: string;
+  private readonly appDataPath: string | null;
   private canonicalBrowseRootPromise: Promise<string> | null = null;
+  private canonicalAppDataPathPromise: Promise<string | null> | null = null;
 
   constructor(@Inject(storageConfig.KEY) storage: ConfigType<typeof storageConfig>) {
     this.browseRoot = resolve(storage.libraryBrowseRoot);
+    this.appDataPath = storage.appDataPath ? resolve(storage.appDataPath) : null;
   }
 
   getBrowseRoot(): string {
     return this.browseRoot;
+  }
+
+  getAppDataPath(): string | null {
+    return this.appDataPath;
+  }
+
+  /** The data folder with symlinks resolved, so it matches paths read from the disk. */
+  getCanonicalAppDataPath(): Promise<string | null> {
+    if (!this.appDataPath) return Promise.resolve(null);
+    this.canonicalAppDataPathPromise ??= realpath(this.appDataPath).catch(() => this.appDataPath);
+    return this.canonicalAppDataPathPromise;
   }
 
   async resolveBrowsePath(rawPath?: string | null): Promise<string> {
@@ -40,8 +54,23 @@ export class PathPolicyService {
   async isWithinBrowseRoot(rawPath: string): Promise<boolean> {
     if (typeof rawPath !== 'string' || rawPath.length > MAX_BROWSE_PATH_LENGTH) return false;
 
+    return this.isWithinRoot(rawPath, this.browseRoot, await this.getCanonicalBrowseRoot());
+  }
+
+  async assertWithinRoot(rawPath: string, rawRoot: string): Promise<string> {
+    const root = resolve(rawRoot);
+    const canonicalRoot = await canonicalizeWithExistingAncestor(root);
+    if (!(await this.isWithinRoot(rawPath, root, canonicalRoot))) {
+      throw new ForbiddenException('Resolved path is outside the authorized root');
+    }
+    return resolve(rawPath);
+  }
+
+  private async isWithinRoot(rawPath: string, rootPath: string, canonicalRoot: string): Promise<boolean> {
+    if (typeof rawPath !== 'string' || rawPath.length > MAX_BROWSE_PATH_LENGTH) return false;
+
     const resolvedPath = resolve(rawPath);
-    const lexicalRelativePath = relative(this.browseRoot, resolvedPath);
+    const lexicalRelativePath = relative(rootPath, resolvedPath);
     if (lexicalRelativePath === '..' || lexicalRelativePath.startsWith(`..${sep}`) || isAbsolute(lexicalRelativePath)) return false;
 
     const suffixSegments: string[] = [];
@@ -65,8 +94,7 @@ export class PathPolicyService {
       current = parent;
     }
 
-    const root = await this.getCanonicalBrowseRoot();
-    const canonicalRelativePath = relative(root, canonicalPath);
+    const canonicalRelativePath = relative(canonicalRoot, canonicalPath);
     return (
       canonicalRelativePath === '' ||
       (!canonicalRelativePath.startsWith(`..${sep}`) && canonicalRelativePath !== '..' && !isAbsolute(canonicalRelativePath))

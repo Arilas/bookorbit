@@ -15,7 +15,10 @@ function makePrefs(providers: MetadataProviderKey[] = [key('goodreads'), key('go
     },
     {} as Record<MetadataField, FieldPreference>,
   )
-  return { fields, options: { genres: { mode: 'merge', blocklist: [], maxCount: null }, saveProviderIds: true } }
+  return {
+    fields,
+    options: { genres: { mode: 'merge', blocklist: [], maxCount: null }, saveProviderIds: true, providerIdMode: 'preferExisting' },
+  }
 }
 
 const LIBRARIES = [
@@ -194,15 +197,25 @@ describe('useFieldRuleScopes', () => {
     expect(body.overrides).toEqual({})
   })
 
-  it('applies a provider action across every field in one edit', async () => {
+  it('applies a provider action across every field in one edit, leaving the Audiobook cover order alone', async () => {
     const { api } = await setup()
     api.applyProviderToAllFields(key('google'), 'first')
     await nextTick()
 
-    expect(api.unsavedFields.value.size).toBe(ALL_METADATA_FIELDS.length)
-    for (const field of ALL_METADATA_FIELDS) {
+    const reordered = ALL_METADATA_FIELDS.filter((field) => field !== 'audioCover')
+    expect([...api.unsavedFields.value].sort()).toEqual([...reordered].sort())
+    for (const field of reordered) {
       expect(api.activeFields.value?.[field].providers).toEqual(['google', 'goodreads'])
     }
+    expect(api.activeFields.value?.audioCover.providers).toEqual(['goodreads', 'google'])
+  })
+
+  it('still removes a provider from the Audiobook cover rule when removing it everywhere', async () => {
+    const { api } = await setup()
+    api.applyProviderToAllFields(key('google'), 'remove')
+    await nextTick()
+
+    expect(api.activeFields.value?.audioCover.providers).toEqual(['goodreads'])
   })
 
   it('removing a provider everywhere leaves the other providers in order', async () => {
@@ -234,7 +247,11 @@ describe('useFieldRuleScopes', () => {
 
   it('discards a changed advanced option back to the stored value', async () => {
     const { api } = await setup()
-    api.setOptions({ genres: { mode: 'firstProvider', blocklist: [], maxCount: 999 }, saveProviderIds: false })
+    api.setOptions({
+      genres: { mode: 'firstProvider', blocklist: [], maxCount: 999 },
+      saveProviderIds: false,
+      providerIdMode: 'existingOnly',
+    })
     await nextTick()
 
     api.discard()
@@ -243,13 +260,18 @@ describe('useFieldRuleScopes', () => {
     expect(api.isDirty.value).toBe(false)
     expect(api.optionsDraft.value?.genres.maxCount).toBeNull()
     expect(api.optionsDraft.value?.saveProviderIds).toBe(true)
+    expect(api.optionsDraft.value?.providerIdMode).toBe('preferExisting')
   })
 
   it('counts a changed advanced option as unsaved on the global scope', async () => {
     const { api } = await setup()
     expect(api.isDirty.value).toBe(false)
 
-    api.setOptions({ genres: { mode: 'firstProvider', blocklist: [], maxCount: 12 }, saveProviderIds: false })
+    api.setOptions({
+      genres: { mode: 'firstProvider', blocklist: [], maxCount: 12 },
+      saveProviderIds: false,
+      providerIdMode: 'existingOnly',
+    })
     await nextTick()
 
     expect(api.isDirty.value).toBe(true)
@@ -257,5 +279,6 @@ describe('useFieldRuleScopes', () => {
     const put = requests.find((request) => request.method === 'PUT')
     const body = put?.body as MetadataFetchPreferences
     expect(body.options?.genres.maxCount).toBe(12)
+    expect(body.options?.providerIdMode).toBe('existingOnly')
   })
 })

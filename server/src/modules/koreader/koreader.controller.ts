@@ -67,7 +67,7 @@ export class KoreaderController {
   @UseGuards(KoreaderAuthGuard)
   @Put('syncs/progress')
   async saveProgress(@CurrentUser() user: RequestUser, @Body() dto: KoreaderSaveProgressDto) {
-    return this.koreaderService.saveProgress(user.id, dto);
+    return this.koreaderService.saveProgress(user, dto);
   }
 
   @Public()
@@ -83,7 +83,7 @@ export class KoreaderController {
   @RequirePermission(Permission.KoreaderSync)
   @Post('credentials')
   async createCredentials(@CurrentUser() user: RequestUser, @Body() dto: CreateKoreaderUserDto) {
-    await this.koreaderService.createCredentials(user.id, dto.username, dto.password);
+    await this.koreaderService.createCredentials(user.id, dto.username, dto.password, dto.readAloudDelivery);
     return { success: true };
   }
 
@@ -172,6 +172,12 @@ export class KoreaderController {
   @Get('unmatched-books')
   listUnmatchedBooks(@CurrentUser() user: RequestUser) {
     return this.hashLinkService.listUnmatchedBooks(user);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Get('unmatched-books/suggestions')
+  listUnmatchedBookSuggestions(@CurrentUser() user: RequestUser) {
+    return this.hashLinkService.listUnmatchedBookSuggestions(user);
   }
 
   @RequirePermission(Permission.KoreaderSync)

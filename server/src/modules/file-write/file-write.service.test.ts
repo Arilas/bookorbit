@@ -1,6 +1,8 @@
+vi.mock('../metadata/extractors/audio.extractor', () => ({ probeAudioChapters: vi.fn() }));
+import { probeAudioChapters } from '../metadata/extractors/audio.extractor';
 import { ConfigService } from '@nestjs/config';
 import type { MockedFunction } from 'vitest';
-import { readdir, readFile, stat } from 'fs/promises';
+import { readFile, stat } from 'fs/promises';
 import {
   AUDIO_BOOK_FILE_WRITE_FIELDS,
   EPUB_BOOK_FILE_WRITE_FIELDS,
@@ -10,31 +12,43 @@ import {
 } from '@bookorbit/types';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 
-const { computeFileHashMock } = vi.hoisted(() => ({
+const { computeFileHashMock, inspectCoverImageMock, probeAudioDurationMsMock } = vi.hoisted(() => ({
   computeFileHashMock: vi.fn(),
+  inspectCoverImageMock: vi.fn(),
+  probeAudioDurationMsMock: vi.fn(),
 }));
 
 vi.mock('../scanner/lib/hash', () => ({
   computeFileHash: computeFileHashMock,
 }));
 
-import { FileWriteService } from './file-write.service';
+vi.mock('./formats/shared/cover-image', () => ({
+  inspectCoverImage: inspectCoverImageMock,
+}));
+
+vi.mock('./formats/audio/audio-metadata-embedder', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./formats/audio/audio-metadata-embedder')>()),
+  probeAudioDurationMs: probeAudioDurationMsMock,
+}));
+
+import { ChapterWriteUnavailableError, FileWriteService } from './file-write.service';
 import { bookOperationLockKey } from './file-lock.service';
 
 vi.mock('fs/promises', async () => {
   const actual = await vi.importActual('fs/promises');
   return {
     ...actual,
-    readdir: vi.fn(),
     readFile: vi.fn(),
     stat: vi.fn(),
   };
 });
 
-const mockReaddir = readdir as MockedFunction<typeof readdir>;
 const mockReadFile = readFile as MockedFunction<typeof readFile>;
 const mockStat = stat as MockedFunction<typeof stat>;
 const POST_WRITE_MTIME = new Date('2026-07-22T12:34:56.789Z');
+/** Size on disk per path; anything not listed is 57 bytes. The service checks it before writing. */
+const diskSizes = new Map<string, number>();
+const statResult = (size: number) => ({ mtime: POST_WRITE_MTIME, size: BigInt(size), ino: 9_007_199_254_740_993n }) as never;
 
 const DEFAULT_LIB_CONFIG = {
   fileWriteEnabled: true,
@@ -51,18 +65,23 @@ const DEFAULT_LIB_CONFIG = {
   fileWriteKindleMaxFileSizeMb: 100,
   fileWriteAudioEnabled: true,
   fileWriteAudioMaxFileSizeMb: 500,
+  fileWriteAllFiles: false,
+  fileWriteReadAlongEnabled: false,
+  fileWriteReadAlongMaxFileSizeMb: 1000,
 };
 
 describe('FileWriteService', () => {
-  function makeService(configValues: Record<string, unknown> = {}) {
+  function makeService(configValues: Record<string, unknown> = {}, coverStore = { resolve: vi.fn().mockResolvedValue(null) }) {
     const fileWriteRepo = {
       findPrimaryFileForBook: vi.fn(),
       findFilesForBook: vi.fn(),
+      findFileWriteScopeForBook: vi.fn().mockResolvedValue(null),
       findLibraryFileWriteConfig: vi.fn().mockResolvedValue({ ...DEFAULT_LIB_CONFIG }),
       loadPayload: vi.fn(),
       findWriteLog: vi.fn(),
       findNonMissingPrimaryFilesByLibrary: vi.fn(),
       findLibraryWriteSettingsForBook: vi.fn(),
+      recordChapterWriteProvenance: vi.fn(),
       insertLog: vi.fn().mockResolvedValue(undefined),
       setLastWrittenAt: vi.fn().mockResolvedValue(undefined),
       updateFileStateAfterMetadataWrite: vi.fn().mockResolvedValue(undefined),
@@ -73,13 +92,21 @@ describe('FileWriteService', () => {
     };
     const registry = {
       supports: vi.fn().mockReturnValue(true),
-      get: vi.fn().mockReturnValue(writer),
+      get: vi.fn().mockImplementation(() => {
+        vi.mocked(probeAudioChapters).mockImplementation(() =>
+          Promise.resolve({
+            durationMs: 60_000,
+            chapters: (writer.write.mock.calls.at(-1)?.[2]?.chapters ?? []).map(({ title, startMs }) => ({ title, startMs })),
+          }),
+        );
+        return writer;
+      }),
     };
     const lockService = {
       withLock: vi.fn().mockImplementation(async (_path: string, fn: () => Promise<unknown>) => fn()),
     };
     const config = {
-      get: vi.fn().mockImplementation((key: string) => (key === 'storage.appDataPath' ? '/books' : configValues[key])),
+      get: vi.fn().mockImplementation((key: string) => configValues[key]),
     } as unknown as ConfigService;
 
     const notificationService = {
@@ -93,26 +120,34 @@ describe('FileWriteService', () => {
       config,
       notificationService as never,
       selfWriteRegistry,
+      coverStore as never,
+      {
+        recordCurrentRevision: vi.fn(),
+        withWriteSnapshot: vi.fn((_id, work) => work(() => fileWriteRepo.setLastWrittenAt(_id, new Date()))),
+      } as never,
     );
 
-    return { service, fileWriteRepo, registry, writer, lockService, notificationService, selfWriteRegistry };
+    return { service, fileWriteRepo, registry, writer, lockService, notificationService, selfWriteRegistry, coverStore };
   }
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockReaddir.mockReset();
     mockReadFile.mockReset();
     mockStat.mockReset();
-    mockStat.mockResolvedValue({ mtime: POST_WRITE_MTIME, size: 57n, ino: 9_007_199_254_740_993n } as never);
+    diskSizes.clear();
+    mockStat.mockImplementation((path) => Promise.resolve(statResult(diskSizes.get(String(path)) ?? 57)));
     computeFileHashMock.mockReset();
     computeFileHashMock.mockRejectedValue(new Error('missing file'));
+    inspectCoverImageMock.mockReset();
+    inspectCoverImageMock.mockResolvedValue({ mediaType: 'image/jpeg', extension: 'jpg' });
+    probeAudioDurationMsMock.mockReset();
   });
 
   describe('resolveBookFileWriteStatus', () => {
     it('returns enabled for a writable primary file', () => {
       const { service } = makeService();
 
-      expect(service.resolveBookFileWriteStatus(DEFAULT_LIB_CONFIG, [{ id: 1, format: 'epub', sizeBytes: 1024 }], 1)).toEqual({
+      expect(service.resolveBookFileWriteStatus(DEFAULT_LIB_CONFIG, [{ id: 1, format: 'epub', sizeBytes: 1024 }], 1)).toMatchObject({
         enabled: true,
         reason: null,
         writableFormats: ['epub'],
@@ -125,7 +160,7 @@ describe('FileWriteService', () => {
 
       expect(
         service.resolveBookFileWriteStatus({ ...DEFAULT_LIB_CONFIG, fileWriteWriteCover: false }, [{ id: 1, format: 'epub', sizeBytes: 1024 }], 1),
-      ).toEqual({
+      ).toMatchObject({
         enabled: true,
         reason: null,
         writableFormats: ['epub'],
@@ -141,13 +176,13 @@ describe('FileWriteService', () => {
         service.resolveBookFileWriteStatus(
           DEFAULT_LIB_CONFIG,
           [
-            { id: 1, format: 'mp3', sizeBytes: 1024 },
-            { id: 2, format: 'm4b', sizeBytes: 2048 },
-            { id: 3, format: 'opus', sizeBytes: 4096 },
+            { id: 1, format: 'mp3', sizeBytes: 1024, role: 'content' },
+            { id: 2, format: 'm4b', sizeBytes: 2048, role: 'content' },
+            { id: 3, format: 'opus', sizeBytes: 4096, role: 'content' },
           ],
           1,
         ),
-      ).toEqual({
+      ).toMatchObject({
         enabled: true,
         reason: null,
         writableFormats: ['mp3', 'm4b'],
@@ -177,7 +212,7 @@ describe('FileWriteService', () => {
           [{ id: 1, format: 'epub', sizeBytes: 2 * 1024 * 1024 }],
           1,
         ),
-      ).toEqual({
+      ).toMatchObject({
         enabled: false,
         reason: 'file_exceeds_size_limit',
         writableFormats: [],
@@ -189,7 +224,7 @@ describe('FileWriteService', () => {
       const { service, registry } = makeService();
       registry.supports.mockImplementation((value: string) => value === 'fb2');
 
-      expect(service.resolveBookFileWriteStatus(DEFAULT_LIB_CONFIG, [{ id: 1, format: 'fb2', sizeBytes: 1024 }], 1)).toEqual({
+      expect(service.resolveBookFileWriteStatus(DEFAULT_LIB_CONFIG, [{ id: 1, format: 'fb2', sizeBytes: 1024 }], 1)).toMatchObject({
         enabled: true,
         reason: null,
         writableFormats: ['fb2'],
@@ -203,7 +238,7 @@ describe('FileWriteService', () => {
 
       expect(
         service.resolveBookFileWriteStatus({ ...DEFAULT_LIB_CONFIG, fileWriteFb2Enabled: false }, [{ id: 1, format: 'fb2', sizeBytes: 1024 }], 1),
-      ).toEqual({
+      ).toMatchObject({
         enabled: false,
         reason: 'format_disabled',
         writableFormats: [],
@@ -221,7 +256,7 @@ describe('FileWriteService', () => {
           [{ id: 1, format: 'fb2', sizeBytes: 2 * 1024 * 1024 }],
           1,
         ),
-      ).toEqual({
+      ).toMatchObject({
         enabled: false,
         reason: 'file_exceeds_size_limit',
         writableFormats: [],
@@ -247,7 +282,7 @@ describe('FileWriteService', () => {
       const { service, registry } = makeService();
       registry.supports.mockImplementation((value: string) => value === format);
 
-      expect(service.resolveBookFileWriteStatus(DEFAULT_LIB_CONFIG, [{ id: 1, format, sizeBytes: 1024 }], 1)).toEqual({
+      expect(service.resolveBookFileWriteStatus(DEFAULT_LIB_CONFIG, [{ id: 1, format, sizeBytes: 1024 }], 1)).toMatchObject({
         enabled: true,
         reason: null,
         writableFormats: [format],
@@ -261,7 +296,7 @@ describe('FileWriteService', () => {
 
       expect(
         service.resolveBookFileWriteStatus({ ...DEFAULT_LIB_CONFIG, fileWriteKindleEnabled: false }, [{ id: 1, format, sizeBytes: 1024 }], 1),
-      ).toEqual({
+      ).toMatchObject({
         enabled: false,
         reason: 'format_disabled',
         writableFormats: [],
@@ -279,7 +314,7 @@ describe('FileWriteService', () => {
           [{ id: 1, format: 'azw3', sizeBytes: 2 * 1024 * 1024 }],
           1,
         ),
-      ).toEqual({
+      ).toMatchObject({
         enabled: false,
         reason: 'file_exceeds_size_limit',
         writableFormats: [],
@@ -395,7 +430,7 @@ describe('FileWriteService', () => {
   });
 
   it('writes successfully with lock, cover loading, logging, and lastWrittenAt update', async () => {
-    const { service, fileWriteRepo, writer, lockService } = makeService();
+    const { service, fileWriteRepo, writer, lockService, coverStore } = makeService();
 
     fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
       id: 1,
@@ -409,7 +444,7 @@ describe('FileWriteService', () => {
     fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteWriteCover: true });
 
     const coverBytes = Buffer.from('cover');
-    mockReaddir.mockResolvedValue(['cover_extracted.jpg', 'cover_custom.png'] as never);
+    coverStore.resolve.mockResolvedValue('/books/covers/5/ebook/cover_custom.png');
     mockReadFile.mockResolvedValue(coverBytes as never);
 
     writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 13 });
@@ -424,7 +459,7 @@ describe('FileWriteService', () => {
       expect.objectContaining({ title: 'Dune', coverBytes }),
       expect.objectContaining({ dryRun: false }),
     );
-    expect(mockReadFile).toHaveBeenCalledWith('/books/covers/5/cover_custom.png');
+    expect(mockReadFile).toHaveBeenCalledWith('/books/covers/5/ebook/cover_custom.png');
 
     expect(fileWriteRepo.insertLog).toHaveBeenCalledTimes(1);
     expect(fileWriteRepo.setLastWrittenAt).toHaveBeenCalledWith(5, expect.any(Date));
@@ -494,11 +529,12 @@ describe('FileWriteService', () => {
     fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
     fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteWriteCover: false });
     writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
-    mockStat.mockRejectedValueOnce(new Error('temporary stat failure'));
+    mockStat.mockResolvedValueOnce(statResult(40)).mockRejectedValueOnce(new Error('temporary stat failure'));
 
     await expect(service.writeToFile(5, 'auto')).resolves.toEqual({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
 
-    expect(mockStat).toHaveBeenCalledTimes(2);
+    // One pre-write size check, then a failed and a successful post-write refresh.
+    expect(mockStat).toHaveBeenCalledTimes(3);
     expect(fileWriteRepo.updateFileStateAfterMetadataWrite).toHaveBeenCalledTimes(1);
   });
 
@@ -519,7 +555,8 @@ describe('FileWriteService', () => {
 
     await expect(service.writeToFile(5, 'auto')).resolves.toEqual({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
 
-    expect(mockStat).toHaveBeenCalledTimes(2);
+    // One pre-write size check, then two post-write refresh attempts.
+    expect(mockStat).toHaveBeenCalledTimes(3);
     expect(fileWriteRepo.updateFileStateAfterMetadataWrite).toHaveBeenCalledTimes(2);
     expect(fileWriteRepo.setLastWrittenAt).toHaveBeenCalledTimes(1);
   });
@@ -573,7 +610,8 @@ describe('FileWriteService', () => {
       reason: 'post-write file state refresh failed',
     });
 
-    expect(mockStat).toHaveBeenCalledTimes(3);
+    // The pre-write size check falls back to the stored size, then all three refresh attempts fail.
+    expect(mockStat).toHaveBeenCalledTimes(4);
     expect(fileWriteRepo.updateFileStateAfterMetadataWrite).not.toHaveBeenCalled();
     expect(fileWriteRepo.setLastWrittenAt).not.toHaveBeenCalled();
     expect(fileWriteRepo.insertLog).toHaveBeenCalledWith(
@@ -684,6 +722,7 @@ describe('FileWriteService', () => {
 
   it('skips when cbz file exceeds cbxMaxFileSizeMb', async () => {
     const { service, fileWriteRepo } = makeService();
+    diskSizes.set('/books/x.cbz', 600 * 1024 * 1024);
     fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
       id: 1,
       absolutePath: '/books/x.cbz',
@@ -705,8 +744,36 @@ describe('FileWriteService', () => {
     expect(result.reason).toBe('file exceeds size limit');
   });
 
-  it('writes supported multi-track audio files and skips unsupported audio tracks explicitly', async () => {
-    const { service, fileWriteRepo, registry, writer, lockService } = makeService();
+  it('embeds only the book cover into an EPUB, never the audiobook cover', async () => {
+    const coverStore = { resolve: vi.fn().mockResolvedValue('/books/covers/5/ebook/cover_extracted.jpg') };
+    const { service, fileWriteRepo, writer } = makeService({}, coverStore);
+    fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
+      id: 1,
+      absolutePath: '/books/lib/book.epub',
+      format: 'epub',
+      sizeBytes: 40,
+      fileHash: 'oldhash',
+      libraryId: 2,
+    });
+    fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Dune' });
+    fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteWriteCover: true });
+    mockReadFile.mockResolvedValue(Buffer.from('portrait') as never);
+    writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['coverBytes'], durationMs: 5 });
+
+    await service.writeToFile(5, 'auto');
+
+    expect(coverStore.resolve).toHaveBeenCalledWith(5, { medium: 'ebook', variant: 'cover', strict: true });
+    expect(mockReadFile).toHaveBeenCalledWith('/books/covers/5/ebook/cover_extracted.jpg');
+    expect(writer.write).toHaveBeenCalledWith(
+      '/books/lib/book.epub',
+      expect.objectContaining({ coverBytes: Buffer.from('portrait') }),
+      expect.anything(),
+    );
+  });
+
+  it('writes no cover into audio tracks when the book has no audiobook cover of its own', async () => {
+    const coverStore = { resolve: vi.fn().mockResolvedValue(null) };
+    const { service, fileWriteRepo, writer } = makeService({}, coverStore);
     fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
       id: 1,
       absolutePath: '/books/audio/book.m4b',
@@ -716,14 +783,65 @@ describe('FileWriteService', () => {
       libraryId: 2,
     });
     fileWriteRepo.findFilesForBook.mockResolvedValue([
-      { id: 1, absolutePath: '/books/audio/book.m4b', format: 'm4b', sizeBytes: 100, fileHash: 'm4bhash', libraryId: 2 },
-      { id: 2, absolutePath: '/books/audio/track-02.mp3', format: 'mp3', sizeBytes: 110, fileHash: 'mp3hash', libraryId: 2 },
-      { id: 3, absolutePath: '/books/audio/bonus.opus', format: 'opus', sizeBytes: 90, fileHash: 'opushash', libraryId: 2 },
+      { id: 1, absolutePath: '/books/audio/book.m4b', format: 'm4b', sizeBytes: 100, fileHash: 'm4bhash', libraryId: 2, role: 'content' },
+    ]);
+    fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Audio Book' });
+    fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteAudioEnabled: true, fileWriteWriteCover: true });
+    writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+
+    await service.writeToFile(20, 'auto');
+
+    expect(coverStore.resolve).toHaveBeenCalledWith(20, { medium: 'audio', variant: 'cover', strict: true });
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(writer.write).toHaveBeenCalledWith('/books/audio/book.m4b', expect.objectContaining({ coverBytes: null }), expect.anything());
+  });
+
+  it('writes supported multi-track audio files and skips unsupported audio tracks explicitly', async () => {
+    const { service, fileWriteRepo, registry, writer, lockService, coverStore } = makeService();
+    fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
+      id: 1,
+      absolutePath: '/books/audio/book.m4b',
+      format: 'm4b',
+      sizeBytes: 100,
+      fileHash: 'm4bhash',
+      libraryId: 2,
+    });
+    fileWriteRepo.findFilesForBook.mockResolvedValue([
+      {
+        id: 1,
+        absolutePath: '/books/audio/book.m4b',
+        format: 'm4b',
+        sizeBytes: 100,
+        fileHash: 'm4bhash',
+        libraryId: 2,
+        role: 'content',
+        sortOrder: 0,
+      },
+      {
+        id: 2,
+        absolutePath: '/books/audio/track-02.mp3',
+        format: 'mp3',
+        sizeBytes: 110,
+        fileHash: 'mp3hash',
+        libraryId: 2,
+        role: 'content',
+        sortOrder: 1,
+      },
+      {
+        id: 3,
+        absolutePath: '/books/audio/bonus.opus',
+        format: 'opus',
+        sizeBytes: 90,
+        fileHash: 'opushash',
+        libraryId: 2,
+        role: 'content',
+        sortOrder: 2,
+      },
     ]);
     registry.supports.mockImplementation((format: string) => ['m4b', 'mp3'].includes(format));
     fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Audio Book' });
     fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteAudioEnabled: true, fileWriteWriteCover: true });
-    mockReaddir.mockResolvedValue(['cover_custom.jpg'] as never);
+    coverStore.resolve.mockResolvedValue('/books/covers/20/audio/cover_custom.jpg');
     mockReadFile.mockResolvedValue(Buffer.from('cover') as never);
     writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['coverBytes'], durationMs: 5 });
     computeFileHashMock.mockResolvedValueOnce('new-m4b').mockResolvedValueOnce('new-mp3');
@@ -736,17 +854,18 @@ describe('FileWriteService', () => {
     expect(mockReadFile).toHaveBeenCalledTimes(1);
     expect(lockService.withLock).toHaveBeenCalledTimes(3);
     expect(lockService.withLock).toHaveBeenNthCalledWith(1, bookOperationLockKey(20), expect.any(Function));
+    // The unsupported opus track still holds position 3, so the total counts the whole recording.
     expect(writer.write).toHaveBeenNthCalledWith(
       1,
       '/books/audio/book.m4b',
       expect.objectContaining({ title: 'Audio Book', coverBytes: Buffer.from('cover') }),
-      expect.objectContaining({ dryRun: false, isMultiTrackAudio: true, trackNumber: 1, trackTotal: 2, trackTitle: 'book' }),
+      expect.objectContaining({ dryRun: false, isMultiTrackAudio: true, trackNumber: 1, trackTotal: 3, trackTitle: 'book' }),
     );
     expect(writer.write).toHaveBeenNthCalledWith(
       2,
       '/books/audio/track-02.mp3',
       expect.objectContaining({ title: 'Audio Book', coverBytes: Buffer.from('cover') }),
-      expect.objectContaining({ dryRun: false, isMultiTrackAudio: true, trackNumber: 2, trackTotal: 2, trackTitle: 'track-02' }),
+      expect.objectContaining({ dryRun: false, isMultiTrackAudio: true, trackNumber: 2, trackTotal: 3, trackTitle: 'track-02' }),
     );
     expect(fileWriteRepo.insertLog).toHaveBeenCalledTimes(3);
     expect(fileWriteRepo.insertLog).toHaveBeenCalledWith(
@@ -780,7 +899,9 @@ describe('FileWriteService', () => {
       sizeBytes: 100,
       libraryId: 2,
     });
-    fileWriteRepo.findFilesForBook.mockResolvedValue([{ id: 1, absolutePath: '/books/audio/book.mp3', format: 'mp3', sizeBytes: 100, libraryId: 2 }]);
+    fileWriteRepo.findFilesForBook.mockResolvedValue([
+      { id: 1, absolutePath: '/books/audio/book.mp3', format: 'mp3', sizeBytes: 100, libraryId: 2, role: 'content' },
+    ]);
     fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Audio Book' });
     fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteAudioEnabled: false });
 
@@ -795,6 +916,7 @@ describe('FileWriteService', () => {
 
   it('skips audio when the file exceeds audio max size', async () => {
     const { service, fileWriteRepo, writer } = makeService();
+    diskSizes.set('/books/audio/book.flac', 600 * 1024 * 1024);
     fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
       id: 1,
       absolutePath: '/books/audio/book.flac',
@@ -803,7 +925,7 @@ describe('FileWriteService', () => {
       libraryId: 2,
     });
     fileWriteRepo.findFilesForBook.mockResolvedValue([
-      { id: 1, absolutePath: '/books/audio/book.flac', format: 'flac', sizeBytes: 600 * 1024 * 1024, libraryId: 2 },
+      { id: 1, absolutePath: '/books/audio/book.flac', format: 'flac', sizeBytes: 600 * 1024 * 1024, libraryId: 2, role: 'content' },
     ]);
     fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Audio Book' });
     fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({
@@ -819,7 +941,7 @@ describe('FileWriteService', () => {
   });
 
   it('aggregates failed multi-track audio writes and does not mark the book written', async () => {
-    const { service, fileWriteRepo, registry, writer } = makeService();
+    const { service, fileWriteRepo, registry, writer, coverStore } = makeService();
     fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
       id: 1,
       absolutePath: '/books/audio/book.m4b',
@@ -829,13 +951,13 @@ describe('FileWriteService', () => {
       libraryId: 2,
     });
     fileWriteRepo.findFilesForBook.mockResolvedValue([
-      { id: 1, absolutePath: '/books/audio/book.m4b', format: 'm4b', sizeBytes: 100, fileHash: 'm4bhash', libraryId: 2 },
-      { id: 2, absolutePath: '/books/audio/track-02.mp3', format: 'mp3', sizeBytes: 100, fileHash: 'mp3hash', libraryId: 2 },
+      { id: 1, absolutePath: '/books/audio/book.m4b', format: 'm4b', sizeBytes: 100, fileHash: 'm4bhash', libraryId: 2, role: 'content' },
+      { id: 2, absolutePath: '/books/audio/track-02.mp3', format: 'mp3', sizeBytes: 100, fileHash: 'mp3hash', libraryId: 2, role: 'content' },
     ]);
     registry.supports.mockImplementation((format: string) => ['m4b', 'mp3'].includes(format));
     fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Audio Book' });
     fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteAudioEnabled: true, fileWriteWriteCover: true });
-    mockReaddir.mockResolvedValue(['cover_custom.jpg'] as never);
+    coverStore.resolve.mockResolvedValue('/books/covers/20/audio/cover_custom.jpg');
     mockReadFile.mockResolvedValue(Buffer.from('cover') as never);
     writer.write.mockImplementation((filePath: string) => {
       if (filePath.endsWith('.mp3')) {
@@ -870,8 +992,8 @@ describe('FileWriteService', () => {
       libraryId: 2,
     });
     fileWriteRepo.findFilesForBook.mockResolvedValue([
-      { id: 1, absolutePath: '/books/audio/book.m4b', format: 'm4b', sizeBytes: 100, libraryId: 2 },
-      { id: 2, absolutePath: '/books/audio/bonus.opus', format: 'opus', sizeBytes: 100, libraryId: 2 },
+      { id: 1, absolutePath: '/books/audio/book.m4b', format: 'm4b', sizeBytes: 100, libraryId: 2, role: 'content', sortOrder: 0 },
+      { id: 2, absolutePath: '/books/audio/bonus.opus', format: 'opus', sizeBytes: 100, libraryId: 2, role: 'content', sortOrder: 1 },
     ]);
     registry.supports.mockImplementation((format: string) => format === 'm4b');
     fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteAudioEnabled: false });
@@ -883,6 +1005,7 @@ describe('FileWriteService', () => {
       fieldsWritten: [],
       durationMs: expect.any(Number),
       reason: 'format disabled; format not supported',
+      fileCounts: { processed: 2, succeeded: 0, failed: 0, skipped: 2 },
     });
     expect(fileWriteRepo.loadPayload).not.toHaveBeenCalled();
     expect(writer.write).not.toHaveBeenCalled();
@@ -899,8 +1022,8 @@ describe('FileWriteService', () => {
       libraryId: 2,
     });
     fileWriteRepo.findFilesForBook.mockResolvedValue([
-      { id: 1, absolutePath: '/books/audio/book.opus', format: 'opus', sizeBytes: 100, libraryId: 2 },
-      { id: 2, absolutePath: '/books/audio/book.ogg', format: 'ogg', sizeBytes: 100, libraryId: 2 },
+      { id: 1, absolutePath: '/books/audio/book.opus', format: 'opus', sizeBytes: 100, libraryId: 2, role: 'content' },
+      { id: 2, absolutePath: '/books/audio/book.ogg', format: 'ogg', sizeBytes: 100, libraryId: 2, role: 'content' },
     ]);
     registry.supports.mockReturnValue(false);
 
@@ -925,6 +1048,36 @@ describe('FileWriteService', () => {
     expect(fileWriteRepo.findWriteLog).toHaveBeenCalledWith(5, 10);
     expect(fileWriteRepo.findNonMissingPrimaryFilesByLibrary).toHaveBeenCalledWith(7);
     expect(fileWriteRepo.findLibraryWriteSettingsForBook).toHaveBeenCalledWith(9);
+  });
+
+  it('stores and notifies a short, path-free reason when an external tool fails', async () => {
+    const { service, fileWriteRepo, writer, notificationService } = makeService();
+    fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
+      id: 1,
+      absolutePath: '/books/lib/Author/book.m4b',
+      format: 'm4b',
+      sizeBytes: 40,
+      libraryId: 2,
+    });
+    fileWriteRepo.findFilesForBook.mockResolvedValue([
+      { id: 1, absolutePath: '/books/lib/Author/book.m4b', format: 'm4b', sizeBytes: 40, libraryId: 2, role: 'content' },
+    ]);
+    fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book', description: 'A long description' });
+    writer.write.mockRejectedValue(
+      Object.assign(
+        new Error('Command failed: ffmpeg -i /books/lib/Author/book.m4b -metadata description=A long description /books/lib/Author/.tmp.m4b'),
+        {
+          stderr: 'Error opening input file /books/lib/Author/book.m4b.\nError opening input files: Invalid data found when processing input',
+        },
+      ),
+    );
+
+    const result = await service.writeToFile(5, 'sync', 3);
+
+    const expected = 'Error opening input file book.m4b. Error opening input files: Invalid data found when processing input';
+    expect(result.reason).toBe(expected);
+    expect(fileWriteRepo.insertLog).toHaveBeenCalledWith(expect.objectContaining({ result: expect.objectContaining({ reason: expected }) }));
+    expect(notificationService.notify).toHaveBeenCalledWith(expect.objectContaining({ message: expected }));
   });
 
   it('returns failed and logs when writer throws', async () => {
@@ -954,7 +1107,7 @@ describe('FileWriteService', () => {
   });
 
   it('dry-run bypasses disabled gate and avoids cover read', async () => {
-    const { service, fileWriteRepo, writer } = makeService();
+    const { service, fileWriteRepo, writer, coverStore } = makeService();
 
     fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
       id: 1,
@@ -970,7 +1123,8 @@ describe('FileWriteService', () => {
     const result = await service.writeToFile(5, 'auto', undefined, true);
 
     expect(result.status).toBe('skipped');
-    expect(mockReaddir).not.toHaveBeenCalled();
+    expect(coverStore.resolve).not.toHaveBeenCalled();
+    expect(mockReadFile).not.toHaveBeenCalled();
     expect(writer.write).toHaveBeenCalledWith(
       '/books/lib/book.epub',
       expect.not.objectContaining({ coverBytes: expect.anything() }),
@@ -1115,6 +1269,7 @@ describe('FileWriteService', () => {
 
     it('still skips when file exceeds size limit even with force=true', async () => {
       const { service, fileWriteRepo, writer } = makeService();
+      diskSizes.set('/books/big.epub', 200 * 1024 * 1024);
       fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
         id: 1,
         absolutePath: '/books/big.epub',
@@ -1140,9 +1295,11 @@ describe('FileWriteService', () => {
         fileWriteRepo as never,
         { supports: vi.fn().mockReturnValue(true), get: vi.fn().mockReturnValue(writer) } as never,
         { withLock: vi.fn().mockImplementation(async (_: string, fn: () => Promise<unknown>) => fn()) } as never,
-        { get: vi.fn().mockImplementation((key: string) => (key === 'storage.appDataPath' ? '/books' : undefined)) } as unknown as ConfigService,
+        { get: vi.fn() } as unknown as ConfigService,
         notificationService as never,
         new SelfWriteRegistry(),
+        { resolve: vi.fn().mockResolvedValue(null) } as never,
+        { recordCurrentRevision: vi.fn() } as never,
       );
 
       fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
@@ -1168,9 +1325,11 @@ describe('FileWriteService', () => {
         fileWriteRepo as never,
         { supports: vi.fn().mockReturnValue(true), get: vi.fn().mockReturnValue(writer) } as never,
         { withLock: vi.fn().mockImplementation(async (_: string, fn: () => Promise<unknown>) => fn()) } as never,
-        { get: vi.fn().mockImplementation((key: string) => (key === 'storage.appDataPath' ? '/books' : undefined)) } as unknown as ConfigService,
+        { get: vi.fn() } as unknown as ConfigService,
         notificationService as never,
         new SelfWriteRegistry(),
+        { resolve: vi.fn().mockResolvedValue(null) } as never,
+        { recordCurrentRevision: vi.fn() } as never,
       );
 
       fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
@@ -1187,6 +1346,239 @@ describe('FileWriteService', () => {
       await serviceWithNotif.writeToFile(5, 'sync', 1, false, false, true);
 
       expect(notificationService.notify).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('chapter write-back', () => {
+    const PART_1 = { id: 1, absolutePath: '/library/book/Part 1.m4b', format: 'm4b', sizeBytes: 100, fileHash: 'hash-1', libraryId: 2 };
+    const PART_2 = { id: 2, absolutePath: '/library/book/Part 2.mp3', format: 'mp3', sizeBytes: 100, fileHash: 'hash-2', libraryId: 2 };
+    const PART_3 = { id: 3, absolutePath: '/library/book/Part 3.m4a', format: 'm4a', sizeBytes: 100, fileHash: null, libraryId: 2 };
+    const EBOOK = { id: 9, absolutePath: '/library/book/book.epub', format: 'epub', sizeBytes: 100, fileHash: 'hash-9', libraryId: 2 };
+    const CHAPTERS = [
+      { title: 'One', startMs: 0 },
+      { title: 'Two', startMs: 45_000 },
+      { title: 'Three', startMs: 80_000 },
+    ];
+    const ORDERED = [
+      { id: 1, timelineStartMs: 0 },
+      { id: 2, timelineStartMs: 60_000 },
+    ];
+    const SUCCESS = { status: 'success', fieldsWritten: ['chapters'], durationMs: 5 };
+
+    function probeLengths(lengths: Record<string, number | null>) {
+      probeAudioDurationMsMock.mockImplementation((path: string) => Promise.resolve(lengths[path] ?? null));
+    }
+
+    describe('resolveChapterWriteStatus', () => {
+      it('is available for every listed file of a writable format', async () => {
+        const { service, fileWriteRepo } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue([EBOOK, PART_2, PART_1]);
+
+        await expect(service.resolveChapterWriteStatus(5, [1, 2])).resolves.toEqual({ available: true, reason: null, fileCount: 2 });
+        expect(fileWriteRepo.findFilesForBook).toHaveBeenCalledWith(5);
+        expect(fileWriteRepo.findLibraryFileWriteConfig).toHaveBeenCalledWith(2);
+      });
+
+      it('has nothing to write without files', async () => {
+        const { service, fileWriteRepo } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue([EBOOK]);
+
+        await expect(service.resolveChapterWriteStatus(5, [1, 2])).resolves.toEqual({ available: false, reason: 'no_primary_file', fileCount: 0 });
+        expect(fileWriteRepo.findLibraryFileWriteConfig).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        { name: 'the library has write-back off', config: { fileWriteEnabled: false }, files: [PART_1, PART_2], reason: 'library_disabled' },
+        { name: 'one file is FLAC', config: {}, files: [PART_1, { ...PART_2, format: 'flac' }], reason: 'format_not_supported' },
+        {
+          name: 'one file is over the audio size cap',
+          config: { fileWriteAudioMaxFileSizeMb: 1 },
+          files: [PART_1, { ...PART_2, sizeBytes: 2 * 1024 * 1024 }],
+          reason: 'file_exceeds_size_limit',
+        },
+        { name: 'audio write-back is off', config: { fileWriteAudioEnabled: false }, files: [PART_1, PART_2], reason: 'format_disabled' },
+      ])('is unavailable when $name', async ({ config, files, reason }) => {
+        const { service, fileWriteRepo } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue(files);
+        fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, ...config });
+
+        await expect(service.resolveChapterWriteStatus(5, [1, 2])).resolves.toEqual({ available: false, reason, fileCount: 2 });
+      });
+
+      it('treats a missing library as write-back off', async () => {
+        const { service, fileWriteRepo } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue([PART_1]);
+        fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue(null);
+
+        await expect(service.resolveChapterWriteStatus(5, [1])).resolves.toEqual({ available: false, reason: 'library_disabled', fileCount: 1 });
+      });
+    });
+
+    describe('writeChapters', () => {
+      it('writes each file its own slice, in the given order, with nothing but the chapters', async () => {
+        const { service, fileWriteRepo, writer, lockService, selfWriteRegistry } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue([PART_2, EBOOK, PART_1]);
+        probeLengths({ [PART_1.absolutePath]: 60_000, [PART_2.absolutePath]: 40_000 });
+        const suppressedDuringWrite: boolean[] = [];
+        writer.write.mockImplementation((path: string) => {
+          suppressedDuringWrite.push(selfWriteRegistry.isSuppressed(path));
+          return Promise.resolve(SUCCESS);
+        });
+
+        const result = await service.writeChapters(5, ORDERED, CHAPTERS, 7);
+
+        expect(result).toEqual({ status: 'success', filesWritten: 2, filesTotal: 2 });
+        expect(lockService.withLock).toHaveBeenNthCalledWith(1, bookOperationLockKey(5), expect.any(Function));
+        expect(lockService.withLock).toHaveBeenCalledWith(PART_1.absolutePath, expect.any(Function));
+        expect(lockService.withLock).toHaveBeenCalledWith(PART_2.absolutePath, expect.any(Function));
+        expect(probeAudioDurationMsMock).toHaveBeenCalledWith(PART_1.absolutePath, undefined);
+        expect(probeAudioDurationMsMock).toHaveBeenCalledWith(PART_2.absolutePath, undefined);
+        expect(writer.write).toHaveBeenCalledTimes(2);
+        expect(writer.write).toHaveBeenNthCalledWith(
+          1,
+          PART_1.absolutePath,
+          {},
+          {
+            fieldMask: new Set(),
+            dryRun: false,
+            chapters: [
+              { title: 'One', startMs: 0, endMs: 45_000 },
+              { title: 'Two', startMs: 45_000, endMs: 60_000 },
+            ],
+          },
+        );
+        expect(writer.write).toHaveBeenNthCalledWith(
+          2,
+          PART_2.absolutePath,
+          {},
+          {
+            fieldMask: new Set(),
+            dryRun: false,
+            chapters: [
+              { title: 'Two', startMs: 0, endMs: 20_000, continuation: true },
+              { title: 'Three', startMs: 20_000, endMs: 40_000 },
+            ],
+          },
+        );
+        expect(suppressedDuringWrite).toEqual([true, true]);
+        expect(selfWriteRegistry.isSuppressed(PART_1.absolutePath)).toBe(false);
+        expect(fileWriteRepo.recordHashHistory).toHaveBeenNthCalledWith(1, 1, 'hash-1', 'file_write');
+        expect(fileWriteRepo.recordHashHistory).toHaveBeenNthCalledWith(2, 2, 'hash-2', 'file_write');
+        expect(fileWriteRepo.updateFileStateAfterMetadataWrite).toHaveBeenCalledTimes(2);
+        expect(fileWriteRepo.insertLog).toHaveBeenNthCalledWith(1, {
+          bookId: 5,
+          bookFileId: 1,
+          userId: 7,
+          format: 'm4b',
+          result: SUCCESS,
+          triggeredBy: 'sync',
+        });
+        expect(fileWriteRepo.insertLog).toHaveBeenNthCalledWith(2, {
+          bookId: 5,
+          bookFileId: 2,
+          userId: 7,
+          format: 'mp3',
+          result: SUCCESS,
+          triggeredBy: 'sync',
+        });
+        expect(fileWriteRepo.setLastWrittenAt).toHaveBeenCalledWith(5, expect.any(Date));
+        expect(fileWriteRepo.loadPayload).not.toHaveBeenCalled();
+      });
+
+      it('stops at the first file that fails, reporting how far it got', async () => {
+        const { service, fileWriteRepo, writer } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue([PART_1, PART_2, PART_3]);
+        probeLengths({ [PART_1.absolutePath]: 60_000, [PART_2.absolutePath]: 60_000, [PART_3.absolutePath]: 60_000 });
+        writer.write.mockResolvedValueOnce(SUCCESS).mockRejectedValueOnce(new Error('disk full'));
+
+        const result = await service.writeChapters(5, [...ORDERED, { id: 3, timelineStartMs: 120_000 }], CHAPTERS, 7);
+
+        expect(result).toEqual({ status: 'failed', filesWritten: 1, filesTotal: 3 });
+        expect(writer.write).toHaveBeenCalledTimes(2);
+        expect(writer.write).not.toHaveBeenCalledWith(PART_3.absolutePath, expect.anything(), expect.anything());
+        expect(fileWriteRepo.insertLog).toHaveBeenCalledTimes(2);
+        expect(fileWriteRepo.insertLog).toHaveBeenLastCalledWith(
+          expect.objectContaining({ bookFileId: 2, result: expect.objectContaining({ status: 'failed', reason: 'disk full' }) }),
+        );
+        expect(fileWriteRepo.setLastWrittenAt).toHaveBeenCalledWith(5, expect.any(Date));
+      });
+
+      it.each(['updateFileStateAfterMetadataWrite', 'recordChapterWriteProvenance', 'insertLog'] as const)(
+        'counts a remux that succeeded even when %s fails afterward',
+        async (method) => {
+          const { service, fileWriteRepo, writer } = makeService();
+          fileWriteRepo.findFilesForBook.mockResolvedValue([PART_1, PART_2]);
+          probeLengths({ [PART_1.absolutePath]: 60_000, [PART_2.absolutePath]: 40_000 });
+          writer.write.mockResolvedValue(SUCCESS);
+          fileWriteRepo[method].mockRejectedValue(new Error('connection terminated'));
+          await expect(service.writeChapters(5, ORDERED, CHAPTERS, 7)).resolves.toEqual({ status: 'failed', filesWritten: 1, filesTotal: 2 });
+          expect(writer.write).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it('stops further writes if persisting progress fails and retains the disk count', async () => {
+        const { service, fileWriteRepo, writer } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue([PART_1, PART_2]);
+        probeLengths({ [PART_1.absolutePath]: 60_000, [PART_2.absolutePath]: 40_000 });
+        writer.write.mockResolvedValue(SUCCESS);
+        const progress = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('connection terminated'));
+        await expect(service.writeChapters(5, ORDERED, CHAPTERS, 7, undefined, progress)).resolves.toEqual({
+          status: 'failed',
+          filesWritten: 1,
+          filesTotal: 2,
+        });
+        expect(writer.write).toHaveBeenCalledTimes(1);
+      });
+
+      it('marks nothing written when the first file fails', async () => {
+        const { service, fileWriteRepo, writer } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue([PART_1, PART_2]);
+        probeLengths({ [PART_1.absolutePath]: 60_000, [PART_2.absolutePath]: 40_000 });
+        writer.write.mockResolvedValueOnce({ status: 'failed', fieldsWritten: [], durationMs: 1, reason: 'ffmpeg failed' });
+
+        await expect(service.writeChapters(5, ORDERED, CHAPTERS, 7)).resolves.toEqual({ status: 'failed', filesWritten: 0, filesTotal: 2 });
+        expect(writer.write).toHaveBeenCalledTimes(1);
+        expect(fileWriteRepo.setLastWrittenAt).not.toHaveBeenCalled();
+      });
+
+      it('writes nothing when a file length cannot be read', async () => {
+        const { service, fileWriteRepo, writer } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue([PART_1, PART_2]);
+        probeLengths({ [PART_1.absolutePath]: 60_000, [PART_2.absolutePath]: null });
+
+        await expect(service.writeChapters(5, ORDERED, CHAPTERS, 7)).resolves.toEqual({ status: 'failed', filesWritten: 0, filesTotal: 2 });
+        expect(writer.write).not.toHaveBeenCalled();
+        expect(fileWriteRepo.recordHashHistory).not.toHaveBeenCalled();
+        expect(fileWriteRepo.insertLog).not.toHaveBeenCalled();
+        expect(fileWriteRepo.setLastWrittenAt).not.toHaveBeenCalled();
+      });
+
+      it('refuses before reading or writing any file when a write is unavailable, and frees its write slot', async () => {
+        const { service, fileWriteRepo, writer } = makeService({ 'fileWrite.maxConcurrentWrites': 1 });
+        fileWriteRepo.findFilesForBook.mockResolvedValue([PART_1, PART_2]);
+        fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValueOnce({ ...DEFAULT_LIB_CONFIG, fileWriteEnabled: false });
+        probeLengths({ [PART_1.absolutePath]: 60_000, [PART_2.absolutePath]: 40_000 });
+        writer.write.mockResolvedValue(SUCCESS);
+
+        const refused = await service.writeChapters(5, ORDERED, CHAPTERS, 7).catch((error: unknown) => error);
+
+        expect(refused).toBeInstanceOf(ChapterWriteUnavailableError);
+        expect((refused as ChapterWriteUnavailableError).reason).toBe('library_disabled');
+        expect(probeAudioDurationMsMock).not.toHaveBeenCalled();
+        expect(writer.write).not.toHaveBeenCalled();
+        expect(fileWriteRepo.insertLog).not.toHaveBeenCalled();
+        await expect(service.writeChapters(5, ORDERED, CHAPTERS, 7)).resolves.toMatchObject({ status: 'success' });
+      });
+
+      it('refuses when a listed file no longer belongs to the book', async () => {
+        const { service, fileWriteRepo, writer } = makeService();
+        fileWriteRepo.findFilesForBook.mockResolvedValue([PART_1]);
+
+        await expect(service.writeChapters(5, ORDERED, CHAPTERS, 7)).rejects.toMatchObject({
+          response: expect.objectContaining({ errorCode: 'CHAPTERS_STALE' }),
+        });
+        expect(writer.write).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -1209,6 +1601,673 @@ describe('FileWriteService', () => {
     it('is a no-op when no timer is pending', () => {
       const { service } = makeService();
       expect(() => service.cancelPendingWrite(42)).not.toThrow();
+    });
+  });
+
+  describe('all-files write-back', () => {
+    const ALL_FILES_CONFIG = { ...DEFAULT_LIB_CONFIG, fileWriteAllFiles: true };
+    const epubRow = {
+      id: 1,
+      absolutePath: '/books/lib/book.epub',
+      format: 'epub',
+      sizeBytes: 40,
+      fileHash: 'e',
+      libraryId: 2,
+      role: 'content',
+      sortOrder: 0,
+    };
+    const m4bRow = {
+      id: 2,
+      absolutePath: '/books/lib/book.m4b',
+      format: 'm4b',
+      sizeBytes: 100,
+      fileHash: 'a',
+      libraryId: 2,
+      role: 'content',
+      sortOrder: 1,
+    };
+    const primaryOf = (row: typeof epubRow, fileWriteAllFiles = true) => ({
+      id: row.id,
+      absolutePath: row.absolutePath,
+      format: row.format,
+      sizeBytes: row.sizeBytes,
+      fileHash: row.fileHash,
+      libraryId: row.libraryId,
+      fileWriteAllFiles,
+    });
+
+    function arrange(files: unknown[], options: { primary?: unknown; config?: Record<string, unknown> } = {}) {
+      const context = makeService();
+      context.fileWriteRepo.findPrimaryFileForBook.mockResolvedValue('primary' in options ? options.primary : primaryOf(epubRow));
+      context.fileWriteRepo.findFilesForBook.mockResolvedValue(files);
+      context.fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...ALL_FILES_CONFIG, ...options.config });
+      context.fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+      context.writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+      return context;
+    }
+
+    const writtenPaths = (writer: { write: ReturnType<typeof vi.fn> }) => writer.write.mock.calls.map(([path]) => path);
+    const optionsFor = (writer: { write: ReturnType<typeof vi.fn> }, path: string) =>
+      writer.write.mock.calls.find(([called]) => called === path)?.[2];
+    const payloadFor = (writer: { write: ReturnType<typeof vi.fn> }, path: string) =>
+      writer.write.mock.calls.find(([called]) => called === path)?.[1];
+
+    it('leaves the audiobook sibling alone while the flag is off', async () => {
+      const { service, fileWriteRepo, writer } = arrange([epubRow, m4bRow], { primary: primaryOf(epubRow, false) });
+
+      await service.writeToFile(5, 'auto');
+
+      expect(fileWriteRepo.findFilesForBook).not.toHaveBeenCalled();
+      expect(writtenPaths(writer)).toEqual(['/books/lib/book.epub']);
+    });
+
+    it('writes an ebook and its audiobook, each with its own medium cover', async () => {
+      const { service, writer, coverStore } = arrange([epubRow, m4bRow]);
+      coverStore.resolve.mockImplementation((_bookId: number, { medium }: { medium: string }) => Promise.resolve(`/covers/${medium}.jpg`));
+      mockReadFile.mockImplementation(((path: string) => Promise.resolve(Buffer.from(path))) as never);
+
+      const result = await service.writeToFile(5, 'auto');
+
+      expect(writtenPaths(writer)).toEqual(['/books/lib/book.epub', '/books/lib/book.m4b']);
+      expect(payloadFor(writer, '/books/lib/book.epub')).toMatchObject({ coverBytes: Buffer.from('/covers/ebook.jpg') });
+      expect(payloadFor(writer, '/books/lib/book.m4b')).toMatchObject({ coverBytes: Buffer.from('/covers/audio.jpg') });
+      expect(coverStore.resolve).toHaveBeenCalledTimes(2);
+      expect(coverStore.resolve).toHaveBeenCalledWith(5, { medium: 'ebook', variant: 'cover', strict: true });
+      expect(coverStore.resolve).toHaveBeenCalledWith(5, { medium: 'audio', variant: 'cover', strict: true });
+      expect(result).toMatchObject({ status: 'success', fileCounts: { processed: 2, succeeded: 2, failed: 0, skipped: 0 } });
+    });
+
+    it('keeps the audiobook art and still writes its metadata when the book has no audiobook cover', async () => {
+      const { service, writer, coverStore } = arrange([epubRow, m4bRow]);
+      coverStore.resolve.mockImplementation((_bookId: number, { medium }: { medium: string }) =>
+        Promise.resolve(medium === 'ebook' ? '/covers/ebook.jpg' : null),
+      );
+      mockReadFile.mockResolvedValue(Buffer.from('portrait') as never);
+
+      await service.writeToFile(5, 'auto');
+
+      expect(payloadFor(writer, '/books/lib/book.m4b')).toMatchObject({ title: 'Book', coverBytes: null });
+      expect(payloadFor(writer, '/books/lib/book.epub')).toMatchObject({ coverBytes: Buffer.from('portrait') });
+    });
+
+    it('writes metadata without art when a cover slot cannot be decoded', async () => {
+      const { service, writer, coverStore } = arrange([epubRow, m4bRow]);
+      coverStore.resolve.mockImplementation((_bookId: number, { medium }: { medium: string }) => Promise.resolve(`/covers/${medium}.jpg`));
+      mockReadFile.mockResolvedValue(Buffer.from('not an image') as never);
+      inspectCoverImageMock.mockRejectedValue(new Error('Input buffer contains unsupported image format'));
+
+      const result = await service.writeToFile(5, 'auto');
+
+      expect(result).toMatchObject({ status: 'success', fileCounts: { processed: 2, succeeded: 2, failed: 0, skipped: 0 } });
+      expect(payloadFor(writer, '/books/lib/book.epub')).toMatchObject({ title: 'Book', coverBytes: null });
+      expect(payloadFor(writer, '/books/lib/book.m4b')).toMatchObject({ title: 'Book', coverBytes: null });
+    });
+
+    it('never embeds an empty cover file', async () => {
+      const { service, writer, coverStore } = arrange([epubRow]);
+      coverStore.resolve.mockResolvedValue('/covers/ebook.jpg');
+      mockReadFile.mockResolvedValue(Buffer.alloc(0) as never);
+
+      await service.writeToFile(5, 'auto');
+
+      expect(payloadFor(writer, '/books/lib/book.epub')).toMatchObject({ coverBytes: null });
+    });
+
+    it('skips a supplement with an explicit reason', async () => {
+      const workbook = {
+        id: 3,
+        absolutePath: '/books/lib/workbook.pdf',
+        format: 'pdf',
+        sizeBytes: 40,
+        libraryId: 2,
+        role: 'supplement',
+        sortOrder: 2,
+      };
+      const { service, fileWriteRepo, writer } = arrange([epubRow, workbook]);
+
+      const result = await service.writeToFile(5, 'sync', 7);
+
+      expect(writtenPaths(writer)).toEqual(['/books/lib/book.epub']);
+      expect(fileWriteRepo.insertLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bookFileId: 3,
+          format: 'pdf',
+          result: expect.objectContaining({ status: 'skipped', reason: 'not a content file' }),
+        }),
+      );
+      expect(result).toMatchObject({ status: 'success', fileCounts: { processed: 2, succeeded: 1, failed: 0, skipped: 1 } });
+    });
+
+    it('writes the audiobook beside an unsupported primary, with the book title', async () => {
+      const djvuRow = { ...epubRow, absolutePath: '/books/lib/book.djvu', format: 'djvu' };
+      const { service, writer, registry } = arrange([djvuRow, m4bRow], { primary: primaryOf(djvuRow) });
+      registry.supports.mockImplementation((format: string) => format !== 'djvu');
+
+      await service.writeToFile(5, 'auto');
+
+      expect(writtenPaths(writer)).toEqual(['/books/lib/book.m4b']);
+      expect(optionsFor(writer, '/books/lib/book.m4b')).toMatchObject({ isMultiTrackAudio: false });
+    });
+
+    it('writes a book that has no primary file', async () => {
+      const { service, fileWriteRepo, writer } = arrange([epubRow], { primary: null });
+      fileWriteRepo.findFileWriteScopeForBook.mockResolvedValue({ libraryId: 2, fileWriteAllFiles: true });
+
+      await expect(service.writeToFile(5, 'auto')).resolves.toMatchObject({ status: 'success' });
+
+      expect(fileWriteRepo.findLibraryFileWriteConfig).toHaveBeenCalledWith(2);
+      expect(writtenPaths(writer)).toEqual(['/books/lib/book.epub']);
+    });
+
+    it('still reports no primary file for a book without one while the flag is off', async () => {
+      const { service, fileWriteRepo, writer } = arrange([epubRow], { primary: null });
+      fileWriteRepo.findFileWriteScopeForBook.mockResolvedValue({ libraryId: 2, fileWriteAllFiles: false });
+
+      await expect(service.writeToFile(5, 'auto')).resolves.toEqual({
+        status: 'skipped',
+        fieldsWritten: [],
+        durationMs: 0,
+        reason: 'no primary file',
+      });
+      expect(writer.write).not.toHaveBeenCalled();
+    });
+
+    it('writes the first of two EPUBs and skips the oversized one with its own reason', async () => {
+      const bigEpub = { ...epubRow, id: 3, absolutePath: '/books/lib/book-large.epub', sizeBytes: 200 * 1024 * 1024, sortOrder: 1 };
+      diskSizes.set(bigEpub.absolutePath, bigEpub.sizeBytes);
+      const { service, fileWriteRepo, writer } = arrange([epubRow, bigEpub]);
+
+      const result = await service.writeToFile(5, 'sync', 7);
+
+      expect(writtenPaths(writer)).toEqual(['/books/lib/book.epub']);
+      expect(fileWriteRepo.insertLog).toHaveBeenCalledWith(
+        expect.objectContaining({ bookFileId: 3, result: expect.objectContaining({ reason: 'file exceeds size limit' }) }),
+      );
+      expect(result.fileCounts).toEqual({ processed: 2, succeeded: 1, failed: 0, skipped: 1 });
+    });
+
+    it('predicts the fields of every target in a mixed dry run', async () => {
+      const { service, writer, coverStore } = arrange([epubRow, m4bRow], { config: { fileWriteEnabled: false } });
+      writer.write.mockImplementation((path: string) =>
+        Promise.resolve({
+          status: 'skipped',
+          fieldsWritten: path.endsWith('.epub') ? ['title', 'isbn13'] : ['title', 'narrators'],
+          durationMs: 0,
+          reason: 'dry-run',
+        }),
+      );
+
+      const result = await service.writeToFile(5, 'sync', 7, true);
+
+      expect(result).toMatchObject({ status: 'skipped', fieldsWritten: ['title', 'isbn13', 'narrators'], reason: 'dry-run' });
+      expect(coverStore.resolve).not.toHaveBeenCalled();
+    });
+
+    it('keeps the own titles of several audio files beside an ebook', async () => {
+      const bonus = { ...m4bRow, id: 3, absolutePath: '/books/lib/bonus.mp3', format: 'mp3', sortOrder: 2 };
+      const { service, writer } = arrange([epubRow, m4bRow, bonus]);
+
+      await service.writeToFile(5, 'auto');
+
+      expect(optionsFor(writer, '/books/lib/book.m4b')).toMatchObject({ preserveTrackIdentity: true });
+      expect(optionsFor(writer, '/books/lib/bonus.mp3')).toMatchObject({ preserveTrackIdentity: true });
+      expect(optionsFor(writer, '/books/lib/bonus.mp3')).not.toHaveProperty('trackNumber');
+    });
+  });
+
+  describe('size on disk', () => {
+    const epub = { id: 1, absolutePath: '/books/lib/book.epub', format: 'epub', fileHash: 'h', libraryId: 2 };
+
+    function arrange(sizeBytes: number | null) {
+      const context = makeService();
+      context.fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({ ...epub, sizeBytes });
+      context.fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+      context.fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteEpubMaxFileSizeMb: 100 });
+      context.writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+      return context;
+    }
+
+    it('enforces the limit on the size on disk, not a stale stored size', async () => {
+      const { service, writer } = arrange(40);
+      diskSizes.set(epub.absolutePath, 200 * 1024 * 1024);
+
+      await expect(service.writeToFile(5, 'auto')).resolves.toMatchObject({ status: 'skipped', reason: 'file exceeds size limit' });
+      expect(writer.write).not.toHaveBeenCalled();
+    });
+
+    it('enforces the limit on a file whose stored size is unknown', async () => {
+      const { service, writer } = arrange(null);
+      diskSizes.set(epub.absolutePath, 200 * 1024 * 1024);
+
+      await expect(service.writeToFile(5, 'auto')).resolves.toMatchObject({ status: 'skipped', reason: 'file exceeds size limit' });
+      expect(writer.write).not.toHaveBeenCalled();
+    });
+
+    it('writes a file that shrank on disk below the limit', async () => {
+      const { service, writer } = arrange(200 * 1024 * 1024);
+      diskSizes.set(epub.absolutePath, 1024);
+
+      await expect(service.writeToFile(5, 'auto')).resolves.toMatchObject({ status: 'success' });
+      expect(writer.write).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to the stored size when the file cannot be read', async () => {
+      const { service, writer } = arrange(200 * 1024 * 1024);
+      mockStat.mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+
+      await expect(service.writeToFile(5, 'auto')).resolves.toMatchObject({ status: 'skipped', reason: 'file exceeds size limit' });
+      expect(writer.write).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('skip logging', () => {
+    it('logs a thousand skipped targets one insert at a time', async () => {
+      const { service, fileWriteRepo } = makeService();
+      const tracks = Array.from({ length: 1_000 }, (_, index) => ({
+        id: index + 1,
+        absolutePath: `/books/audio/${String(index + 1).padStart(4, '0')}.mp3`,
+        format: 'mp3',
+        sizeBytes: 10,
+        libraryId: 2,
+        role: 'content',
+        sortOrder: index,
+      }));
+      fileWriteRepo.findPrimaryFileForBook.mockResolvedValue(tracks[0]);
+      fileWriteRepo.findFilesForBook.mockResolvedValue(tracks);
+      fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteAudioEnabled: false });
+      let active = 0;
+      let peak = 0;
+      fileWriteRepo.insertLog.mockImplementation(async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await Promise.resolve();
+        active--;
+      });
+
+      const result = await service.writeToFile(20, 'sync', 7);
+
+      expect(result.fileCounts).toEqual({ processed: 1_000, succeeded: 0, failed: 0, skipped: 1_000 });
+      expect(fileWriteRepo.insertLog).toHaveBeenCalledTimes(1_000);
+      expect(peak).toBe(1);
+    });
+
+    it('keeps logging the remaining skips when one insert fails', async () => {
+      const { service, fileWriteRepo, registry } = makeService();
+      const tracks = [1, 2, 3].map((id) => ({
+        id,
+        absolutePath: `/books/audio/0${id}.opus`,
+        format: 'opus',
+        sizeBytes: 10,
+        libraryId: 2,
+        role: 'content',
+      }));
+      fileWriteRepo.findPrimaryFileForBook.mockResolvedValue(tracks[0]);
+      fileWriteRepo.findFilesForBook.mockResolvedValue(tracks);
+      registry.supports.mockReturnValue(false);
+      fileWriteRepo.insertLog.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('connection reset')).mockResolvedValueOnce(undefined);
+
+      await expect(service.writeToFile(20, 'sync', 7)).resolves.toMatchObject({ status: 'skipped', reason: 'format not supported' });
+      expect(fileWriteRepo.insertLog).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('read-along EPUBs', () => {
+    const plain = {
+      id: 1,
+      absolutePath: '/books/lib/book.epub',
+      format: 'epub',
+      sizeBytes: 40,
+      fileHash: 'p',
+      libraryId: 2,
+      role: 'content',
+      sortOrder: 0,
+      mediaOverlayAvailable: false,
+    };
+    const readAlong = { ...plain, id: 2, absolutePath: '/books/lib/book.readaloud.epub', fileHash: 'r', sortOrder: 1, mediaOverlayAvailable: true };
+
+    function arrange(config: Record<string, unknown>) {
+      const context = makeService();
+      context.fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({ ...readAlong, fileWriteAllFiles: true });
+      context.fileWriteRepo.findFilesForBook.mockResolvedValue([plain, readAlong]);
+      context.fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteAllFiles: true, ...config });
+      context.fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+      context.writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+      return context;
+    }
+
+    it('leaves read-along EPUBs out by default while the plain EPUB is written', async () => {
+      const { service, writer } = arrange({});
+
+      const result = await service.writeToFile(5, 'auto');
+
+      expect(writer.write.mock.calls.map(([path]) => path)).toEqual(['/books/lib/book.epub']);
+      expect(result).toMatchObject({ status: 'success', fileCounts: { processed: 2, succeeded: 1, failed: 0, skipped: 1 } });
+    });
+
+    it('writes read-along EPUBs under their own toggle and limit, not the EPUB ones', async () => {
+      const { service, writer } = arrange({ fileWriteReadAlongEnabled: true, fileWriteReadAlongMaxFileSizeMb: 1000, fileWriteEpubEnabled: false });
+      diskSizes.set(readAlong.absolutePath, 400 * 1024 * 1024);
+
+      const result = await service.writeToFile(5, 'auto');
+
+      expect(writer.write.mock.calls.map(([path]) => path)).toEqual(['/books/lib/book.readaloud.epub']);
+      expect(result.fileCounts).toEqual({ processed: 2, succeeded: 1, failed: 0, skipped: 1 });
+    });
+
+    it('applies the read-along size limit', async () => {
+      const { service, fileWriteRepo, writer } = arrange({ fileWriteReadAlongEnabled: true, fileWriteReadAlongMaxFileSizeMb: 100 });
+      diskSizes.set(readAlong.absolutePath, 400 * 1024 * 1024);
+
+      await service.writeToFile(5, 'sync', 7);
+
+      expect(writer.write.mock.calls.map(([path]) => path)).toEqual(['/books/lib/book.epub']);
+      expect(fileWriteRepo.insertLog).toHaveBeenCalledWith(
+        expect.objectContaining({ bookFileId: 2, result: expect.objectContaining({ reason: 'file exceeds size limit' }) }),
+      );
+    });
+
+    it('reports a read-along EPUB as format disabled while its toggle is off', () => {
+      const { service } = makeService();
+
+      expect(service.resolveBookFileWriteStatus({ ...DEFAULT_LIB_CONFIG, fileWriteAllFiles: true }, [plain, readAlong], 2).targets).toEqual([
+        { fileId: 1, format: 'epub', writable: true, reason: null, writableFields: [...EPUB_BOOK_FILE_WRITE_FIELDS] },
+        { fileId: 2, format: 'epub', writable: false, reason: 'format_disabled', writableFields: [] },
+      ]);
+    });
+  });
+
+  describe('per-file capability', () => {
+    const ALL_FILES_CONFIG = { ...DEFAULT_LIB_CONFIG, fileWriteAllFiles: true };
+
+    it('lists the ebook primary as the only target while the flag is off', () => {
+      const { service } = makeService();
+
+      expect(
+        service.resolveBookFileWriteStatus(
+          DEFAULT_LIB_CONFIG,
+          [
+            { id: 1, format: 'epub', sizeBytes: 1024, role: 'content' },
+            { id: 2, format: 'm4b', sizeBytes: 1024, role: 'content' },
+          ],
+          1,
+        ).targets,
+      ).toEqual([{ fileId: 1, format: 'epub', writable: true, reason: null, writableFields: [...EPUB_BOOK_FILE_WRITE_FIELDS] }]);
+    });
+
+    it('reports every writable format of a mixed book, each file with its own fields', () => {
+      const { service } = makeService();
+
+      expect(
+        service.resolveBookFileWriteStatus(
+          ALL_FILES_CONFIG,
+          [
+            { id: 1, format: 'epub', sizeBytes: 1024, role: 'content', sortOrder: 0 },
+            { id: 2, format: 'm4b', sizeBytes: 1024, role: 'content', sortOrder: 1 },
+          ],
+          1,
+        ),
+      ).toEqual({
+        enabled: true,
+        reason: null,
+        writableFormats: ['epub', 'm4b'],
+        writableFields: [...new Set([...EPUB_BOOK_FILE_WRITE_FIELDS, ...AUDIO_BOOK_FILE_WRITE_FIELDS])],
+        targets: [
+          { fileId: 1, format: 'epub', writable: true, reason: null, writableFields: [...EPUB_BOOK_FILE_WRITE_FIELDS] },
+          { fileId: 2, format: 'm4b', writable: true, reason: null, writableFields: [...AUDIO_BOOK_FILE_WRITE_FIELDS] },
+        ],
+      });
+    });
+
+    it('tells a writable EPUB from an oversized EPUB in the same book', () => {
+      const { service } = makeService();
+
+      const status = service.resolveBookFileWriteStatus(
+        { ...ALL_FILES_CONFIG, fileWriteEpubMaxFileSizeMb: 1 },
+        [
+          { id: 1, format: 'epub', sizeBytes: 1024, role: 'content', sortOrder: 0 },
+          { id: 2, format: 'epub', sizeBytes: 2 * 1024 * 1024, role: 'content', sortOrder: 1 },
+        ],
+        1,
+      );
+
+      expect(status.writableFormats).toEqual(['epub']);
+      expect(status.targets?.map(({ fileId, writable, reason }) => ({ fileId, writable, reason }))).toEqual([
+        { fileId: 1, writable: true, reason: null },
+        { fileId: 2, writable: false, reason: 'file_exceeds_size_limit' },
+      ]);
+    });
+
+    it('reports a supplement per file but keeps it out of the book-level reason', () => {
+      const { service, registry } = makeService();
+      registry.supports.mockImplementation((format: string) => format === 'pdf');
+
+      const status = service.resolveBookFileWriteStatus(
+        ALL_FILES_CONFIG,
+        [
+          { id: 1, format: 'opus', sizeBytes: 1024, role: 'content' },
+          { id: 2, format: 'pdf', sizeBytes: 1024, role: 'supplement' },
+        ],
+        1,
+      );
+
+      expect(status).toMatchObject({ enabled: false, reason: 'format_not_supported' });
+      expect(status.targets?.find((target) => target.fileId === 2)).toEqual({
+        fileId: 2,
+        format: 'pdf',
+        writable: false,
+        reason: 'not_content_file',
+        writableFields: [],
+      });
+    });
+
+    it('reports content files of a book without a primary as writable', () => {
+      const { service } = makeService();
+
+      expect(service.resolveBookFileWriteStatus(ALL_FILES_CONFIG, [{ id: 2, format: 'epub', sizeBytes: 1024, role: 'content' }], null)).toMatchObject(
+        {
+          enabled: true,
+          writableFormats: ['epub'],
+        },
+      );
+    });
+
+    it('treats a library config without the scope flag as incomplete', () => {
+      const { service } = makeService();
+      const withoutFlag: Partial<typeof DEFAULT_LIB_CONFIG> = { ...DEFAULT_LIB_CONFIG };
+      delete withoutFlag.fileWriteAllFiles;
+
+      expect(service.resolveBookFileWriteStatus(withoutFlag, [{ id: 1, format: 'epub', sizeBytes: 1024 }], 1)).toMatchObject({
+        enabled: false,
+        reason: 'library_disabled',
+      });
+    });
+  });
+
+  // Characterisation of the selection rule as it stood before multi-file write-back. With the
+  // library flag off, every one of these must keep passing unchanged.
+  describe('characterisation: primary-only target selection', () => {
+    const epubPrimary = {
+      id: 1,
+      absolutePath: '/books/lib/book.epub',
+      format: 'epub',
+      sizeBytes: 40,
+      fileHash: 'epubhash',
+      libraryId: 2,
+      role: 'content',
+    };
+    const m4bPrimary = {
+      id: 1,
+      absolutePath: '/books/audio/book.m4b',
+      format: 'm4b',
+      sizeBytes: 100,
+      fileHash: 'm4bhash',
+      libraryId: 2,
+      role: 'content',
+    };
+
+    it('writes only the ebook primary and never lists the other files', async () => {
+      const { service, fileWriteRepo, writer } = makeService();
+      fileWriteRepo.findPrimaryFileForBook.mockResolvedValue(epubPrimary);
+      fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+      writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+
+      await service.writeToFile(5, 'auto');
+
+      expect(fileWriteRepo.findFilesForBook).not.toHaveBeenCalled();
+      expect(writer.write).toHaveBeenCalledTimes(1);
+      expect(writer.write).toHaveBeenCalledWith('/books/lib/book.epub', expect.anything(), expect.anything());
+    });
+
+    it('writes every audio track of an audio primary and leaves its ebook sibling alone', async () => {
+      const { service, fileWriteRepo, writer } = makeService();
+      fileWriteRepo.findPrimaryFileForBook.mockResolvedValue(m4bPrimary);
+      fileWriteRepo.findFilesForBook.mockResolvedValue([
+        { ...m4bPrimary, role: 'content' },
+        { id: 2, absolutePath: '/books/audio/book.epub', format: 'epub', sizeBytes: 40, fileHash: 'e', libraryId: 2, role: 'content' },
+        { id: 3, absolutePath: '/books/audio/part-2.mp3', format: 'mp3', sizeBytes: 40, fileHash: 'm', libraryId: 2, role: 'content' },
+      ]);
+      fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+      writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+
+      await service.writeToFile(5, 'auto');
+
+      expect(writer.write.mock.calls.map(([path]) => path)).toEqual(['/books/audio/book.m4b', '/books/audio/part-2.mp3']);
+    });
+
+    it('falls back to the audio primary when the book lists no audio files', async () => {
+      const { service, fileWriteRepo, writer } = makeService();
+      fileWriteRepo.findPrimaryFileForBook.mockResolvedValue(m4bPrimary);
+      fileWriteRepo.findFilesForBook.mockResolvedValue([]);
+      fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+      writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+
+      await expect(service.writeToFile(5, 'auto')).resolves.toEqual({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+
+      expect(writer.write).toHaveBeenCalledTimes(1);
+      expect(writer.write).toHaveBeenCalledWith(
+        '/books/audio/book.m4b',
+        expect.anything(),
+        expect.objectContaining({ isMultiTrackAudio: false, trackNumber: 1, trackTotal: 1 }),
+      );
+    });
+
+    it('keeps the predicted fields of a single-target dry run', async () => {
+      const { service, fileWriteRepo, writer } = makeService();
+      fileWriteRepo.findPrimaryFileForBook.mockResolvedValue(epubPrimary);
+      fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+      writer.write.mockResolvedValue({ status: 'skipped', fieldsWritten: ['title', 'authors'], durationMs: 0, reason: 'dry-run' });
+
+      await expect(service.writeToFile(5, 'sync', 1, true)).resolves.toEqual({
+        status: 'skipped',
+        fieldsWritten: ['title', 'authors'],
+        durationMs: 0,
+        reason: 'dry-run',
+      });
+    });
+
+    // Recorded as dropping the fields before multi-file write-back; aggregation now keeps them, so a
+    // preview no longer reports that nothing will change the moment a book has a second target.
+    it('keeps the predicted fields of a two-target dry run', async () => {
+      const { service, fileWriteRepo, writer } = makeService();
+      fileWriteRepo.findPrimaryFileForBook.mockResolvedValue(m4bPrimary);
+      fileWriteRepo.findFilesForBook.mockResolvedValue([
+        { ...m4bPrimary, role: 'content' },
+        { id: 2, absolutePath: '/books/audio/part-2.mp3', format: 'mp3', sizeBytes: 40, fileHash: 'm', libraryId: 2, role: 'content' },
+      ]);
+      fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+      writer.write.mockResolvedValue({ status: 'skipped', fieldsWritten: ['title'], durationMs: 0, reason: 'dry-run' });
+
+      const result = await service.writeToFile(5, 'sync', 1, true);
+
+      expect(result.status).toBe('skipped');
+      expect(result.fieldsWritten).toEqual(['title']);
+      expect(result.fileCounts).toEqual({ processed: 2, succeeded: 0, failed: 0, skipped: 2 });
+    });
+
+    it('resolves the audiobook cover once for a whole audio track set', async () => {
+      const { service, fileWriteRepo, writer, coverStore } = makeService();
+      fileWriteRepo.findPrimaryFileForBook.mockResolvedValue(m4bPrimary);
+      fileWriteRepo.findFilesForBook.mockResolvedValue([
+        { ...m4bPrimary, role: 'content' },
+        { id: 2, absolutePath: '/books/audio/part-2.mp3', format: 'mp3', sizeBytes: 40, fileHash: 'm', libraryId: 2, role: 'content' },
+      ]);
+      fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+      coverStore.resolve.mockResolvedValue('/covers/audio.jpg');
+      mockReadFile.mockResolvedValue(Buffer.from('square') as never);
+      writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['coverBytes'], durationMs: 5 });
+
+      await service.writeToFile(5, 'auto');
+
+      expect(coverStore.resolve).toHaveBeenCalledTimes(1);
+      expect(coverStore.resolve).toHaveBeenCalledWith(5, { medium: 'audio', variant: 'cover', strict: true });
+      expect(mockReadFile).toHaveBeenCalledTimes(1);
+    });
+
+    describe('capability', () => {
+      it('falls back to the audio primary when the book lists no other audio files', () => {
+        const { service } = makeService();
+
+        expect(service.resolveBookFileWriteStatus(DEFAULT_LIB_CONFIG, [{ id: 1, format: 'm4b', sizeBytes: 1024, role: 'content' }], 1)).toMatchObject(
+          {
+            enabled: true,
+            reason: null,
+            writableFormats: ['m4b'],
+            writableFields: [...AUDIO_BOOK_FILE_WRITE_FIELDS],
+          },
+        );
+      });
+
+      it('reports only the ebook primary for an ebook with an audiobook sibling', () => {
+        const { service } = makeService();
+
+        expect(
+          service.resolveBookFileWriteStatus(
+            DEFAULT_LIB_CONFIG,
+            [
+              { id: 1, format: 'epub', sizeBytes: 1024, role: 'content' },
+              { id: 2, format: 'm4b', sizeBytes: 1024, role: 'content' },
+            ],
+            1,
+          ),
+        ).toMatchObject({ enabled: true, reason: null, writableFormats: ['epub'], writableFields: [...EPUB_BOOK_FILE_WRITE_FIELDS] });
+      });
+
+      it('reports an unsupported primary as not supported', () => {
+        const { service, registry } = makeService();
+        registry.supports.mockReturnValue(false);
+
+        expect(
+          service.resolveBookFileWriteStatus(DEFAULT_LIB_CONFIG, [{ id: 1, format: 'opus', sizeBytes: 1024, role: 'content' }], 1),
+        ).toMatchObject({
+          enabled: false,
+          reason: 'format_not_supported',
+          writableFormats: [],
+          writableFields: [],
+        });
+      });
+
+      it('reports a disabled audio family as format disabled', () => {
+        const { service } = makeService();
+
+        expect(
+          service.resolveBookFileWriteStatus(
+            { ...DEFAULT_LIB_CONFIG, fileWriteAudioEnabled: false },
+            [{ id: 1, format: 'mp3', sizeBytes: 1024, role: 'content' }],
+            1,
+          ),
+        ).toMatchObject({ enabled: false, reason: 'format_disabled', writableFormats: [], writableFields: [] });
+      });
+
+      it('reports no primary file when the primary is missing', () => {
+        const { service } = makeService();
+
+        expect(service.resolveBookFileWriteStatus(DEFAULT_LIB_CONFIG, [{ id: 2, format: 'epub', sizeBytes: 1024, role: 'content' }], null)).toEqual({
+          enabled: false,
+          reason: 'no_primary_file',
+          writableFormats: [],
+          writableFields: [],
+        });
+      });
     });
   });
 });

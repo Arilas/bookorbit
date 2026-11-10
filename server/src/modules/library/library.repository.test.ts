@@ -7,7 +7,12 @@ vi.mock('drizzle-orm', () => ({
   sql: vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ op: 'sql', text: strings.join(''), values })),
 }));
 
-import { books, libraries } from '../../db/schema';
+vi.mock('../../db/reading-attempt-retention', () => ({ retainFinishedReads: vi.fn() }));
+vi.mock('../../db/kobo-entitlement-tombstones', () => ({ writeKoboTombstones: vi.fn() }));
+
+import { writeKoboTombstones } from '../../db/kobo-entitlement-tombstones';
+import { retainFinishedReads } from '../../db/reading-attempt-retention';
+import { bookLinkGroups, bookLinks, books, libraries, libraryFolders } from '../../db/schema';
 import { LIBRARY_BOOK_STATUS_PRESENT } from './library.constants';
 import { LibraryRepository } from './library.repository';
 
@@ -15,8 +20,13 @@ describe('LibraryRepository', () => {
   const txUpdateWhere = vi.fn();
   const txUpdateSet = vi.fn();
   const txUpdate = vi.fn(() => ({ set: txUpdateSet }));
+  const txExecute = vi.fn();
+  const txDeleteWhere = vi.fn();
+  const txDelete = vi.fn(() => ({ where: txDeleteWhere }));
   const tx = {
     update: txUpdate,
+    execute: txExecute,
+    delete: txDelete,
   };
 
   const db = {
@@ -40,6 +50,26 @@ describe('LibraryRepository', () => {
     txUpdate.mockImplementation(() => ({ set: txUpdateSet }));
     txUpdateSet.mockReturnValue({ where: txUpdateWhere });
     txUpdateWhere.mockResolvedValue(undefined);
+    txExecute.mockResolvedValue(undefined);
+    txDelete.mockImplementation(() => ({ where: txDeleteWhere }));
+    txDeleteWhere.mockResolvedValue(undefined);
+  });
+
+  it('delete drops the link groups the library leaves with fewer than two members, in the same transaction', async () => {
+    await repo.delete(42);
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(retainFinishedReads).toHaveBeenCalledWith(tx, { op: 'eq', left: books.libraryId, right: 42 });
+    expect(writeKoboTombstones).toHaveBeenCalledWith(tx, { op: 'eq', left: books.libraryId, right: 42 });
+    expect(txExecute).toHaveBeenCalledTimes(1);
+    const statement = txExecute.mock.calls[0]![0] as { text: string; values: unknown[] };
+    expect(statement.text).toMatch(/^\s*delete from /);
+    expect(statement.text).toContain(') < 2');
+    expect(statement.values).toEqual([bookLinkGroups, bookLinks, books, 42, bookLinks, books, 42]);
+    expect(txDelete).toHaveBeenCalledWith(libraries);
+    expect(txDeleteWhere).toHaveBeenCalledWith({ op: 'eq', left: libraries.id, right: 42 });
+    // Counted while the books are still there: the library delete cascades them away.
+    expect(txExecute.mock.invocationCallOrder[0]).toBeLessThan(txDelete.mock.invocationCallOrder[0]!);
   });
 
   it('updateDisplayOrders updates each library order entry in one transaction', async () => {
@@ -72,7 +102,7 @@ describe('LibraryRepository', () => {
     });
   });
 
-  it('findAllForUser includes file rename eligibility and counts only present books', async () => {
+  it('findAllForUser includes organization and automation settings and counts only present books', async () => {
     const orderBy = vi.fn().mockResolvedValue([]);
     const groupBy = vi.fn().mockReturnValue({ orderBy });
     const leftJoin = vi.fn().mockReturnValue({ groupBy });
@@ -84,6 +114,10 @@ describe('LibraryRepository', () => {
 
     expect(db.select).toHaveBeenCalledWith(
       expect.objectContaining({
+        organizationMode: libraries.organizationMode,
+        autoScanCronExpression: libraries.autoScanCronExpression,
+        watch: libraries.watch,
+        fileWriteEnabled: libraries.fileWriteEnabled,
         fileRenameEnabled: libraries.fileRenameEnabled,
       }),
     );
@@ -111,6 +145,43 @@ describe('LibraryRepository', () => {
     });
     expect(where).toHaveBeenCalledWith({ op: 'isNotNull', value: libraries.autoScanCronExpression });
     expect(orderBy).toHaveBeenCalledWith(libraries.id);
+  });
+
+  it('orders folders by creation time with an id tie-breaker', async () => {
+    const byLibraryOrderBy = vi.fn().mockResolvedValue([]);
+    const byLibraryWhere = vi.fn().mockReturnValue({ orderBy: byLibraryOrderBy });
+    const byLibraryFrom = vi.fn().mockReturnValue({ where: byLibraryWhere });
+    db.select.mockReturnValueOnce({ from: byLibraryFrom });
+
+    await repo.findFoldersByLibrary(7);
+
+    expect(byLibraryOrderBy).toHaveBeenCalledWith(libraryFolders.createdAt, libraryFolders.id);
+
+    const allOrderBy = vi.fn().mockResolvedValue([]);
+    const allFrom = vi.fn().mockReturnValue({ orderBy: allOrderBy });
+    db.select.mockReturnValueOnce({ from: allFrom });
+
+    await repo.findAllFolders();
+
+    expect(allOrderBy).toHaveBeenCalledWith(libraryFolders.libraryId, libraryFolders.createdAt, libraryFolders.id);
+
+    const scopedOrderBy = vi.fn().mockResolvedValue([]);
+    const scopedWhere = vi.fn().mockReturnValue({ orderBy: scopedOrderBy });
+    const scopedFrom = vi.fn().mockReturnValue({ where: scopedWhere });
+    db.select.mockReturnValueOnce({ from: scopedFrom });
+
+    await repo.findFoldersByLibraryIds([7, 8]);
+
+    expect(scopedOrderBy).toHaveBeenCalledWith(libraryFolders.libraryId, libraryFolders.createdAt, libraryFolders.id);
+
+    const pathsOrderBy = vi.fn().mockResolvedValue([]);
+    const pathsInnerJoin = vi.fn().mockReturnValue({ orderBy: pathsOrderBy });
+    const pathsFrom = vi.fn().mockReturnValue({ innerJoin: pathsInnerJoin });
+    db.select.mockReturnValueOnce({ from: pathsFrom });
+
+    await repo.findAllFolderPaths();
+
+    expect(pathsOrderBy).toHaveBeenCalledWith(libraries.displayOrder, libraries.name, libraryFolders.createdAt, libraryFolders.id);
   });
 
   it('getStats aggregates counts, sizes, and format map', async () => {

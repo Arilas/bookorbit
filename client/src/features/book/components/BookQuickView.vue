@@ -1,21 +1,22 @@
 <script setup lang="ts">
-import { computed, inject, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { BookOpen, ExternalLink, Eye, Folder, FolderPlus, Headphones, Pencil, Star, Trash2, X } from '@lucide/vue'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useLibraryPermissions } from '@/features/library/composables/useLibraryPermissions'
 import { Sheet, SheetContent, SheetTitle, SheetDescription } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DialogRoot, DialogContent, DialogPortal, DialogOverlay, DialogClose, DialogTitle, DialogDescription } from 'reka-ui'
 import { formatBytes } from '@/lib/formatting'
 import { getProviderColor } from '@/lib/provider-colors'
-import { providerIconPath } from '@/features/book/lib/provider-icons'
-import { libroFmAudiobookUrl, lubimyczytacBookUrl } from '@/features/book/lib/provider-links'
+import { createBookProviderLinks } from '@/features/book/lib/provider-links'
 import { useBookDetail } from '../composables/useBookDetail'
 import { useCoverVersions } from '../composables/useCoverVersions'
-import { getFormatColor } from '../lib/format-colors'
+import BookFormatChip from './BookFormatChip.vue'
+import { bookFormatEntries, fileFormatKey } from '../lib/book-formats'
 import { displayPublishedDate } from '../lib/published-date'
-import { FORMAT_TO_GROUP } from '@bookorbit/types'
-import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '../lib/cover-aspect-ratio'
+import { FORMAT_TO_GROUP, getPrimaryBookFile, isComicFormat } from '@bookorbit/types'
+import { useBookCoverAspectRatio } from '../composables/useBookCoverAspectRatio'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useSafeHtml } from '@/features/book/composables/useSafeHtml'
@@ -27,18 +28,12 @@ const { t } = useI18n()
 
 const props = defineProps<{ bookId: number | null; open: boolean }>()
 const { hasPermission } = usePermissions()
+const { hasLibraryPermission } = useLibraryPermissions()
+const canEditMetadata = computed(() => hasLibraryPermission('library_edit_metadata', detail.value?.libraryId, 'editor'))
 const emit = defineEmits<{
   'update:open': [value: boolean]
   action: [type: 'add-to-collection' | 'delete']
 }>()
-
-type ProviderLink = {
-  key: string
-  label: string
-  url: string
-  iconUrl: string
-  fallback: string
-}
 
 const router = useRouter()
 const { detail, loading, fetch } = useBookDetail()
@@ -68,7 +63,7 @@ watch(
 )
 
 const { coverUrl } = useCoverVersions()
-const coverSrc = computed(() => (detail.value ? coverUrl(detail.value.id, 'cover', detail.value.updatedAt ?? detail.value.addedAt) : null))
+const coverSrc = computed(() => (detail.value ? coverUrl(detail.value.id, 'cover', detail.value.coverVersion) : null))
 
 const coverSeed = computed(() => (detail.value ? (detail.value.title ?? detail.value.folderPath.split('/').pop() ?? String(detail.value.id)) : ''))
 const coverPlaceholderTitle = computed(() => (detail.value ? (detail.value.title ?? detail.value.folderPath.split('/').pop() ?? null) : null))
@@ -76,112 +71,17 @@ const coverPlaceholderTitle = computed(() => (detail.value ? (detail.value.title
 const seriesLine = computed(() => {
   if (!detail.value?.seriesName) return null
   const idx = detail.value.seriesIndex
-  return idx != null ? `${detail.value.seriesName} #${idx % 1 === 0 ? Math.floor(idx) : idx}` : detail.value.seriesName
+  return idx != null ? `${detail.value.seriesName} #${idx}` : detail.value.seriesName
 })
 
 const authorLine = computed(() => detail.value?.authors.map((a) => a.name).join(', ') ?? null)
+const coverAuthors = computed(() => detail.value?.authors.map((a) => a.name) ?? null)
 const ratingStars = [1, 2, 3, 4, 5]
-const providerLinks = computed<ProviderLink[]>(() => {
-  const out: ProviderLink[] = []
-  const ids = detail.value?.providerIds
-  if (!ids) return out
-  if (ids.google) {
-    out.push({
-      key: 'google',
-      label: 'Google Books',
-      url: `https://books.google.com/books?id=${ids.google}`,
-      iconUrl: providerIconPath('google'),
-      fallback: 'G',
-    })
-  }
-  if (ids.goodreads) {
-    out.push({
-      key: 'goodreads',
-      label: 'Goodreads',
-      url: `https://www.goodreads.com/book/show/${ids.goodreads}`,
-      iconUrl: providerIconPath('goodreads'),
-      fallback: 'GR',
-    })
-  }
-  if (ids.amazon) {
-    out.push({
-      key: 'amazon',
-      label: 'Amazon',
-      url: `https://www.amazon.com/dp/${ids.amazon}`,
-      iconUrl: providerIconPath('amazon'),
-      fallback: 'A',
-    })
-  }
-  if (ids.hardcover) {
-    out.push({
-      key: 'hardcover',
-      label: 'Hardcover',
-      url: `https://hardcover.app/books/${ids.hardcover}`,
-      iconUrl: providerIconPath('hardcover'),
-      fallback: 'H',
-    })
-  }
-  if (ids.openLibrary) {
-    const path = String(ids.openLibrary).startsWith('/works/') ? String(ids.openLibrary) : `/works/${ids.openLibrary}`
-    out.push({
-      key: 'openLibrary',
-      label: 'Open Library',
-      url: `https://openlibrary.org${path}`,
-      iconUrl: providerIconPath('openLibrary'),
-      fallback: 'OL',
-    })
-  }
-  if (ids.itunes) {
-    out.push({
-      key: 'itunes',
-      label: 'Apple Books',
-      url: `https://books.apple.com/book/id${ids.itunes}`,
-      iconUrl: providerIconPath('itunes'),
-      fallback: '',
-    })
-  }
-  if (ids.librofm) {
-    out.push({
-      key: 'librofm',
-      label: 'Libro.fm',
-      url: libroFmAudiobookUrl(ids.librofm),
-      iconUrl: providerIconPath('librofm'),
-      fallback: 'Lf',
-    })
-  }
-  if (ids.ranobedb) {
-    out.push({
-      key: 'ranobedb',
-      label: 'RanobeDB',
-      url: `https://ranobedb.org/book/${ids.ranobedb}`,
-      iconUrl: providerIconPath('ranobedb'),
-      fallback: 'RN',
-    })
-  }
-  if (ids.lubimyczytac) {
-    out.push({
-      key: 'lubimyczytac',
-      label: 'LubimyCzytac',
-      url: lubimyczytacBookUrl(ids.lubimyczytac),
-      iconUrl: providerIconPath('lubimyczytac'),
-      fallback: 'LC',
-    })
-  }
-  if (ids.aladin) {
-    out.push({
-      key: 'aladin',
-      label: 'Aladin',
-      url: `https://www.aladin.co.kr/shop/wproduct.aspx?ItemId=${ids.aladin}`,
-      iconUrl: providerIconPath('aladin'),
-      fallback: '알',
-    })
-  }
-  return out
-})
+const providerLinks = computed(() => (detail.value ? createBookProviderLinks(detail.value.providerIds) : []))
 
 const safeDescription = useSafeHtml(() => detail.value?.description)
 
-const coverAspectRatio = inject(COVER_ASPECT_RATIO_KEY, ref(DEFAULT_COVER_ASPECT_RATIO))
+const coverAspectRatio = useBookCoverAspectRatio(() => detail.value)
 const { bookCoverDisplayMode } = useDisplaySettings()
 const quickViewCoverAspectRatio = computed(() => {
   if (
@@ -197,28 +97,17 @@ const quickViewCoverAspectRatio = computed(() => {
   return `${coverImageRatio.value} / 1`
 })
 
-const primaryFile = computed(() => detail.value?.files.find((f) => f.role === 'primary') ?? detail.value?.files[0] ?? null)
+const primaryFile = computed(() => (detail.value ? getPrimaryBookFile(detail.value.files) : null))
 const isPrimaryAudio = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
-const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
-const knownFormats = computed(() => [
-  ...new Set((detail.value?.files ?? []).filter((f) => f.format && FORMAT_TO_GROUP[f.format]).map((f) => f.format!)),
-])
+const isPrimaryComic = computed(() => primaryFile.value?.format != null && isComicFormat(primaryFile.value.format))
+const formatEntries = computed(() => (detail.value ? bookFormatEntries(detail.value.files, detail.value.formatPriority) : []))
 const publishedDisplay = computed(() => (detail.value ? displayPublishedDate(detail.value.publishedDate, detail.value.publishedYear) : null))
 
 function providerLinkStyle(provider: string) {
   const color = getProviderColor(provider)
   return {
-    borderColor: `${color}66`,
-    backgroundColor: `${color}12`,
-  }
-}
-
-function formatBadgeStyle(fmt: string) {
-  const color = getFormatColor(fmt)
-  return {
-    color,
-    borderColor: `${color}66`,
-    backgroundColor: `${color}1a`,
+    borderColor: `color-mix(in srgb, ${color} 40%, transparent)`,
+    backgroundColor: `color-mix(in srgb, ${color} 7%, transparent)`,
   }
 }
 
@@ -295,7 +184,7 @@ function handleDelete() {
           <!-- Header: cover + title block -->
           <div class="p-5 pt-10 border-b shrink-0">
             <div v-if="loading" class="flex gap-4 items-start">
-              <Skeleton class="w-24 rounded shrink-0" :style="{ aspectRatio: coverAspectRatio }" />
+              <Skeleton class="w-24 rounded-xs shrink-0" :style="{ aspectRatio: coverAspectRatio }" />
               <div class="flex-1 space-y-2 pt-1">
                 <Skeleton class="h-4 w-full" />
                 <Skeleton class="h-3 w-3/4" />
@@ -307,7 +196,7 @@ function handleDelete() {
               <!-- Cover -->
               <BookCoverSurface
                 size="mini"
-                class="book-cover-surface--spine-fitted w-24 shrink-0 rounded overflow-hidden relative"
+                class="book-cover-surface--spine-fitted w-24 shrink-0 rounded-xs overflow-hidden relative"
                 :disable-spine="isPrimaryAudio"
                 :is-comic="isPrimaryComic"
                 :class="detail.coverSource && !coverFailed ? 'cursor-zoom-in' : ''"
@@ -326,6 +215,11 @@ function handleDelete() {
                   loading="eager"
                   :spine="!isPrimaryAudio"
                   :is-comic="isPrimaryComic"
+                  :authors="coverAuthors"
+                  :subtitle="detail.subtitle"
+                  :series-name="detail.seriesName"
+                  :series-index="detail.seriesIndex"
+                  :genres="detail.genres"
                   @load="handleCoverLoad"
                   @error="handleCoverError"
                 />
@@ -347,11 +241,11 @@ function handleDelete() {
                     target="_blank"
                     rel="noopener noreferrer"
                     :title="t('book.quickView.openIn', { provider: link.label })"
-                    class="inline-flex size-6 items-center justify-center rounded border transition-colors hover:bg-muted/60"
+                    class="inline-flex size-6 items-center justify-center rounded-xs border transition-colors hover:bg-muted/60"
                     :style="providerLinkStyle(link.key)"
                   >
                     <img
-                      v-if="!providerIconErrors[link.key]"
+                      v-if="link.iconUrl && !providerIconErrors[link.key]"
                       :src="link.iconUrl"
                       :alt="link.label"
                       class="size-3.5 rounded-[2px] object-contain"
@@ -380,34 +274,33 @@ function handleDelete() {
           <div class="flex-1 overflow-y-auto p-5 space-y-4">
             <template v-if="loading">
               <div class="flex gap-1.5">
-                <Skeleton class="h-5 w-12 rounded" />
-                <Skeleton class="h-5 w-16 rounded" />
-                <Skeleton class="h-5 w-10 rounded" />
+                <Skeleton class="h-5 w-12 rounded-xs" />
+                <Skeleton class="h-5 w-16 rounded-xs" />
+                <Skeleton class="h-5 w-10 rounded-xs" />
               </div>
               <Skeleton class="h-3 w-1/2" />
-              <Skeleton class="h-32 w-full rounded" />
+              <Skeleton class="h-32 w-full rounded-xs" />
             </template>
 
             <template v-else-if="detail">
               <!-- Format badges + meta chips -->
               <div class="flex flex-wrap gap-1.5">
-                <span
-                  v-for="fmt in knownFormats"
-                  :key="fmt"
-                  class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
-                  :style="formatBadgeStyle(fmt)"
-                >
-                  {{ fmt }}
-                </span>
-                <span v-if="detail.pageCount" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-muted text-muted-foreground">
+                <BookFormatChip
+                  v-for="entry in formatEntries"
+                  :key="entry.key"
+                  :format-key="entry.key"
+                  :primary="entry.primary"
+                  class="rounded-xs px-2 py-0.5 text-[10px] tracking-wider"
+                />
+                <span v-if="detail.pageCount" class="text-[10px] font-semibold px-2 py-0.5 rounded-xs bg-muted text-muted-foreground">
                   {{ t('book.quickView.pages', { count: detail.pageCount }) }}
                 </span>
-                <span v-if="publishedDisplay" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-muted text-muted-foreground">
+                <span v-if="publishedDisplay" class="text-[10px] font-semibold px-2 py-0.5 rounded-xs bg-muted text-muted-foreground">
                   {{ publishedDisplay }}
                 </span>
                 <span
                   v-if="detail.language"
-                  class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-muted text-muted-foreground"
+                  class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-xs bg-muted text-muted-foreground"
                 >
                   {{ detail.language }}
                 </span>
@@ -425,13 +318,8 @@ function handleDelete() {
                   {{ primaryFile.filename ?? t('book.quickView.fileNumber', { id: primaryFile.id }) }}
                 </p>
                 <div class="mt-1.5 flex items-center gap-1.5">
-                  <span
-                    class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
-                    :style="formatBadgeStyle(primaryFile.format ?? '?')"
-                  >
-                    {{ (primaryFile.format ?? '?').toUpperCase() }}
-                  </span>
-                  <span class="text-[10px] px-2 py-0.5 rounded bg-muted text-muted-foreground">
+                  <BookFormatChip :format-key="fileFormatKey(primaryFile) ?? '?'" class="rounded-xs px-2 py-0.5 text-[10px] tracking-wider" />
+                  <span class="text-[10px] px-2 py-0.5 rounded-xs bg-muted text-muted-foreground">
                     {{ formatBytes(primaryFile.sizeBytes) }}
                   </span>
                 </div>
@@ -533,7 +421,7 @@ function handleDelete() {
               </TooltipTrigger>
               <TooltipContent>{{ t('book.actions.peek') }}</TooltipContent>
             </Tooltip>
-            <Tooltip v-if="hasPermission('library_edit_metadata')">
+            <Tooltip v-if="canEditMetadata">
               <TooltipTrigger as-child>
                 <button
                   class="flex items-center justify-center gap-1.5 h-9 px-3 rounded-md border border-input bg-background text-sm hover:bg-muted transition-colors"
@@ -577,7 +465,7 @@ function handleDelete() {
     <DialogRoot :open="coverLightboxOpen" @update:open="coverLightboxOpen = $event">
       <DialogPortal>
         <DialogOverlay
-          class="fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
+          class="fixed inset-0 z-50 bg-scrim-media data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
         />
         <DialogContent
           class="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 max-w-[90vw] max-h-[90vh] outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"

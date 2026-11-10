@@ -1,4 +1,5 @@
 import { XMLParser } from 'fast-xml-parser';
+import { parseSeriesIndex } from '@bookorbit/types';
 import { parsePublishedDateKey, parsePublishedYear } from '../../../common/utils/published-date.utils';
 import { boundProviderId, type ProviderIdField } from '../../../common/utils/provider-id.utils';
 
@@ -15,7 +16,7 @@ export interface ParsedOpf {
   pageCount: number | null;
   rating: number | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   authors: { name: string; sortName: string | null }[];
   narrators: string[];
   genres: string[];
@@ -35,6 +36,28 @@ export interface ParsedOpf {
   coverHref: string | null;
   /** Raw `rendition:layout` value; `pre-paginated` marks a fixed-layout book such as a comic. */
   renditionLayout: string | null;
+}
+
+/**
+ * Extensions a converter leaves behind when it names `dc:title` after the file it was handed
+ * rather than after the book. Common enough on redistributed EPUBs to be worth undoing: one seen
+ * in the wild carried `D:\wwwroot\cleverpdf-web\523660\Circe - Madeline Miller.epub`, which
+ * matches against no provider at all.
+ */
+const FILE_NAMED_TITLE = /^(?:.*[\\/])?([^\\/]+)\.(?:epub|kepub|mobi|azw3?|azw|fb2|pdf|djvu|lit|rtf|txt|cbz|cbr|cb7|cbt)$/i;
+
+/**
+ * A title that is really a path or a filename, reduced to the part that could be a title.
+ *
+ * The extension is what proves it. A real title may contain a slash or a colon, so neither is
+ * enough on its own, but none ends in `.epub`. Anything else is returned untouched, because a
+ * title BookOrbit does not understand is still the one the book claims.
+ */
+function titleFromFileName(value: string): string {
+  const stem = FILE_NAMED_TITLE.exec(value.trim())?.[1];
+  if (!stem) return value;
+  const cleaned = stem.replace(/_+/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned || value;
 }
 
 const parser = new XMLParser({
@@ -78,6 +101,15 @@ function parseNumber(raw: string | null): number | null {
   if (!raw) return null;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseCalibreSeriesIndex(raw: string): string | null {
+  const parsed = parseSeriesIndex(raw);
+  if (parsed === null) return null;
+
+  // Calibre serializes whole-number series positions with a single `.0`; other
+  // fractional digits are exact user-facing labels and must remain untouched.
+  return /^\d+\.0$/.test(parsed) ? parsed.slice(0, -2) : parsed;
 }
 
 function parseBookOrbitTags(raw: string | null): string[] {
@@ -247,6 +279,15 @@ function getRefineValue(refines: Map<string, unknown[]>, id: string, property: s
   return null;
 }
 
+function getRefineValues(refines: Map<string, unknown[]>, id: string, property: string): string[] {
+  const values: string[] = [];
+  for (const node of refines.get(id) ?? []) {
+    const m = node as Record<string, unknown>;
+    if (m['@_property'] === property) values.push(getText(m));
+  }
+  return values;
+}
+
 export function parseOpf(xml: string): ParsedOpf {
   const root = parser.parse(xml) as Record<string, unknown>;
   const pkg = (root['package'] ?? root['opf:package'] ?? {}) as Record<string, unknown>;
@@ -299,6 +340,7 @@ export function parseOpf(xml: string): ParsedOpf {
     }
     title ??= getText(rawTitles[0]);
   }
+  if (title) title = titleFromFileName(title);
   subtitle ??= namedMeta('bookorbit:subtitle');
   subtitle ??= calibreUser.subtitle;
 
@@ -317,21 +359,21 @@ export function parseOpf(xml: string): ParsedOpf {
 
     const id = mo['@_id'] as string | undefined;
     // EPUB 3: role via refines
-    const role3 = id ? getRefineValue(refineMap, id, 'role') : null;
+    const roles3 = id ? getRefineValues(refineMap, id, 'role') : [];
     // EPUB 2: opf:role attribute
     const role2 = (mo['@_opf:role'] ?? mo['@_role']) as string | undefined;
-    const role = normalizeCreatorRole(role3 ?? role2 ?? defaults.role);
+    const roles = (roles3.length > 0 ? roles3 : [role2 ?? defaults.role]).map(normalizeCreatorRole).filter(Boolean);
 
-    if (NARRATOR_ROLES.has(role)) {
+    if (roles.some((role) => NARRATOR_ROLES.has(role))) {
       const key = name.toLowerCase();
-      if (seenNarrators.has(key)) return;
-      seenNarrators.add(key);
-      narrators.push(name);
-      return;
+      if (!seenNarrators.has(key)) {
+        seenNarrators.add(key);
+        narrators.push(name);
+      }
     }
 
     if (!defaults.allowAuthor) return;
-    if (role !== 'aut' && role !== '') return; // skip editors, illustrators, etc.
+    if (roles.length > 0 && !roles.includes('aut')) return; // skip editors, illustrators, etc.
 
     // EPUB 3: file-as via refines; EPUB 2: opf:file-as attribute
     const sortName = (id ? getRefineValue(refineMap, id, 'file-as') : null) ?? ((mo['@_opf:file-as'] ?? mo['@_file-as'] ?? null) as string | null);
@@ -457,11 +499,10 @@ export function parseOpf(xml: string): ParsedOpf {
 
   // ── Series (Calibre EPUB2, then EPUB3) ────────────────────────────────────
   let seriesName: string | null = namedMeta('calibre:series');
-  let seriesIndex: number | null = null;
+  let seriesIndex: string | null = null;
   const rawSeriesIdx = namedMeta('calibre:series_index');
   if (rawSeriesIdx) {
-    const idx = parseFloat(rawSeriesIdx);
-    if (!isNaN(idx)) seriesIndex = idx;
+    seriesIndex = parseCalibreSeriesIndex(rawSeriesIdx);
   }
 
   if (!seriesName) {
@@ -474,7 +515,7 @@ export function parseOpf(xml: string): ParsedOpf {
         const id = mo['@_id'] as string | undefined;
         if (id) {
           const pos = getRefineValue(refineMap, id, 'group-position');
-          if (pos) seriesIndex = parseFloat(pos) || null;
+          if (pos) seriesIndex = parseSeriesIndex(pos);
         }
         break;
       }

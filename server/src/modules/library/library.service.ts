@@ -1,3 +1,7 @@
+import { isDeepStrictEqual } from 'node:util';
+import { RegexMetadataService } from '../metadata/regex/regex-metadata.service';
+import { RegexMetadataPreviewDto, RegexMetadataValidationDto } from './dto/regex-metadata.dto';
+import { ReadingAttemptEventsService } from '../user-book-status/reading-attempt-events.service';
 import {
   BadRequestException,
   ConflictException,
@@ -11,11 +15,20 @@ import { ConfigService } from '@nestjs/config';
 import { readdir, rm, stat } from 'fs/promises';
 import { join } from 'path';
 
-import { DEFAULT_FORMAT_PRIORITY } from '@bookorbit/types';
-import type { AccessLevel, LibraryFileSyncProgressEvent, LibraryOverviewEntry, OrganizationMode, WriteResult } from '@bookorbit/types';
+import { DEFAULT_FORMAT_PRIORITY, resolveRegexMetadataConfig } from '@bookorbit/types';
+import type {
+  AccessLevel,
+  LibraryFileSyncProgressEvent,
+  LibraryOverviewEntry,
+  OrganizationMode,
+  RegexMetadataConfig,
+  WriteResult,
+} from '@bookorbit/types';
+import { LibraryOperationGate } from '../../common/services/library-operation-gate.service';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { normalizeIconValue } from '../../common/utils/icon-value.utils';
 import type { RequestUser } from '../../common/types/request-user';
+import type { LibraryFolder } from '../../db/schema/libraries';
 import { AchievementEventsService, ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED } from '../achievement/achievement-events.service';
 import { FileWriteService } from '../file-write/file-write.service';
 import { PathPolicyService } from '../path/path-policy.service';
@@ -27,7 +40,13 @@ import { GrantLibraryAccessDto } from './dto/grant-library-access.dto';
 import { PrescanLibraryDto } from './dto/prescan-library.dto';
 import { ReorderLibrariesDto } from './dto/reorder-libraries.dto';
 import { UpdateLibraryDto } from './dto/update-library.dto';
-import { DEFAULT_LIBRARY_COVER_ASPECT_RATIO, DEFAULT_LIBRARY_ORGANIZATION_MODE, LIBRARY_METADATA_PRECEDENCE_DEFAULT } from './library.constants';
+import {
+  DEFAULT_LIBRARY_ADDED_AT_SOURCE,
+  DEFAULT_LIBRARY_COVER_ASPECT_RATIO,
+  DEFAULT_LIBRARY_ORGANIZATION_MODE,
+  EDITOR_ACCESS_LEVELS,
+  LIBRARY_METADATA_PRECEDENCE_DEFAULT,
+} from './library.constants';
 import { LibraryRepository } from './library.repository';
 import { LibraryScanSchedulerService } from './library-scan-scheduler.service';
 
@@ -58,6 +77,9 @@ export class LibraryService {
     private readonly achievementEvents: AchievementEventsService,
     private readonly pathPolicy: PathPolicyService,
     private readonly scanScheduler: LibraryScanSchedulerService,
+    private readonly regexMetadata: RegexMetadataService,
+    private readonly readingAttemptEvents: ReadingAttemptEventsService,
+    private readonly libraryGate: LibraryOperationGate,
   ) {
     this.appDataPath = this.config.get<string>('storage.appDataPath')!;
   }
@@ -68,15 +90,21 @@ export class LibraryService {
     if (!hasAccess) throw new ForbiddenException('No access to this library');
   }
 
+  async verifyUserAccessLevel(userId: number, libraryId: number, isSuperuser: boolean, required: AccessLevel): Promise<void> {
+    if (isSuperuser) return;
+    const accessLevel = await this.libraryRepo.findUserAccessLevel(userId, libraryId);
+    const rank: Record<AccessLevel, number> = { viewer: 1, editor: 2, owner: 3 };
+    if (!accessLevel) throw new ForbiddenException('No access to this library');
+    if (rank[accessLevel] < rank[required]) throw new ForbiddenException('Insufficient library access level');
+  }
+
   async findAll(user: RequestUser) {
     const librariesForUser = user.isSuperuser
       ? await this.libraryRepo.findAll()
       : await this.libraryRepo.findAllForUser(user.id, user.contentFilters);
-    const folders = user.isSuperuser
-      ? await this.libraryRepo.findAllFolders()
-      : await this.libraryRepo.findFoldersByLibraryIds(librariesForUser.map((library) => library.id));
+    const folders = await this.libraryRepo.findFoldersByLibraryIds(librariesForUser.map((library) => library.id));
 
-    const foldersByLibraryId = new Map<number, typeof folders>();
+    const foldersByLibraryId = new Map<number, LibraryFolder[]>();
     for (const folder of folders) {
       const currentFolders = foldersByLibraryId.get(folder.libraryId);
       if (currentFolders) {
@@ -92,8 +120,26 @@ export class LibraryService {
     }));
   }
 
+  /**
+   * Which of these users can open this library. Callers that hold user ids rather than whole
+   * users - a notifier resolving one link per recipient, for instance - cannot ask
+   * `verifyUserAccess`, which needs the superuser flag handed to it.
+   */
+  async findUserIdsWithAccess(libraryId: number, userIds: number[]): Promise<Set<number>> {
+    if (userIds.length === 0) return new Set();
+    const rows = await this.libraryRepo.findUserIdsWithAccess(libraryId, userIds);
+    return new Set(rows.map(({ id }) => id));
+  }
+
   async findAccessibleLibraryIds(user: RequestUser): Promise<number[]> {
     const ids = user.isSuperuser ? await this.libraryRepo.findAllIds() : await this.libraryRepo.findAccessibleIdsForUser(user.id);
+    return ids.map(({ id }) => id);
+  }
+
+  async findEditableLibraryIds(user: RequestUser): Promise<number[]> {
+    const ids = user.isSuperuser
+      ? await this.libraryRepo.findAllIds()
+      : await this.libraryRepo.findAccessibleIdsForUser(user.id, EDITOR_ACCESS_LEVELS);
     return ids.map(({ id }) => id);
   }
 
@@ -104,9 +150,27 @@ export class LibraryService {
     return { ...normalizeLibraryOrganizationMode(library), folders };
   }
 
+  private async assertRegexMetadataLibrary(libraryId: number | undefined) {
+    if (libraryId === undefined) return;
+    await this.findOne(libraryId);
+  }
+
+  async validateRegexMetadata(dto: RegexMetadataValidationDto) {
+    await this.assertRegexMetadataLibrary(dto.libraryId);
+    return this.regexMetadata.check(dto.config);
+  }
+
+  async previewRegexMetadata(dto: RegexMetadataPreviewDto) {
+    await this.assertRegexMetadataLibrary(dto.libraryId);
+    return this.regexMetadata.preview(dto.config, dto.relativePath);
+  }
+
   async create(dto: CreateLibraryDto) {
+    const regexMetadata = resolveRegexMetadataConfig(dto.regexMetadata);
+    await this.regexMetadata.validate(regexMetadata);
     await this.assertNameAvailable(dto.name);
     const folderPaths = await this.assertFolderPathsWithinBrowseRoot(dto.folders);
+    await this.assertFoldersDoNotOverlap(folderPaths);
     const icon = normalizeIconValue(dto.icon);
     if (!icon) {
       throw new BadRequestException('Icon is required');
@@ -118,10 +182,12 @@ export class LibraryService {
       displayOrder: dto.displayOrder ?? 0,
       watch: dto.watch ?? false,
       autoScanCronExpression: dto.autoScanCronExpression ?? null,
+      regexMetadata,
       metadataPrecedence: dto.metadataPrecedence ?? [...LIBRARY_METADATA_PRECEDENCE_DEFAULT],
       formatPriority: dto.formatPriority ?? [...DEFAULT_FORMAT_PRIORITY],
       allowedFormats: dto.allowedFormats ?? [],
       organizationMode: dto.organizationMode ?? DEFAULT_LIBRARY_ORGANIZATION_MODE,
+      addedAtSource: dto.addedAtSource ?? DEFAULT_LIBRARY_ADDED_AT_SOURCE,
       excludePatterns: dto.excludePatterns ?? [],
       coverAspectRatio: dto.coverAspectRatio ?? DEFAULT_LIBRARY_COVER_ASPECT_RATIO,
       readingThreshold: dto.readingThreshold ?? 0.25,
@@ -141,27 +207,41 @@ export class LibraryService {
       fileWriteKindleMaxFileSizeMb: dto.fileWriteKindleMaxFileSizeMb ?? 100,
       fileWriteAudioEnabled: dto.fileWriteAudioEnabled ?? true,
       fileWriteAudioMaxFileSizeMb: dto.fileWriteAudioMaxFileSizeMb ?? 500,
+      fileWriteAllFiles: dto.fileWriteAllFiles ?? false,
+      fileWriteReadAlongEnabled: dto.fileWriteReadAlongEnabled ?? false,
+      fileWriteReadAlongMaxFileSizeMb: dto.fileWriteReadAlongMaxFileSizeMb ?? 1000,
       fileRenameEnabled: dto.fileRenameEnabled ?? false,
     });
 
-    const folders = await Promise.all(folderPaths.map((path) => this.libraryRepo.insertFolder({ libraryId: library.id, path })));
+    const folders = await this.libraryRepo.insertFolders(folderPaths.map((path) => ({ libraryId: library.id, path })));
+    this.scannerService.forgetLibraryRoots();
 
     if (library.watch) {
       await this.fileWatcherService.startWatcher(
         library.id,
-        folders.map(([f]) => f.path),
+        folders.map((folder) => folder.path),
       );
     }
 
     this.scanScheduler.syncSchedule(library.id, dto.autoScanCronExpression ?? null);
     this.scannerService.startScanAsync(library.id);
 
-    return { ...normalizeLibraryOrganizationMode(library), folders: folders.map(([f]) => f) };
+    return { ...normalizeLibraryOrganizationMode(library), folders };
   }
 
   async update(id: number, dto: UpdateLibraryDto) {
     const [existing] = await this.libraryRepo.findById(id);
     if (!existing) throw new NotFoundException('Library not found');
+
+    // Compared as the rules that would run: a preset runs its current rules whatever copy is stored,
+    // so re-sending a preset is no change even after the preset itself was updated.
+    const regexRules = (config: RegexMetadataConfig | null | undefined) =>
+      config ? [config.preset ?? null, config.rules.map(({ pattern, flags }) => [pattern, flags])] : null;
+    const incomingRegexMetadata = dto.regexMetadata === undefined ? undefined : resolveRegexMetadataConfig(dto.regexMetadata);
+    const regexMetadataChanged =
+      incomingRegexMetadata !== undefined &&
+      !isDeepStrictEqual(regexRules(incomingRegexMetadata), regexRules(resolveRegexMetadataConfig(existing.regexMetadata)));
+    if (regexMetadataChanged) await this.regexMetadata.validate(incomingRegexMetadata);
 
     const existingOrganizationMode = normalizeOrganizationMode(existing.organizationMode);
     if (dto.organizationMode !== undefined && dto.organizationMode !== existingOrganizationMode) {
@@ -175,7 +255,10 @@ export class LibraryService {
     }
 
     const { folders: rawFolderPaths, ...fields } = dto;
+    if (!regexMetadataChanged) delete fields.regexMetadata;
+    else fields.regexMetadata = incomingRegexMetadata;
     const folderPaths = rawFolderPaths === undefined ? undefined : await this.assertFolderPathsWithinBrowseRoot(rawFolderPaths);
+    if (folderPaths !== undefined) await this.assertFoldersDoNotOverlap(folderPaths, id);
     const icon = fields.icon !== undefined ? normalizeIconValue(fields.icon) : normalizeIconValue(existing.icon);
     if (!icon) {
       throw new BadRequestException('Icon is required');
@@ -189,14 +272,17 @@ export class LibraryService {
 
     if (folderPaths !== undefined) {
       const existingFolders = await this.libraryRepo.findFoldersByLibrary(id);
-      const existingByPath = new Map(existingFolders.map((f) => [f.path, f]));
-      const newPathSet = new Set(folderPaths);
+      const existingPaths = new Set(existingFolders.map((f) => f.path));
+      const nextPaths = new Set(folderPaths);
 
-      const toRemove = existingFolders.filter((f) => !newPathSet.has(f.path));
+      const toRemove = existingFolders.filter((f) => !nextPaths.has(f.path));
       await Promise.all(toRemove.map((f) => this.libraryRepo.deleteFolder(f.id)));
 
-      const toAdd = folderPaths.filter((p) => !existingByPath.has(p));
-      await Promise.all(toAdd.map((path) => this.libraryRepo.insertFolder({ libraryId: id, path })));
+      const toAdd = folderPaths.filter((path) => !existingPaths.has(path));
+      if (toAdd.length > 0) {
+        await this.libraryRepo.insertFolders(toAdd.map((path) => ({ libraryId: id, path })));
+      }
+      if (toRemove.length > 0 || toAdd.length > 0) this.scannerService.forgetLibraryRoots();
     }
 
     const folders = await this.libraryRepo.findFoldersByLibrary(id);
@@ -229,13 +315,36 @@ export class LibraryService {
   async remove(id: number) {
     const [existing] = await this.libraryRepo.findById(id);
     if (!existing) throw new NotFoundException('Library not found');
-
-    await this.fileWatcherService.stopWatcher(id);
-
-    const bookRows = await this.libraryRepo.findBookIdsByLibrary(id);
-    await this.libraryRepo.delete(id);
-    this.scanScheduler.removeSchedule(id);
-    await this.cleanupCoverDirectories(bookRows.map(({ id: bookId }) => bookId));
+    // Held for the whole delete, so a scan, move, rename or merge cannot start on rows and files
+    // that are going away, and one already running is not cut off halfway through its writes.
+    const releaseGate = this.libraryGate.tryAcquire(id, 'library_delete');
+    if (!releaseGate) {
+      throw new ConflictException({
+        message: 'Another operation is running in this library. Try again when it finishes.',
+        errorCode: 'LIBRARY_BUSY',
+      });
+    }
+    const event = 'library.delete';
+    const startedAt = Date.now();
+    this.logger.log(`[${event}] [start] libraryId=${id} - library deletion started`);
+    try {
+      await this.fileWatcherService.stopWatcher(id);
+      const bookRows = await this.libraryRepo.findBookIdsByLibrary(id);
+      await this.libraryRepo.delete(id);
+      this.scannerService.forgetLibraryRoots();
+      this.readingAttemptEvents.notifyChanged(null);
+      this.scanScheduler.removeSchedule(id);
+      await this.cleanupCoverDirectories(bookRows.map(({ id: bookId }) => bookId));
+      this.logger.log(`[${event}] [end] libraryId=${id} durationMs=${Date.now() - startedAt} books=${bookRows.length} - library deletion completed`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `[${event}] [fail] libraryId=${id} durationMs=${Date.now() - startedAt} errorClass=${error instanceof Error ? error.name : 'Error'} error="${sanitizeLogValue(message)}" - library deletion failed`,
+      );
+      throw error;
+    } finally {
+      releaseGate();
+    }
   }
 
   async prescan(dto: PrescanLibraryDto) {
@@ -281,6 +390,7 @@ export class LibraryService {
         }
 
         for (const existing of allFolderPaths) {
+          if (dto.libraryId !== undefined && existing.libraryId === dto.libraryId) continue;
           if (pathsOverlap(resolvedInputPath, existing.path)) {
             overlapLibrary = existing.libraryName;
             break;
@@ -338,24 +448,31 @@ export class LibraryService {
   }
 
   async reorder(dto: ReorderLibrariesDto) {
+    const requestedIds = [...new Set(dto.order.map(({ id }) => id))];
+    const visible = await this.libraryRepo.findByIds(requestedIds);
+    if (visible.length !== requestedIds.length) throw new NotFoundException('Library not found');
     await this.libraryRepo.updateDisplayOrders(dto.order);
   }
 
-  getAccess(libraryId: number) {
+  async getAccess(libraryId: number) {
+    await this.assertLibraryAvailable(libraryId);
     return this.libraryRepo.getAccessWithUsers(libraryId);
   }
 
   async grantAccess(libraryId: number, dto: GrantLibraryAccessDto) {
+    await this.assertLibraryAvailable(libraryId);
     const result = await this.libraryRepo.grantAccess(libraryId, dto.userId, dto.accessLevel);
     this.achievementEvents.emit(ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED, { userId: dto.userId, libraryId });
     return result;
   }
 
-  updateAccess(libraryId: number, userId: number, accessLevel: AccessLevel) {
+  async updateAccess(libraryId: number, userId: number, accessLevel: AccessLevel) {
+    await this.assertLibraryAvailable(libraryId);
     return this.libraryRepo.updateAccess(libraryId, userId, accessLevel);
   }
 
   async revokeAccess(libraryId: number, userId: number) {
+    await this.assertLibraryAvailable(libraryId);
     const result = await this.libraryRepo.revokeAccess(libraryId, userId);
     this.achievementEvents.emit(ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED, { userId, libraryId });
     return result;
@@ -413,8 +530,42 @@ export class LibraryService {
     if (existing.length > 0) throw new ConflictException('A library with this name already exists');
   }
 
+  private async assertLibraryAvailable(libraryId: number): Promise<void> {
+    const [library] = await this.libraryRepo.findById(libraryId);
+    if (!library) throw new NotFoundException('Library not found');
+  }
+
   private async assertFolderPathsWithinBrowseRoot(paths: string[]): Promise<string[]> {
-    return Promise.all(paths.map((path) => this.pathPolicy.assertWithinBrowseRoot(path)));
+    const resolved = await Promise.all(paths.map((path) => this.pathPolicy.assertWithinBrowseRoot(path)));
+    return [...new Set(resolved)];
+  }
+
+  /**
+   * A file can belong to one book in one library, so a folder this request adds may not sit inside
+   * another library folder, contain one, or repeat one, in this library or any other. Folders the
+   * library already has are not re-checked: a library saved before this rule keeps saving until an
+   * admin moves its folders apart, and the scanner settles who owns what in the meantime.
+   */
+  private async assertFoldersDoNotOverlap(paths: string[], libraryId?: number): Promise<void> {
+    const existing = await this.libraryRepo.findAllFolderPaths();
+    const current = new Set(existing.filter((folder) => folder.libraryId === libraryId).map((folder) => folder.path));
+    const otherLibraries = existing.filter((folder) => folder.libraryId !== libraryId);
+
+    for (const path of paths) {
+      if (current.has(path)) continue;
+      const inAnotherLibrary = otherLibraries.find((folder) => pathsOverlap(path, folder.path));
+      const inThisLibrary = paths.find((other) => other !== path && pathsOverlap(path, other));
+      if (!inAnotherLibrary && inThisLibrary === undefined) continue;
+      throw new ConflictException({
+        message: 'Library folders cannot sit inside one another or be shared between libraries.',
+        errorCode: 'LIBRARY_FOLDER_OVERLAP',
+        errorMeta: {
+          path,
+          overlapPath: inAnotherLibrary?.path ?? inThisLibrary,
+          ...(inAnotherLibrary ? { overlapLibrary: inAnotherLibrary.libraryName } : {}),
+        },
+      });
+    }
   }
 
   private async cleanupCoverDirectories(bookIds: number[]): Promise<void> {

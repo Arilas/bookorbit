@@ -7,6 +7,7 @@
  *   {token:modifier} a placeholder with a transform
  *   <...>            an optional group, dropped when a placeholder inside it is empty
  *   <a|b>            the same, with `b` used when `a` cannot be filled
+ *   <a|b|c>          `b` only when it fills, otherwise `c`
  *   /                a path separator
  */
 export type PatternPieceKind = 'literal' | 'token' | 'modifier' | 'optional' | 'fallback' | 'separator'
@@ -23,7 +24,7 @@ export interface PatternPiece {
  * its switch and returns the value unchanged, so a typo silently produces a wrong path
  * rather than an error. Listing them here lets both the palette and the validator agree.
  */
-export const PATTERN_MODIFIERS = ['first', 'sort', 'initial', 'fixed2', 'upper', 'lower'] as const
+export const PATTERN_MODIFIERS = ['first', 'sort', 'initial', 'fixed2', 'max3', 'upper', 'lower'] as const
 export type PatternModifier = (typeof PATTERN_MODIFIERS)[number]
 
 const KNOWN_MODIFIERS = new Set<string>(PATTERN_MODIFIERS)

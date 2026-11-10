@@ -33,7 +33,7 @@ vi.mock('vue-router', async (importOriginal) => {
   }
 })
 vi.mock('@/features/auth/composables/usePermissions', () => ({
-  usePermissions: () => ({ hasPermission: () => false }),
+  usePermissions: () => ({ hasPermission: () => false, isDemoRestrictedAccount: { value: false } }),
 }))
 vi.mock('@/lib/api', () => ({
   api: vi.fn<(...args: unknown[]) => Promise<{ ok: boolean; json: () => Promise<Record<string, never>> }>>(async () => ({
@@ -69,8 +69,10 @@ const globalStubs = {
     DialogOverlay: { template: '<div />' },
     DialogContent: { template: '<div><slot /></div>' },
     DialogClose: { template: '<button><slot /></button>' },
+    BookCoverLightbox: true,
     AddToCollectionSheet: true,
     MoveToLibrarySheet: true,
+    SendBookDialog: true,
     DeleteBookDialog: true,
     ResetReadingStateDialog: true,
   },
@@ -101,6 +103,9 @@ function makeBook(overrides: Partial<BookDetail> = {}): BookDetail {
     personalNoteUpdatedAt: null,
     communityRatings: [],
     coverSource: null,
+    coverMedia: [],
+    covers: { ebook: null, audio: null },
+    coverVersion: 'legacy:2024-01-01T00:00:00.000Z',
     hardcoverEditionId: null,
     providerIds: {},
     authors: [],
@@ -112,6 +117,17 @@ function makeBook(overrides: Partial<BookDetail> = {}): BookDetail {
     metadataScore: null,
     readStatus: null,
     audioMetadata: null,
+    readAloudSync: {
+      mode: 'auto',
+      state: 'unavailable',
+      unavailableReason: 'no_media_overlay_epub',
+      overlayFileId: null,
+      audioDurationSeconds: null,
+      overlayDurationSeconds: null,
+      durationDifferenceSeconds: null,
+      durationDifferenceRatio: null,
+      koreaderDownloadAvailable: false,
+    },
     formatPriority: [],
     comicMetadata: null,
     customMetadata: [],
@@ -126,6 +142,38 @@ function makeApiResponse(data: unknown, ok = true): Response {
     ok,
     json: async () => data,
   } as Response
+}
+
+type FlatProgressRow = {
+  fileId: number
+  percentage: number
+  cfi?: string | null
+  pageNumber?: number | null
+  positionSeconds?: number | null
+  mediaOverlayFragment?: string | null
+  mediaOverlaySectionIndex?: number | null
+  updatedAt?: string | null
+}
+
+/** A `GET /reading-progress?bookId=` answer holding these files. */
+function progressList(rows: FlatProgressRow[]) {
+  return {
+    items: rows.map((row) => ({
+      fileId: row.fileId,
+      percentage: row.percentage,
+      updatedAt: row.updatedAt ?? null,
+      text: { cfi: row.cfi ?? null, page: row.pageNumber ?? null, updatedAt: null },
+      narration: {
+        seconds: row.positionSeconds ?? null,
+        fragment: row.mediaOverlayFragment ?? null,
+        sectionIndex: row.mediaOverlaySectionIndex ?? null,
+        percentage: null,
+        updatedAt: null,
+      },
+      kobo: { source: null, type: null, value: null, contentPercent: null },
+      koreader: null,
+    })),
+  }
 }
 
 describe('DetailsTab - missing state', () => {
@@ -156,6 +204,29 @@ describe('DetailsTab - missing state', () => {
 })
 
 describe('DetailsTab - present state', () => {
+  it('hands the shared cover lightbox the book, opening on the face', async () => {
+    const book = makeBook({
+      coverSource: 'extracted',
+      coverMedia: ['ebook'],
+      covers: {
+        ebook: { source: 'extracted', updatedAt: '2026-09-01T00:00:00.000Z', width: 600, height: 900 },
+        audio: null,
+      },
+    })
+    const wrapper = mount(DetailsTab, { props: { book }, global: globalStubs })
+    // Only a cover that has loaded can be opened, so the button appears with it.
+    expect(wrapper.find('button[aria-label="View larger cover"]').exists()).toBe(false)
+    wrapper.getComponent({ name: 'BookCoverArtwork' }).vm.$emit('load', 2 / 3)
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('button[aria-label="View larger cover"]').trigger('click')
+
+    const lightbox = wrapper.getComponent({ name: 'BookCoverLightbox' })
+    expect(lightbox.props('open')).toBe(true)
+    expect(lightbox.props('book')).toStrictEqual(book)
+    expect(lightbox.props('medium')).toBeUndefined()
+  })
+
   it('does not render the warning banner', () => {
     const wrapper = mount(DetailsTab, {
       props: { book: makeBook({ status: 'present' }) },
@@ -196,6 +267,29 @@ describe('DetailsTab - present state', () => {
     expect(ranobedbLink.attributes('href')).toBe('https://ranobedb.org/book/1287')
     expect(ranobedbLink.find('img[alt="RanobeDB"][src="/assets/provider-icons/ranobedb.svg"]').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('Info Links')
+  })
+
+  it('renders a direct ComicVine issue link with the monogram fallback', () => {
+    const wrapper = mount(DetailsTab, {
+      props: {
+        book: makeBook({
+          providerIds: {
+            comicvine: '1126983',
+          },
+        }),
+      },
+      global: globalStubs,
+    })
+
+    const comicVineLink = wrapper.find('a[title="Open in ComicVine"]')
+    expect(comicVineLink.exists()).toBe(true)
+    expect(comicVineLink.attributes()).toMatchObject({
+      href: 'https://comicvine.gamespot.com/issue/4000-1126983/',
+      target: '_blank',
+      rel: 'noopener noreferrer',
+    })
+    expect(comicVineLink.find('img').exists()).toBe(false)
+    expect(comicVineLink.text()).toBe('CV')
   })
 
   it('fetches collections data for Kobo sync but does not display them', async () => {
@@ -256,6 +350,20 @@ describe('DetailsTab - present state', () => {
       body: JSON.stringify({ note: 'Loved it.' }),
     })
     expect(wrapper.emitted('saved')?.[0]).toEqual([updated])
+  })
+
+  it('opens the personal review editor from the review summary', async () => {
+    const wrapper = mount(DetailsTab, {
+      props: { book: makeBook() },
+      global: globalStubs,
+    })
+    await flushPromises()
+
+    const writeButton = wrapper.findAll('button').find((button) => button.text() === 'Write')
+    expect(writeButton).toBeTruthy()
+    await writeButton!.trigger('click')
+
+    expect(wrapper.find('textarea').isVisible()).toBe(true)
   })
 
   it('shows reading date fields when both dates are null and status is null', () => {
@@ -321,6 +429,54 @@ describe('DetailsTab - present state', () => {
     )
   })
 
+  it('allows the finished date to match the started date', async () => {
+    vi.mocked(api).mockImplementation(async (input, init) => {
+      if (input === '/api/v1/books/1/status' && init?.method === 'PATCH') {
+        return makeApiResponse({
+          status: 'read',
+          source: 'manual',
+          startedAt: '2026-04-10',
+          finishedAt: '2026-04-10',
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        })
+      }
+      if (input === '/api/v1/collections/membership') return makeApiResponse([])
+      return makeApiResponse({}, false)
+    })
+
+    const wrapper = mount(DetailsTab, {
+      props: {
+        book: makeBook({
+          readStatus: {
+            status: 'reading',
+            source: 'manual',
+            startedAt: '2026-04-10',
+            finishedAt: null,
+            updatedAt: '2026-04-10T00:00:00.000Z',
+          },
+        }),
+      },
+      global: globalStubs,
+    })
+
+    await wrapper.find('button[title="Edit date finished"]').trigger('click')
+    await wrapper.find('input[type="date"]').setValue('2026-04-10')
+
+    const saveButton = wrapper.findAll('button').find((button) => button.text() === 'Save')
+    expect(saveButton?.exists()).toBe(true)
+    await saveButton!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('Date Finished must be on or after Date Started')
+    expect(vi.mocked(api)).toHaveBeenCalledWith(
+      '/api/v1/books/1/status',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ finishedAt: '2026-04-10' }),
+      }),
+    )
+  })
+
   it('shows validation for finished date earlier than started date and blocks save', async () => {
     vi.mocked(api).mockImplementation(async (input) => {
       if (input === '/api/v1/collections/membership') return makeApiResponse([])
@@ -358,8 +514,8 @@ describe('DetailsTab - present state', () => {
 
   it('formats tiny non-zero progress as <1%', async () => {
     vi.mocked(api).mockImplementation(async (input) => {
-      if (input === '/api/v1/books/1/progress') {
-        return makeApiResponse([{ fileId: 101, cfi: null, pageNumber: null, percentage: 0.4, updatedAt: null }])
+      if (input === '/api/v1/reading-progress?bookId=1') {
+        return makeApiResponse(progressList([{ fileId: 101, cfi: null, pageNumber: null, percentage: 0.4, updatedAt: null }]))
       }
       if (input === '/api/v1/collections/membership') {
         return makeApiResponse([])
@@ -394,8 +550,8 @@ describe('DetailsTab - present state', () => {
 
   it('formats near-complete progress as >99%', async () => {
     vi.mocked(api).mockImplementation(async (input) => {
-      if (input === '/api/v1/books/1/progress') {
-        return makeApiResponse([{ fileId: 101, cfi: null, pageNumber: null, percentage: 99.6, updatedAt: null }])
+      if (input === '/api/v1/reading-progress?bookId=1') {
+        return makeApiResponse(progressList([{ fileId: 101, cfi: null, pageNumber: null, percentage: 99.6, updatedAt: null }]))
       }
       if (input === '/api/v1/collections/membership') {
         return makeApiResponse([])
@@ -428,17 +584,68 @@ describe('DetailsTab - present state', () => {
     expect(wrapper.text()).toContain('>99%')
   })
 
+  it('shows EPUB3 narration progress when only media-overlay position is stored', async () => {
+    vi.mocked(api).mockImplementation(async (input) => {
+      if (input === '/api/v1/reading-progress?bookId=1') {
+        return makeApiResponse(
+          progressList([
+            {
+              fileId: 101,
+              cfi: null,
+              pageNumber: null,
+              percentage: 0,
+              positionSeconds: 900,
+              mediaOverlayFragment: 'OPS/chapter.xhtml#s12',
+              mediaOverlaySectionIndex: 3,
+              updatedAt: null,
+            },
+          ]),
+        )
+      }
+      if (input === '/api/v1/collections?bookIds=1') {
+        return makeApiResponse([])
+      }
+      return makeApiResponse({}, false)
+    })
+
+    const wrapper = mount(DetailsTab, {
+      props: {
+        book: makeBook({
+          files: [
+            {
+              id: 101,
+              format: 'epub',
+              role: 'primary',
+              sizeBytes: 1234,
+              absolutePath: '/books/test.epub',
+              createdAt: '2024-01-01T00:00:00.000Z',
+              filename: 'test.epub',
+              durationSeconds: null,
+              mediaOverlay: { available: true, durationSeconds: 3600 },
+            },
+          ],
+        }),
+      },
+      global: globalStubs,
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Read-aloud EPUB')
+    expect(wrapper.text()).toContain('25%')
+  })
+
   it('resets a single file progress row from the inline control', async () => {
     let progressRows: Array<{ fileId: number; cfi: string | null; pageNumber: number | null; percentage: number; updatedAt: string | null }> = [
       { fileId: 101, cfi: null, pageNumber: null, percentage: 22, updatedAt: null },
     ]
     vi.mocked(api).mockImplementation(async (input, init) => {
-      if (input === '/api/v1/books/files/101/progress' && init?.method === 'DELETE') {
+      if (input === '/api/v1/reading-progress/101' && init?.method === 'DELETE') {
         progressRows = []
         return makeApiResponse({})
       }
-      if (input === '/api/v1/books/1/progress') {
-        return makeApiResponse(progressRows)
+      if (input === '/api/v1/reading-progress?bookId=1') {
+        return makeApiResponse(progressList(progressRows))
       }
       if (input === '/api/v1/collections/membership') {
         return makeApiResponse([])
@@ -469,14 +676,14 @@ describe('DetailsTab - present state', () => {
 
     await flushPromises()
 
-    const fileResetButton = wrapper.find('button[aria-label="Reset file progress"]')
+    const fileResetButton = wrapper.find('button[aria-label="Reset progress for EPUB e-book"]')
     expect(fileResetButton.exists()).toBe(true)
 
     await fileResetButton.trigger('click')
     await flushPromises()
 
     expect(confirmSpy).toHaveBeenCalled()
-    expect(vi.mocked(api)).toHaveBeenCalledWith('/api/v1/books/files/101/progress', { method: 'DELETE' })
+    expect(vi.mocked(api)).toHaveBeenCalledWith('/api/v1/reading-progress/101', { method: 'DELETE' })
     confirmSpy.mockRestore()
   })
 })

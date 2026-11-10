@@ -1,8 +1,12 @@
 import { parseIntoClientConfig } from 'pg-connection-string';
 import { isAbsolute } from 'node:path';
+import { isIP } from 'node:net';
 import { z } from 'zod';
 
+import { DEV_CLIENT_ORIGIN } from './dev-client-origin';
+
 const BOOLEAN_ENV_VALUES = ['true', 'false', '1', '0', 'yes', 'no', 'on', 'off'];
+const TRUST_PROXY_BOOLEAN_VALUES = ['true', 'false', 'yes', 'no', 'on', 'off'];
 
 function isValidPostgresConnectionString(value: string): boolean {
   if (!value.trim()) {
@@ -32,8 +36,23 @@ function booleanEnvFlag(name: string) {
     .optional();
 }
 
+function trustProxyEnv() {
+  return z
+    .string()
+    .trim()
+    .refine((value) => value === '' || TRUST_PROXY_BOOLEAN_VALUES.includes(value.toLowerCase()) || Number.isNaN(Number(value)), {
+      message: 'TRUST_PROXY must be a boolean value or trusted proxy IP/CIDR; numeric hop counts are not supported',
+    })
+    .optional();
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  HOST: z
+    .string()
+    .trim()
+    .refine((value) => value === '' || isIP(value) !== 0, 'HOST must be an IPv4 or IPv6 address without a port or brackets')
+    .optional(),
   DATABASE_URL: z.string().refine(isValidPostgresConnectionString, 'DATABASE_URL must be a valid PostgreSQL connection string').optional(),
   JWT_SECRET: z
     .string()
@@ -46,7 +65,9 @@ const envSchema = z.object({
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
   APP_PASSWORD_REFRESH_EXPIRES_IN: z.string().default('90d'),
   SETUP_BOOTSTRAP_TOKEN: z.string().optional(),
+  DISABLE_LOCAL_AUTH: booleanEnvFlag('DISABLE_LOCAL_AUTH'),
   APP_DATA_PATH: z.string().default('/data'),
+  COVER_SLOTS_BACKFILL_MODE: z.enum(['background', 'sync', 'skip']).optional(),
   BOOK_DOCK_PATH: z
     .string()
     .transform((val) => val.trim())
@@ -57,11 +78,54 @@ const envSchema = z.object({
     .optional(),
   FILE_WRITE_DEBOUNCE_MS: z.coerce.number().int().positive().optional(),
   FILE_WRITE_MAX_CONCURRENT_WRITES: z.coerce.number().int().positive().optional(),
+  DJVU_MAX_CONCURRENT: z.coerce.number().int().positive().max(8).optional(),
+  DJVU_TIMEOUT_MS: z.coerce.number().int().positive().max(120_000).optional(),
+  DJVU_MAX_SOURCE_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(512 * 1024 * 1024)
+    .optional(),
+  DJVU_CACHE_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(512 * 1024 * 1024)
+    .optional(),
+  AUDIOLESS_EPUB_MAX_CONCURRENT_BUILDS: z.coerce.number().int().positive().max(32).optional(),
+  AUDIOLESS_EPUB_MAX_SOURCE_ENTRIES: z.coerce.number().int().positive().optional(),
+  AUDIOLESS_EPUB_MAX_METADATA_BYTES: z.coerce.number().int().positive().optional(),
+  AUDIOLESS_EPUB_MAX_OUTPUT_BYTES: z.coerce.number().int().positive().optional(),
+  READ_ALOUD_WORKER_URL: z
+    .string()
+    .trim()
+    .refine((value) => value === '' || /^https?:\/\//i.test(value), 'READ_ALOUD_WORKER_URL must use http or https')
+    .optional(),
+  // docker-compose.yml passes this as `${READ_ALOUD_WORKER_TOKEN:-}`, so every install that has not
+  // opted in starts with an empty value; empty means unset, as it does for the worker URL.
+  READ_ALOUD_WORKER_TOKEN: z
+    .string()
+    .trim()
+    .refine((value) => value === '' || value.length >= 16, 'READ_ALOUD_WORKER_TOKEN must contain at least 16 characters')
+    .optional(),
+  READ_ALOUD_MAX_OUTPUT_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(100 * 1024 * 1024 * 1024)
+    .optional(),
+  READ_ALOUD_WORKER_REQUEST_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(5 * 60_000)
+    .optional(),
   CLIENT_URL: z.string().url().optional(),
-  APP_URL: z.string().url().default('http://localhost:5173'),
-  TRUST_PROXY: z.string().optional(),
+  APP_URL: z.string().url().default(DEV_CLIENT_ORIGIN),
+  TRUST_PROXY: trustProxyEnv(),
   EMAIL_ENCRYPTION_KEY: z.string().optional(),
   MIGRATION_ENCRYPTION_KEY: z.string().optional(),
+  BOOK_REQUEST_ENCRYPTION_KEY: z.string().optional(),
   MIGRATION_IMPORT_ROOT: z
     .string()
     .transform((val) => val.trim())
@@ -83,7 +147,19 @@ const envSchema = z.object({
     .string()
     .transform((val) => val.trim())
     .optional(),
+  METADATA_PROVIDER_DIRECTORY_URL: z
+    .string()
+    .trim()
+    .refine(
+      (value) => value === '' || value.toLowerCase() === 'off' || /^https:\/\//i.test(value),
+      'METADATA_PROVIDER_DIRECTORY_URL must be an https URL or off',
+    )
+    .optional(),
   KOREADER_PLUGIN_PATH: z
+    .string()
+    .transform((val) => val.trim())
+    .optional(),
+  FFMPEG_PATH: z
     .string()
     .transform((val) => val.trim())
     .optional(),
@@ -97,6 +173,11 @@ export function validateEnv(config: Record<string, unknown>) {
   }
   if (result.data.NODE_ENV === 'production' && !result.data.SETUP_BOOTSTRAP_TOKEN?.trim()) {
     throw new Error('Environment validation failed:\n  SETUP_BOOTSTRAP_TOKEN: SETUP_BOOTSTRAP_TOKEN is required in production');
+  }
+  if (result.data.READ_ALOUD_WORKER_URL && !result.data.READ_ALOUD_WORKER_TOKEN) {
+    throw new Error(
+      'Environment validation failed:\n  READ_ALOUD_WORKER_TOKEN: READ_ALOUD_WORKER_TOKEN is required when the worker URL is configured',
+    );
   }
   return result.data;
 }

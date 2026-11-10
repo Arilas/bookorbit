@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { applyDisplayPreferences, getDisplayPreferencesSnapshot, sanitizeDisplayPreferences, useDisplaySettings } from '../useDisplaySettings'
 
 const settings = useDisplaySettings()
@@ -16,18 +16,21 @@ function resetDisplaySettings() {
   settings.smartScopeFilterExpanded.value = true
   settings.authorCoverSize.value = 120
   settings.authorCoverShape.value = 'circle'
+  settings.authorRowDensity.value = 'comfortable'
+  settings.authorCoverFallback.value = false
   settings.tableZebraStriping.value = false
   settings.tableDensity.value = 'comfortable'
   settings.bookSpineOverlay.value = 'off'
   settings.showSpineOnComics.value = false
   settings.bookShadowStrength.value = 'default'
   settings.bookCoverDisplayMode.value = 'blurred-fit'
-  settings.bookDetailCoverTint.value = 'single'
+  settings.bookDetailCoverTint.value = 'off'
   settings.seriesCardCoverMode.value = 'stack'
   settings.gridCardPrimaryLabel.value = 'hidden'
   settings.gridCardSecondaryLabel.value = 'hidden'
   settings.cardInfoMode.value = 'hover-overlay'
   settings.thumbnailClickAction.value = 'reader'
+  settings.formatBadgeStyle.value = 'underline'
 }
 
 afterEach(() => {
@@ -207,9 +210,9 @@ describe('useDisplaySettings preferences helpers', () => {
     expect(getDisplayPreferencesSnapshot().bookDetailCoverTint).toBe('duotone')
   })
 
-  it('defaults bookDetailCoverTint to single', () => {
+  it('defaults bookDetailCoverTint to off', () => {
     resetDisplaySettings()
-    expect(settings.bookDetailCoverTint.value).toBe('single')
+    expect(settings.bookDetailCoverTint.value).toBe('off')
   })
 
   it('sanitizes bookDetailCoverTint and drops unknown values', () => {
@@ -246,5 +249,31 @@ describe('useDisplaySettings preferences helpers', () => {
   it('applies thumbnailClickAction from preferences', () => {
     applyDisplayPreferences({ thumbnailClickAction: 'details' })
     expect(settings.thumbnailClickAction.value).toBe('details')
+  })
+
+  it('sanitizes valid formatBadgeStyle values and drops the rest', () => {
+    expect(sanitizeDisplayPreferences({ formatBadgeStyle: 'primary' })).toEqual({ formatBadgeStyle: 'primary' })
+    expect(sanitizeDisplayPreferences({ formatBadgeStyle: 'pips' })).toEqual({ formatBadgeStyle: 'pips' })
+    expect(sanitizeDisplayPreferences({ formatBadgeStyle: 'spine' })).toEqual({})
+    expect(sanitizeDisplayPreferences({ formatBadgeStyle: 3 })).toEqual({})
+  })
+
+  it('applies formatBadgeStyle from preferences and includes it in the snapshot', () => {
+    applyDisplayPreferences({ formatBadgeStyle: 'bubble' })
+    expect(settings.formatBadgeStyle.value).toBe('bubble')
+    expect(getDisplayPreferencesSnapshot().formatBadgeStyle).toBe('bubble')
+  })
+
+  it('defaults formatBadgeStyle to underline, also when a stored value is not a style any more', async () => {
+    vi.resetModules()
+    localStorage.clear()
+    const fresh = await import('../useDisplaySettings')
+    expect(fresh.useDisplaySettings().formatBadgeStyle.value).toBe('underline')
+
+    vi.resetModules()
+    localStorage.setItem('formatBadgeStyle', JSON.stringify('spine'))
+    const stale = await import('../useDisplaySettings')
+    expect(stale.useDisplaySettings().formatBadgeStyle.value).toBe('underline')
+    localStorage.clear()
   })
 })

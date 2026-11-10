@@ -15,6 +15,8 @@ export interface AuditEventPayload {
   ip?: string;
   meta?: AuditLogMeta;
   actorAuth?: AuditAppPasswordActor;
+  /** The target's name, when the caller read it before the target went away. Looked up on write otherwise. */
+  resourceLabel?: string;
 }
 
 @Injectable()

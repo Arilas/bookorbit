@@ -36,6 +36,7 @@ const rows = computed(() =>
     return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
   }),
 )
+const mutationPending = computed(() => creating.value || rotatingId.value !== null || revokingId.value !== null)
 
 const revokeDescription = computed(() => {
   if (!revokeTarget.value) return ''
@@ -59,6 +60,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 function openCreate(): void {
+  if (mutationPending.value) return
   createError.value = null
   createOpen.value = true
 }
@@ -89,6 +91,7 @@ function closeCreatedPassword(): void {
 }
 
 function requestRotate(appPassword: AppPassword): void {
+  if (mutationPending.value) return
   rotateError.value = null
   rotateTarget.value = appPassword
 }
@@ -117,6 +120,7 @@ async function handleRotate(payload: RotateAppPasswordRequest): Promise<void> {
 }
 
 function requestRevoke(appPassword: AppPassword): void {
+  if (mutationPending.value) return
   revokeError.value = null
   revokeTarget.value = appPassword
 }
@@ -164,7 +168,7 @@ function rotationActionLabel(appPassword: AppPassword): string {
 <template>
   <div class="space-y-5">
     <Teleport :to="HEADER_ACTIONS_TARGET" defer :disabled="!headerSlotAvailable">
-      <Button size="sm" type="button" class="max-sm:size-8 max-sm:p-0" @click="openCreate">
+      <Button size="sm" type="button" class="max-sm:size-8 max-sm:p-0" :disabled="mutationPending" @click="openCreate">
         <Plus :size="14" aria-hidden="true" />
         <span class="max-sm:sr-only">{{ t('settings.appPasswords.create.action') }}</span>
       </Button>
@@ -194,7 +198,7 @@ function rotationActionLabel(appPassword: AppPassword): string {
         <KeyRound :size="32" class="mx-auto mb-3 text-muted-foreground" aria-hidden="true" />
         <p class="text-sm font-medium text-foreground">{{ t('settings.appPasswords.empty.title') }}</p>
         <p class="mt-1 text-sm text-muted-foreground">{{ t('settings.appPasswords.empty.description') }}</p>
-        <Button size="sm" type="button" class="mt-4" @click="openCreate">
+        <Button size="sm" type="button" class="mt-4" :disabled="mutationPending" @click="openCreate">
           <Plus :size="14" aria-hidden="true" />
           {{ t('settings.appPasswords.create.action') }}
         </Button>
@@ -264,23 +268,11 @@ function rotationActionLabel(appPassword: AppPassword): string {
                   <td class="px-3 py-3 text-xs tabular-nums text-muted-foreground">{{ formatNumber(appPassword.activeSessions) }}</td>
                   <td class="px-3 py-3 text-end">
                     <div class="flex justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        type="button"
-                        :disabled="rotatingId !== null || revokingId !== null"
-                        @click="requestRotate(appPassword)"
-                      >
+                      <Button variant="ghost" size="sm" type="button" :disabled="mutationPending" @click="requestRotate(appPassword)">
                         <RefreshCw :size="14" aria-hidden="true" />
                         {{ rotationActionLabel(appPassword) }}
                       </Button>
-                      <Button
-                        variant="destructive-ghost"
-                        size="sm"
-                        type="button"
-                        :disabled="rotatingId !== null || revokingId !== null"
-                        @click="requestRevoke(appPassword)"
-                      >
+                      <Button variant="destructive-ghost" size="sm" type="button" :disabled="mutationPending" @click="requestRevoke(appPassword)">
                         <Trash2 :size="14" aria-hidden="true" />
                         {{ t('settings.appPasswords.revoke.action') }}
                       </Button>
@@ -327,23 +319,11 @@ function rotationActionLabel(appPassword: AppPassword): string {
               </dl>
 
               <div class="mt-3 flex justify-end gap-2 border-t border-border pt-3">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  type="button"
-                  :disabled="rotatingId !== null || revokingId !== null"
-                  @click="requestRotate(appPassword)"
-                >
+                <Button variant="outline" size="sm" type="button" :disabled="mutationPending" @click="requestRotate(appPassword)">
                   <RefreshCw :size="14" aria-hidden="true" />
                   {{ rotationActionLabel(appPassword) }}
                 </Button>
-                <Button
-                  variant="destructive-outline"
-                  size="sm"
-                  type="button"
-                  :disabled="rotatingId !== null || revokingId !== null"
-                  @click="requestRevoke(appPassword)"
-                >
+                <Button variant="destructive-outline" size="sm" type="button" :disabled="mutationPending" @click="requestRevoke(appPassword)">
                   <Trash2 :size="14" aria-hidden="true" />
                   {{ t('settings.appPasswords.revoke.action') }}
                 </Button>

@@ -10,6 +10,8 @@ import {
   type ReadStatus,
   type UserBookStatus,
 } from '@bookorbit/types'
+import { i18n } from '@/i18n'
+import { formatNumber } from '@/i18n/formatters'
 import { api } from '@/lib/api'
 import { toast } from 'vue-sonner'
 import { useCoverVersions } from './useCoverVersions'
@@ -17,6 +19,8 @@ import { useRefreshingBooks } from './useRefreshingBooks'
 import { useBookDownload } from './useBookDownload'
 import { useBookRefreshFeedback } from './useBookRefreshFeedback'
 import { detectChangedColumns, mergeBookCardWithDetail } from '@/features/book/lib/book-card-mapper'
+import { withIgnoreCache, type IgnoreCacheOptions } from '@/features/metadata-cache/lib/metadata-cache'
+import type { BulkReadingStatePatch } from './useBookStatus'
 
 export type ExportScope = 'primary' | 'all' | 'audio'
 
@@ -60,12 +64,15 @@ export type QuerySelectionState = BookSelectionQuery & {
   total: number
 }
 
-function buildLocalReadStatus(status: ReadStatus, existing: UserBookStatus | null, nowIso: string): UserBookStatus {
+function buildLocalReadStatus(patch: BulkReadingStatePatch, existing: UserBookStatus | null, nowIso: string): UserBookStatus {
+  const clearsLifecycle = patch.status === 'unread' || patch.status === 'want_to_read'
+  const hasStartedAt = Object.prototype.hasOwnProperty.call(patch, 'startedAt')
+  const hasFinishedAt = Object.prototype.hasOwnProperty.call(patch, 'finishedAt')
   return {
-    status,
+    status: patch.status,
     source: 'manual',
-    startedAt: existing?.startedAt ?? null,
-    finishedAt: existing?.finishedAt ?? null,
+    startedAt: clearsLifecycle ? null : hasStartedAt ? (patch.startedAt ?? null) : (existing?.startedAt ?? null),
+    finishedAt: clearsLifecycle ? null : hasFinishedAt ? (patch.finishedAt ?? null) : (existing?.finishedAt ?? null),
     updatedAt: nowIso,
   }
 }
@@ -103,7 +110,8 @@ export function useBookBulkActions(
     books.value = books.value.map((book) => (selected.has(book.id) ? updater(book) : book))
   }
 
-  async function handleBulkRefreshMetadata() {
+  /** Bound straight to the action bar's `refresh-metadata` event, so its payload arrives here as `options`. */
+  async function handleBulkRefreshMetadata(options?: IgnoreCacheOptions) {
     if (!hasSelection()) return
     const ids = querySelection?.value ? [] : [...selectedIds.value]
     const total = querySelection?.value ? querySelection.value.total : ids.length
@@ -113,7 +121,7 @@ export function useBookBulkActions(
     const res = await api('/api/v1/books/bulk-refresh-metadata', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(getSelectionPayload()),
+      body: JSON.stringify(withIgnoreCache(getSelectionPayload(), { ignoreCache: options?.ignoreCache === true })),
     })
     if (!res.ok) {
       clearRefreshing(ids)
@@ -208,7 +216,7 @@ export function useBookBulkActions(
     const ids = querySelection?.value ? [] : [...selectedIds.value]
     const total = querySelection?.value ? querySelection.value.total : ids.length
     markRefreshing(ids)
-    inFlight.value = { label: 'Re-extracting covers', processed: 0, total }
+    inFlight.value = { label: i18n.global.t('book.coverRegeneration.bulkInProgress'), processed: 0, total }
     const res = await api('/api/v1/books/bulk-re-extract-cover', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -217,7 +225,7 @@ export function useBookBulkActions(
     if (!res.ok) {
       clearRefreshing(ids)
       inFlight.value = null
-      toast.error('Failed to re-extract covers')
+      toast.error(i18n.global.t('book.coverRegeneration.bulkFailed'))
       return
     }
     const reader = res.body!.getReader()
@@ -237,7 +245,7 @@ export function useBookBulkActions(
               bumpedIds.add(data.bookId)
               bumpVersion(data.bookId)
               clearRefreshing([data.bookId])
-              inFlight.value = { label: 'Re-extracting covers', processed: inFlight.value!.processed + 1, total }
+              inFlight.value = { label: i18n.global.t('book.coverRegeneration.bulkInProgress'), processed: inFlight.value!.processed + 1, total }
             }
             if (data.done) {
               processed = data.processed
@@ -255,7 +263,7 @@ export function useBookBulkActions(
       clearRefreshing(ids)
       inFlight.value = null
     }
-    toast.success(`Re-extracted ${updated} of ${processed} cover${processed === 1 ? '' : 's'}`)
+    toast.success(i18n.global.t('book.coverRegeneration.bulkCompleted', { updated: formatNumber(updated), processed }))
   }
 
   async function handleDownloadFiles(scope: ExportScope) {
@@ -263,25 +271,26 @@ export function useBookBulkActions(
     await exportBooks(ids, scope === 'all', scope === 'audio' ? 'audio' : undefined)
   }
 
-  async function handleBulkSetStatus(status: ReadStatus) {
+  async function handleBulkSetStatus(input: ReadStatus | BulkReadingStatePatch) {
     if (!hasSelection()) return
+    const patch: BulkReadingStatePatch = typeof input === 'string' ? { status: input } : input
     const ids = querySelection?.value ? [] : [...selectedIds.value]
     const res = await api('/api/v1/books/bulk-set-status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...getSelectionPayload(), status }),
+      body: JSON.stringify({ ...getSelectionPayload(), ...patch }),
     })
     if (!res.ok) {
-      toast.error('Failed to update status')
+      toast.error(i18n.global.t('book.bulkReadingState.failed'))
       return
     }
     const nowIso = new Date().toISOString()
     updateSelectedBooks(ids, (book) => ({
       ...book,
-      readStatus: buildLocalReadStatus(status, book.readStatus, nowIso),
+      readStatus: buildLocalReadStatus(patch, book.readStatus, nowIso),
     }))
     const count = querySelection?.value ? querySelection.value.total : ids.length
-    toast.success(`Updated status for ${count} book${count === 1 ? '' : 's'}`)
+    toast.success(i18n.global.t('book.bulkReadingState.updated', { count }))
   }
 
   async function handleBulkSetRating(rating: number | null) {

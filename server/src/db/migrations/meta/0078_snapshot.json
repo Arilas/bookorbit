@@ -1,6 +1,6 @@
 {
-  "id": "822a951f-b2e1-49b1-a0d8-25de7a9e2ad6",
-  "prevId": "0433d2dc-af78-48c6-96f5-7fb53ef69717",
+  "id": "e0648b03-4eeb-4e6b-b601-e964f5850119",
+  "prevId": "6cbe2704-732a-4e70-9285-49bf6faa2f45",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -312,143 +312,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.app_passwords": {
-      "name": "app_passwords",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "serial",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "label": {
-          "name": "label",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "selector": {
-          "name": "selector",
-          "type": "varchar(32)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "secret_hash": {
-          "name": "secret_hash",
-          "type": "varchar(64)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "secret_hint": {
-          "name": "secret_hint",
-          "type": "varchar(32)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "last_used_at": {
-          "name": "last_used_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_used_ip": {
-          "name": "last_used_ip",
-          "type": "varchar(45)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "revoked_at": {
-          "name": "revoked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "app_passwords_user_id_idx": {
-          "name": "app_passwords_user_id_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "app_passwords_expires_at_idx": {
-          "name": "app_passwords_expires_at_idx",
-          "columns": [
-            {
-              "expression": "expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "app_passwords_user_id_users_id_fk": {
-          "name": "app_passwords_user_id_users_id_fk",
-          "tableFrom": "app_passwords",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "app_passwords_selector_unique": {
-          "name": "app_passwords_selector_unique",
-          "nullsNotDistinct": false,
-          "columns": ["selector"]
-        },
-        "app_passwords_secret_hash_unique": {
-          "name": "app_passwords_secret_hash_unique",
-          "nullsNotDistinct": false,
-          "columns": ["secret_hash"]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "app_passwords_expires_after_created_chk": {
-          "name": "app_passwords_expires_after_created_chk",
-          "value": "\"app_passwords\".\"expires_at\" > \"app_passwords\".\"created_at\""
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.app_settings": {
       "name": "app_settings",
       "schema": "",
@@ -745,19 +608,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "app_password_id": {
-          "name": "app_password_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "session_family_id": {
-          "name": "session_family_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
         "token_hash": {
           "name": "token_hash",
           "type": "varchar(255)",
@@ -812,36 +662,6 @@
           "method": "btree",
           "with": {}
         },
-        "refresh_tokens_app_password_id_idx": {
-          "name": "refresh_tokens_app_password_id_idx",
-          "columns": [
-            {
-              "expression": "app_password_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "refresh_tokens_session_family_id_idx": {
-          "name": "refresh_tokens_session_family_id_idx",
-          "columns": [
-            {
-              "expression": "session_family_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "refresh_tokens_expires_at_idx": {
           "name": "refresh_tokens_expires_at_idx",
           "columns": [
@@ -864,15 +684,6 @@
           "tableFrom": "refresh_tokens",
           "tableTo": "users",
           "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "refresh_tokens_app_password_id_app_passwords_id_fk": {
-          "name": "refresh_tokens_app_password_id_app_passwords_id_fk",
-          "tableFrom": "refresh_tokens",
-          "tableTo": "app_passwords",
-          "columnsFrom": ["app_password_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -5127,7 +4938,7 @@
         },
         "series_index": {
           "name": "series_index",
-          "type": "real",
+          "type": "varchar(20)",
           "primaryKey": false,
           "notNull": false
         },
@@ -5185,9 +4996,15 @@
               "nulls": "last"
             },
             {
-              "expression": "series_index",
-              "isExpression": false,
+              "expression": "(CASE WHEN \"series_index\" IS NULL THEN NULL ELSE ARRAY[split_part(\"series_index\", '.', 1)::numeric, CASE WHEN strpos(\"series_index\", '.') = 0 THEN -1::numeric ELSE split_part(\"series_index\", '.', 2)::numeric END] END)",
               "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "\"series_index\" COLLATE \"C\"",
+              "asc": true,
+              "isExpression": true,
               "nulls": "last"
             },
             {
@@ -5256,6 +5073,10 @@
         "book_series_memberships_display_order_nonnegative_chk": {
           "name": "book_series_memberships_display_order_nonnegative_chk",
           "value": "\"book_series_memberships\".\"display_order\" >= 0"
+        },
+        "book_series_memberships_series_index_format_chk": {
+          "name": "book_series_memberships_series_index_format_chk",
+          "value": "\"book_series_memberships\".\"series_index\" is null or \"book_series_memberships\".\"series_index\" ~ '^[0-9]+([.][0-9]+)?$'"
         }
       },
       "isRLSEnabled": false
@@ -5964,7 +5785,7 @@
         },
         "series_index": {
           "name": "series_index",
-          "type": "real",
+          "type": "varchar(20)",
           "primaryKey": false,
           "notNull": false
         },
@@ -6246,9 +6067,42 @@
               "nulls": "last"
             },
             {
-              "expression": "series_index",
+              "expression": "(CASE WHEN \"series_index\" IS NULL THEN NULL ELSE ARRAY[split_part(\"series_index\", '.', 1)::numeric, CASE WHEN strpos(\"series_index\", '.') = 0 THEN -1::numeric ELSE split_part(\"series_index\", '.', 2)::numeric END] END)",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "\"series_index\" COLLATE \"C\"",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "book_id",
               "isExpression": false,
               "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "bm_series_index_sort_idx": {
+          "name": "bm_series_index_sort_idx",
+          "columns": [
+            {
+              "expression": "(CASE WHEN \"series_index\" IS NULL THEN NULL ELSE ARRAY[split_part(\"series_index\", '.', 1)::numeric, CASE WHEN strpos(\"series_index\", '.') = 0 THEN -1::numeric ELSE split_part(\"series_index\", '.', 2)::numeric END] END)",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "\"series_index\" COLLATE \"C\"",
+              "asc": true,
+              "isExpression": true,
               "nulls": "last"
             },
             {
@@ -6410,9 +6264,15 @@
               "nulls": "last"
             },
             {
-              "expression": "series_index",
-              "isExpression": false,
+              "expression": "(CASE WHEN \"series_index\" IS NULL THEN NULL ELSE ARRAY[split_part(\"series_index\", '.', 1)::numeric, CASE WHEN strpos(\"series_index\", '.') = 0 THEN -1::numeric ELSE split_part(\"series_index\", '.', 2)::numeric END] END)",
               "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "\"series_index\" COLLATE \"C\"",
+              "asc": true,
+              "isExpression": true,
               "nulls": "last"
             }
           ],
@@ -6506,6 +6366,10 @@
         "book_metadata_page_count_nonnegative_chk": {
           "name": "book_metadata_page_count_nonnegative_chk",
           "value": "\"book_metadata\".\"page_count\" is null or \"book_metadata\".\"page_count\" >= 0"
+        },
+        "book_metadata_series_index_format_chk": {
+          "name": "book_metadata_series_index_format_chk",
+          "value": "\"book_metadata\".\"series_index\" is null or \"book_metadata\".\"series_index\" ~ '^[0-9]+([.][0-9]+)?$'"
         },
         "book_metadata_duration_seconds_nonnegative_chk": {
           "name": "book_metadata_duration_seconds_nonnegative_chk",
@@ -7893,12 +7757,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "app_password_id": {
-          "name": "app_password_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
         "book_id": {
           "name": "book_id",
           "type": "integer",
@@ -7937,27 +7795,6 @@
         "abp_user_id_idx": {
           "name": "abp_user_id_idx",
           "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "abp_app_password_user_idx": {
-          "name": "abp_app_password_user_idx",
-          "columns": [
-            {
-              "expression": "app_password_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
             {
               "expression": "user_id",
               "isExpression": false,
@@ -8009,15 +7846,6 @@
           "columnsFrom": ["user_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "audiobook_progress_app_password_id_app_passwords_id_fk": {
-          "name": "audiobook_progress_app_password_id_app_passwords_id_fk",
-          "tableFrom": "audiobook_progress",
-          "tableTo": "app_passwords",
-          "columnsFrom": ["app_password_id"],
-          "columnsTo": ["id"],
-          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "audiobook_progress_book_id_books_id_fk": {
@@ -8509,7 +8337,7 @@
         },
         "external_provider": {
           "name": "external_provider",
-          "type": "varchar(100)",
+          "type": "varchar(40)",
           "primaryKey": false,
           "notNull": false
         },
@@ -8720,12 +8548,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "app_password_id": {
-          "name": "app_password_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
         "percentage": {
           "name": "percentage",
           "type": "real",
@@ -8812,27 +8634,6 @@
           "method": "btree",
           "with": {}
         },
-        "reading_progress_app_password_user_idx": {
-          "name": "reading_progress_app_password_user_idx",
-          "columns": [
-            {
-              "expression": "app_password_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "reading_progress_user_last_read_at_idx": {
           "name": "reading_progress_user_last_read_at_idx",
           "columns": [
@@ -8873,15 +8674,6 @@
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
-        },
-        "reading_progress_app_password_id_app_passwords_id_fk": {
-          "name": "reading_progress_app_password_id_app_passwords_id_fk",
-          "tableFrom": "reading_progress",
-          "tableTo": "app_passwords",
-          "columnsFrom": ["app_password_id"],
-          "columnsTo": ["id"],
-          "onDelete": "set null",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -8912,6 +8704,118 @@
       },
       "isRLSEnabled": false
     },
+    "public.reading_session_sync_cursors": {
+      "name": "reading_session_sync_cursors",
+      "schema": "",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "book_id": {
+          "name": "book_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_device_key": {
+          "name": "source_device_key",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "counter": {
+          "name": "counter",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "last_modified": {
+          "name": "last_modified",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "rssc_book_id_idx": {
+          "name": "rssc_book_id_idx",
+          "columns": [
+            {
+              "expression": "book_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "reading_session_sync_cursors_user_id_users_id_fk": {
+          "name": "reading_session_sync_cursors_user_id_users_id_fk",
+          "tableFrom": "reading_session_sync_cursors",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "reading_session_sync_cursors_book_id_books_id_fk": {
+          "name": "reading_session_sync_cursors_book_id_books_id_fk",
+          "tableFrom": "reading_session_sync_cursors",
+          "tableTo": "books",
+          "columnsFrom": ["book_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "reading_session_sync_cursors_user_id_book_id_source_source_device_key_pk": {
+          "name": "reading_session_sync_cursors_user_id_book_id_source_source_device_key_pk",
+          "columns": ["user_id", "book_id", "source", "source_device_key"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "rssc_counter_nonnegative_chk": {
+          "name": "rssc_counter_nonnegative_chk",
+          "value": "\"reading_session_sync_cursors\".\"counter\" >= 0"
+        },
+        "rssc_generation_nonnegative_chk": {
+          "name": "rssc_generation_nonnegative_chk",
+          "value": "\"reading_session_sync_cursors\".\"generation\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.reading_sessions": {
       "name": "reading_sessions",
       "schema": "",
@@ -8927,12 +8831,6 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
-        },
-        "app_password_id": {
-          "name": "app_password_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
         },
         "book_file_id": {
           "name": "book_file_id",
@@ -8961,6 +8859,12 @@
         "source": {
           "name": "source",
           "type": "varchar(10)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_device_key": {
+          "name": "source_device_key",
+          "type": "varchar(128)",
           "primaryKey": false,
           "notNull": false
         },
@@ -9013,33 +8917,6 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "rs_app_password_user_started_at_idx": {
-          "name": "rs_app_password_user_started_at_idx",
-          "columns": [
-            {
-              "expression": "app_password_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "started_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -9134,6 +9011,45 @@
           "method": "btree",
           "with": {}
         },
+        "rs_user_book_source_device_started_idx": {
+          "name": "rs_user_book_source_device_started_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "book_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_device_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "reading_sessions_book_id_idx": {
           "name": "reading_sessions_book_id_idx",
           "columns": [
@@ -9179,15 +9095,6 @@
           "columnsFrom": ["user_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "reading_sessions_app_password_id_app_passwords_id_fk": {
-          "name": "reading_sessions_app_password_id_app_passwords_id_fk",
-          "tableFrom": "reading_sessions",
-          "tableTo": "app_passwords",
-          "columnsFrom": ["app_password_id"],
-          "columnsTo": ["id"],
-          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "reading_sessions_book_file_id_book_files_id_fk": {
@@ -13035,6 +12942,19 @@
           "notNull": true,
           "default": false
         },
+        "group_key": {
+          "name": "group_key",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "count": {
+          "name": "count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -13098,6 +13018,64 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "notifications_user_updated_at_idx": {
+          "name": "notifications_user_updated_at_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updated_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "notifications_updated_at_idx": {
+          "name": "notifications_updated_at_idx",
+          "columns": [
+            {
+              "expression": "updated_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "notifications_user_unread_group_key_idx": {
+          "name": "notifications_user_unread_group_key_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "group_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"notifications\".\"read\" = false and \"notifications\".\"group_key\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}

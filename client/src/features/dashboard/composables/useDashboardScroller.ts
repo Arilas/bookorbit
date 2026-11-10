@@ -3,10 +3,10 @@ import { onMounted, ref } from 'vue'
 import {
   DASHBOARD_SCROLLER_BATCH_MAX,
   type BookCard,
+  type ScrollerType,
   type DashboardScrollerBatchRequest,
   type DashboardScrollerBatchResponse,
   type DashboardScrollerBatchResult,
-  type ScrollerType,
 } from '@bookorbit/types'
 import { api } from '@/lib/api'
 import { useBookProgressRefresh } from '@/features/book/composables/useBookProgressRefresh'

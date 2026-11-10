@@ -1,5 +1,8 @@
 import { BadRequestException, ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
+
 import type { BookQuery } from '@bookorbit/types';
+import { sql, type SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 import type { RequestUser } from '../../common/types/request-user';
 import type { SmartScope } from '../../db/schema/smart-scopes';
@@ -35,6 +38,7 @@ function makeSmartScope(overrides: Partial<SmartScope> = {}): SmartScope {
     filter: null,
     defaultSort: [],
     isPublic: false,
+    coverAspectRatio: '2/3',
     syncToKobo: false,
     displayOrder: 0,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -65,7 +69,7 @@ function makeService() {
     buildOrderBy: vi.fn(),
   };
   const libraryService = {
-    findAccessibleLibraryIds: vi.fn(),
+    findAccessibleLibraryIds: vi.fn().mockResolvedValue([]),
   };
   const bookService = {
     executeBooksQuery: vi.fn(),
@@ -127,11 +131,45 @@ describe('SmartScopeService', () => {
     const result = await service.findAll(user);
 
     expect(queryBuilder.buildWhere).toHaveBeenCalledTimes(1);
-    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(secondSmartScope.filter, { accessibleLibraryIds: [2, 3], userId: 8, timeZone: 'UTC' });
+    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(secondSmartScope.filter, {
+      accessibleLibraryIds: [2, 3],
+      userId: 8,
+      timeZone: 'UTC',
+      contentFilters: EMPTY_CONTENT_FILTER_RULES,
+    });
     expect(result).toEqual([
       { ...firstSmartScope, isOwner: false, koboSyncEnabled: false, bookCount: 0 },
       { ...secondSmartScope, isOwner: false, koboSyncEnabled: false, bookCount: 7 },
     ]);
+  });
+
+  // One listing must not take the whole connection pool: the counts are full aggregates, and the
+  // number of them is whatever the user has saved.
+  it('findAll counts scopes in bounded batches rather than all at once, keeping them in order', async () => {
+    const { service, smartScopeRepo, libraryService, queryBuilder, bookReadService } = makeService();
+    const filter = { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'space' }] };
+    const scopes = Array.from({ length: 12 }, (_, index) => makeSmartScope({ id: index + 1, filter: filter as never }));
+
+    smartScopeRepo.findAllForUser.mockResolvedValue(scopes);
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([2, 3]);
+    queryBuilder.buildWhere.mockReturnValue('where');
+
+    let inFlight = 0;
+    let peakInFlight = 0;
+    bookReadService.countWhere.mockImplementation(async () => {
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight -= 1;
+      return 3;
+    });
+
+    const result = await service.findAll(makeUser({ id: 8 }));
+
+    expect(peakInFlight).toBeLessThanOrEqual(4);
+    expect(bookReadService.countWhere).toHaveBeenCalledTimes(12);
+    expect(result.map((scope) => scope.id)).toEqual(scopes.map((scope) => scope.id));
+    expect(result.every((scope) => scope.bookCount === 3)).toBe(true);
   });
 
   it('findAll marks a single broken scope count unavailable instead of failing the whole list (issue #787 regression)', async () => {
@@ -162,7 +200,12 @@ describe('SmartScopeService', () => {
       { ...healthyScope, isOwner: false, koboSyncEnabled: false, bookCount: 7 },
     ]);
     expect(queryBuilder.buildWhere).toHaveBeenCalledTimes(1);
-    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(healthyScope.filter, { accessibleLibraryIds: [2, 3], userId: 8, timeZone: 'UTC' });
+    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(healthyScope.filter, {
+      accessibleLibraryIds: [2, 3],
+      userId: 8,
+      timeZone: 'UTC',
+      contentFilters: EMPTY_CONTENT_FILTER_RULES,
+    });
     expect(errorSpy).toHaveBeenCalledTimes(1);
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('[smart_scope.count] [fail] scopeId=1 userId=8'));
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('durationMs='));
@@ -337,7 +380,111 @@ describe('SmartScopeService', () => {
       isPublic: false,
       syncToKobo: false,
     });
-    expect(result).toEqual({ ...created, isOwner: true, koboSyncEnabled: false });
+    expect(result).toEqual({ ...created, isOwner: true, koboSyncEnabled: false, bookCount: 0 });
+  });
+
+  it('create persists an explicit Kobo sync flag and reports it as the owner sync state', async () => {
+    const { service, smartScopeRepo } = makeService();
+    const created = makeSmartScope({ id: 8, userId: 44, syncToKobo: true });
+    smartScopeRepo.insert.mockResolvedValue([created]);
+
+    const result = await service.create({ name: 'On Kobo', icon: 'Tablet', defaultSort: [], syncToKobo: true }, makeUser({ id: 44 }));
+
+    expect(smartScopeRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ userId: 44, syncToKobo: true }));
+    expect(result).toEqual(expect.objectContaining({ syncToKobo: true, koboSyncEnabled: true }));
+  });
+
+  describe('grid shape (issue #1926)', () => {
+    it('create persists a square grid shape and returns it', async () => {
+      const { service, smartScopeRepo } = makeService();
+      const created = makeSmartScope({ id: 9, userId: 44, coverAspectRatio: '1/1' });
+      smartScopeRepo.insert.mockResolvedValue([created]);
+
+      const result = await service.create({ name: 'Audiobooks', icon: 'Headphones', defaultSort: [], coverAspectRatio: '1/1' }, makeUser({ id: 44 }));
+
+      expect(smartScopeRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ coverAspectRatio: '1/1' }));
+      expect(result).toEqual(expect.objectContaining({ coverAspectRatio: '1/1' }));
+    });
+
+    it('create leaves the shape to the column default when the payload omits it', async () => {
+      const { service, smartScopeRepo } = makeService();
+      smartScopeRepo.insert.mockResolvedValue([makeSmartScope()]);
+
+      await service.create({ name: 'Unread', icon: 'Aperture', defaultSort: [] }, makeUser());
+
+      const [values] = smartScopeRepo.insert.mock.calls[0] as [Record<string, unknown>];
+      expect(values.coverAspectRatio).toBeUndefined();
+    });
+
+    it('update writes the grid shape and leaves it alone when the payload omits it', async () => {
+      const { service, smartScopeRepo } = makeService();
+      const existing = makeSmartScope({ id: 3, userId: 12 });
+      smartScopeRepo.findById.mockResolvedValue([existing]);
+      smartScopeRepo.update.mockResolvedValue([{ ...existing, coverAspectRatio: '1/1' }]);
+
+      const result = await service.update(3, { coverAspectRatio: '1/1' }, makeUser({ id: 12 }));
+      await service.update(3, { name: 'Renamed' }, makeUser({ id: 12 }));
+
+      expect(smartScopeRepo.update).toHaveBeenNthCalledWith(1, 3, 12, expect.objectContaining({ coverAspectRatio: '1/1' }));
+      const [, , omitted] = smartScopeRepo.update.mock.calls[1] as [number, number, Record<string, unknown>];
+      expect(omitted.coverAspectRatio).toBeUndefined();
+      expect(result).toEqual(expect.objectContaining({ coverAspectRatio: '1/1' }));
+    });
+
+    it('reports an unrecognised stored shape as portrait', async () => {
+      const { service, smartScopeRepo } = makeService();
+      smartScopeRepo.findById.mockResolvedValue([makeSmartScope({ coverAspectRatio: '4/5' })]);
+
+      const result = await service.findOne(5, makeUser());
+
+      expect(result).toEqual(expect.objectContaining({ coverAspectRatio: '2/3' }));
+    });
+  });
+
+  it('create returns the matching book count using the requesting user visibility and timezone', async () => {
+    const { service, smartScopeRepo, libraryService, queryBuilder, bookReadService } = makeService();
+    const created = makeSmartScope({
+      filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'space' }] },
+    });
+    smartScopeRepo.insert.mockResolvedValue([created]);
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([2, 3]);
+    queryBuilder.buildWhere.mockReturnValue('visible-matches');
+    bookReadService.countWhere.mockResolvedValue(7);
+    const user = makeUser({ settings: { timezone: 'America/Denver' } });
+
+    const result = await service.create({ name: created.name, icon: 'Aperture', filter: created.filter, defaultSort: [] }, user);
+
+    expect(result).toEqual({ ...created, isOwner: true, koboSyncEnabled: false, bookCount: 7 });
+    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(created.filter, {
+      accessibleLibraryIds: [2, 3],
+      userId: user.id,
+      timeZone: 'America/Denver',
+      contentFilters: user.contentFilters,
+    });
+    expect(bookReadService.countWhere).toHaveBeenCalledExactlyOnceWith('visible-matches');
+    expect(smartScopeRepo.findAllForUser).not.toHaveBeenCalled();
+  });
+
+  it('update counts the saved filter instead of the previous filter', async () => {
+    const { service, smartScopeRepo, libraryService, queryBuilder, bookReadService } = makeService();
+    const existing = makeSmartScope({
+      filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'old' }] },
+    });
+    const updated = makeSmartScope({
+      filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'new' }] },
+    });
+    smartScopeRepo.findById.mockResolvedValue([existing]);
+    smartScopeRepo.update.mockResolvedValue([updated]);
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([2]);
+    queryBuilder.buildWhere.mockReturnValue('updated-matches');
+    bookReadService.countWhere.mockResolvedValue(3);
+
+    const result = await service.update(existing.id, { filter: updated.filter }, makeUser());
+
+    expect(result).toEqual({ ...updated, isOwner: true, koboSyncEnabled: false, bookCount: 3 });
+    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(updated.filter, expect.objectContaining({ accessibleLibraryIds: [2], userId: 12 }));
+    expect(bookReadService.countWhere).toHaveBeenCalledExactlyOnceWith('updated-matches');
+    expect(smartScopeRepo.findAllForUser).not.toHaveBeenCalled();
   });
 
   it('create rejects missing icons', async () => {
@@ -370,7 +517,7 @@ describe('SmartScopeService', () => {
       defaultSort: undefined,
       isPublic: undefined,
     });
-    expect(result).toEqual({ ...updated, isOwner: false, koboSyncEnabled: false });
+    expect(result).toEqual({ ...updated, isOwner: false, koboSyncEnabled: false, bookCount: 0 });
   });
 
   describe('sharing an existing smartScope (issue #805)', () => {
@@ -384,7 +531,7 @@ describe('SmartScopeService', () => {
       const result = await service.update(3, { isPublic: true }, makeUser({ id: 12 }));
 
       expect(smartScopeRepo.update).toHaveBeenCalledWith(3, 12, expect.objectContaining({ isPublic: true }));
-      expect(result).toEqual({ ...shared, isOwner: true, koboSyncEnabled: false });
+      expect(result).toEqual({ ...shared, isOwner: true, koboSyncEnabled: false, bookCount: 0 });
     });
 
     it('update unshares a public smartScope', async () => {
@@ -479,7 +626,9 @@ describe('SmartScopeService', () => {
     smartScopeRepo.findById.mockResolvedValue([existing]);
     smartScopeRepo.update.mockResolvedValue([{ ...existing, filter: null }]);
 
-    await service.update(3, { filter: null }, makeUser({ id: 12 }));
+    const result = await service.update(3, { filter: null }, makeUser({ id: 12 }));
+
+    expect(result).toEqual(expect.objectContaining({ filter: null, bookCount: 0 }));
 
     expect(smartScopeRepo.update).toHaveBeenCalledWith(
       3,
@@ -601,6 +750,28 @@ describe('SmartScopeService', () => {
     expect(bookService.executeBooksQuery).not.toHaveBeenCalled();
   });
 
+  it('executeSmartScopeBookIds adds the audiobook-only exclusion to the scope filter when asked', async () => {
+    const { service, smartScopeRepo, libraryService, queryBuilder, bookService } = makeService();
+    smartScopeRepo.findById.mockResolvedValue([
+      makeSmartScope({
+        id: 5,
+        userId: 12,
+        filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'test' }] },
+      }),
+    ]);
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([9]);
+    queryBuilder.buildWhere.mockReturnValue(sql`scope_rule`);
+    bookService.executeBookIdsQuery.mockResolvedValue([]);
+
+    await service.executeSmartScopeBookIds(5, makeUser({ id: 12 }), 20, undefined, { excludeAudioOnly: true });
+    await service.executeSmartScopeBookIds(5, makeUser({ id: 12 }), 20);
+
+    const narrowed = new PgDialect().sqlToQuery(bookService.executeBookIdsQuery.mock.calls[0]![1] as SQL).sql;
+    expect(narrowed).toContain('scope_rule');
+    expect(narrowed).toContain('"audio_only_content_file"');
+    expect(new PgDialect().sqlToQuery(bookService.executeBookIdsQuery.mock.calls[1]![1] as SQL).sql).toBe('scope_rule');
+  });
+
   it('executeSmartScopeBookIds intersects a caller-provided restriction with accessible libraries', async () => {
     const { service, smartScopeRepo, libraryService, queryBuilder, bookService } = makeService();
     const smartScope = makeSmartScope({
@@ -654,7 +825,7 @@ describe('SmartScopeService', () => {
         sort: [{ field: 'title', dir: 'asc' }],
         pagination: { page: 1, size: 25 },
       },
-      { seriesSelectionFilter: undefined },
+      { seriesSelectionFilter: undefined, viewer: expect.objectContaining({ id: 12 }) },
     );
     expect(result).toEqual({ items: [], total: 0, page: 1, size: 25 });
   });
@@ -706,7 +877,7 @@ describe('SmartScopeService', () => {
         q: 'needle',
         collapseSeries: true,
       },
-      { seriesSelectionFilter: requestFilter },
+      { seriesSelectionFilter: requestFilter, viewer: expect.objectContaining({ id: 12 }) },
     );
   });
 
@@ -891,7 +1062,7 @@ describe('SmartScopeService', () => {
             rules: [smartScope.filter, requestFilter],
           },
         },
-        { seriesSelectionFilter: requestFilter },
+        { seriesSelectionFilter: requestFilter, viewer: expect.objectContaining({ id: 12 }) },
       );
     });
 
@@ -925,7 +1096,7 @@ describe('SmartScopeService', () => {
           filter: smartScope.filter,
           collapseSeries: true,
         }),
-        { seriesSelectionFilter: undefined },
+        { seriesSelectionFilter: undefined, viewer: expect.objectContaining({ id: 12 }) },
       );
     });
 
@@ -956,7 +1127,7 @@ describe('SmartScopeService', () => {
           filter: smartScope.filter,
           sort: [{ field: 'title', dir: 'asc' }],
         },
-        { seriesSelectionFilter: undefined },
+        { seriesSelectionFilter: undefined, viewer: expect.objectContaining({ id: 12 }) },
       );
     });
 

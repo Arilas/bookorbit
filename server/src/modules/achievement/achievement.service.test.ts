@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { primeServerTextCatalog, resetServerTextCache } from '../../common/i18n/server-text';
 import { AchievementService } from './achievement.service';
 import { AchievementEventsService, ACHIEVEMENT_EVENT_BACKFILL, ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED } from './achievement-events.service';
 
@@ -12,6 +13,10 @@ function makeRepo() {
     findUserTimeZone: vi.fn().mockResolvedValue('UTC'),
     award: vi.fn().mockResolvedValue({ id: 1, achievementKey: 'test', userId: 1, awardedAt: new Date(), contextJson: null }),
     upsertCatalogue: vi.fn().mockResolvedValue(undefined),
+    backfillExistingCelebrations: vi.fn().mockResolvedValue(0),
+    claimNextCelebration: vi.fn().mockResolvedValue(null),
+    acknowledgeCelebration: vi.fn().mockResolvedValue('acknowledged'),
+    findAccessibleBookIds: vi.fn().mockResolvedValue(new Set()),
     countFinishedBooks: vi.fn().mockResolvedValue(0),
     sumPagesRead: vi.fn().mockResolvedValue(0),
     sumReadingHours: vi.fn().mockResolvedValue(0),
@@ -36,6 +41,7 @@ function makeRepo() {
     countBooksFinishedInYear: vi.fn().mockResolvedValue(0),
     countDistinctEarnedCategories: vi.fn().mockResolvedValue(0),
     countDistinctSeasonsWithReading: vi.fn().mockResolvedValue(0),
+    countDistinctMonthsWithReading: vi.fn().mockResolvedValue(0),
   };
 }
 
@@ -196,9 +202,114 @@ describe('AchievementService', () => {
 
       const result = await service.getCatalogue({ id: 1, isSuperuser: false } as never);
       const item = result.categories.find((c) => c.key === 'reading')?.achievements[0];
-      expect(item?.name).toBe('???');
-      expect(item?.description).toBe('Secret Achievement');
-      expect(item?.iconName).toBe('help-circle');
+      expect(item?.name).toBe('Secret Achievement');
+      expect(item?.description).toBe('Keep reading to reveal this achievement.');
+      expect(item?.iconName).toBe('lock');
+      expect(item?.threshold).toBeNull();
+      expect(item?.context).toBeNull();
+    });
+
+    describe('in another language', () => {
+      const visible = {
+        key: 'books_finished_1',
+        groupKey: 'books_finished',
+        tier: 1,
+        category: 'reading',
+        name: 'Ink Initiate',
+        description: 'Finish your first book',
+        iconName: 'book-open',
+        rarity: 'common',
+        threshold: 1,
+        hidden: false,
+        sortOrder: 1,
+      };
+      const secret = { ...visible, key: 'secret_1', groupKey: null, tier: null, name: 'Secret', description: 'Hidden thing', hidden: true };
+
+      beforeEach(() => {
+        primeServerTextCatalog('de', {
+          achievements: { books_finished_1: { name: 'Tinten-Neuling', description: 'Beende dein erstes Buch' } },
+          achievementCategories: { reading: 'Lesen' },
+          achievementSecret: { name: 'Geheimer Erfolg', description: 'Lies weiter, um ihn zu enthüllen.' },
+        });
+        repo.findUserAchievements.mockResolvedValue([]);
+      });
+
+      afterEach(() => resetServerTextCache());
+
+      it('translates names, descriptions, category labels and the secret placeholder', async () => {
+        repo.findAllAchievements.mockResolvedValue([visible, secret]);
+
+        const result = await service.getCatalogue({ id: 1, isSuperuser: false } as never, 'de');
+        const reading = result.categories.find((c) => c.key === 'reading');
+
+        expect(reading?.label).toBe('Lesen');
+        expect(reading?.achievements.map((item) => [item.name, item.description])).toEqual([
+          ['Tinten-Neuling', 'Beende dein erstes Buch'],
+          ['Geheimer Erfolg', 'Lies weiter, um ihn zu enthüllen.'],
+        ]);
+        expect(result.categories.find((c) => c.key === 'library')?.label).toBe('Library');
+      });
+
+      it('keeps the stored English when a request names no language', async () => {
+        repo.findAllAchievements.mockResolvedValue([visible]);
+
+        const result = await service.getCatalogue({ id: 1, isSuperuser: false } as never);
+        const reading = result.categories.find((c) => c.key === 'reading');
+
+        expect(reading?.label).toBe('Reading');
+        expect(reading?.achievements[0]?.name).toBe('Ink Initiate');
+      });
+    });
+  });
+
+  describe('celebrations', () => {
+    const achievement = {
+      key: 'books_finished_1',
+      groupKey: 'books_finished',
+      tier: 1,
+      category: 'reading',
+      name: 'Ink Initiate',
+      description: 'Finish one book',
+      iconName: 'book-open',
+      rarity: 'common',
+      threshold: 1,
+      hidden: false,
+      sortOrder: 1,
+    };
+
+    it('does not claim when achievements are disabled', async () => {
+      userService.isAchievementEnabled.mockResolvedValue(false);
+
+      await expect(service.claimCelebration({ id: 1, isSuperuser: false } as never)).resolves.toBeNull();
+      expect(repo.claimNextCelebration).not.toHaveBeenCalled();
+    });
+
+    it('returns a typed claim with accessible related-book context', async () => {
+      repo.claimNextCelebration.mockResolvedValue({
+        achievement,
+        award: {
+          id: 3,
+          userId: 1,
+          achievementKey: achievement.key,
+          awardedAt: new Date('2026-07-22T12:00:00Z'),
+          contextJson: { bookId: 42, bookTitle: 'The Long Orbit' },
+        },
+      });
+      repo.findAccessibleBookIds.mockResolvedValue(new Set([42]));
+
+      const claim = await service.claimCelebration({ id: 1, isSuperuser: false } as never);
+
+      expect(claim?.claimId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(claim?.achievement.contextBookId).toBe(42);
+      expect(claim?.achievement.contextBookTitle).toBe('The Long Orbit');
+      expect(repo.claimNextCelebration).toHaveBeenCalledOnce();
+    });
+
+    it('treats missing acknowledgement as idempotent and rejects foreign claims', async () => {
+      repo.acknowledgeCelebration.mockResolvedValueOnce('missing').mockResolvedValueOnce('foreign');
+
+      await expect(service.acknowledgeCelebration({ id: 1 } as never, 'claim')).resolves.toBeUndefined();
+      await expect(service.acknowledgeCelebration({ id: 1 } as never, 'claim')).rejects.toThrow('not found');
     });
   });
 
@@ -421,6 +532,16 @@ describe('AchievementService', () => {
       const result = await service.getCatalogue({ id: 1, isSuperuser: false } as never);
       const item = result.categories.find((c) => c.key === 'dedication')?.achievements.find((a) => a.key === 'seasonal_reader');
       expect(item?.currentProgress).toBe(2);
+    });
+
+    it('returns year_round_reader progress as months read this year', async () => {
+      repo.findAllAchievements.mockResolvedValue([makeSingleBadgeRow('year_round_reader', 'dedication')]);
+      repo.findUserAchievements.mockResolvedValue([]);
+      repo.countDistinctMonthsWithReading.mockResolvedValue(10);
+      const result = await service.getCatalogue({ id: 1, isSuperuser: false } as never);
+      const item = result.categories.find((c) => c.key === 'dedication')?.achievements.find((a) => a.key === 'year_round_reader');
+      expect(item?.currentProgress).toBe(10);
+      expect(repo.countDistinctMonthsWithReading).toHaveBeenCalledWith(1, new Date().getUTCFullYear());
     });
 
     it('returns null progress for consistent_reader', async () => {

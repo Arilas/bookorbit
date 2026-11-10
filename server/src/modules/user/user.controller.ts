@@ -10,7 +10,6 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  ParseBoolPipe,
   ParseIntPipe,
   Patch,
   Post,
@@ -34,6 +33,7 @@ import { CreateSharedUserDto } from './dto/create-shared-user.dto';
 import { ListUsersDto } from './dto/list-users.dto';
 import { SetLibrariesDto } from './dto/set-libraries.dto';
 import { SetPermissionsDto } from './dto/set-permissions.dto';
+import { SetSuperuserDto } from './dto/set-superuser.dto';
 import { SetContentFiltersDto } from './dto/set-content-filters.dto';
 import { UpdateMeDto } from './dto/update-me.dto';
 import { UpdateMeSettingsDto } from './dto/update-me-settings.dto';
@@ -91,7 +91,7 @@ export class UserController {
 
   @Patch('me/settings')
   updateMySettings(@CurrentUser() user: RequestUser, @Body() dto: UpdateMeSettingsDto) {
-    return this.userService.updateMySettings(user.id, dto);
+    return this.userService.updateMySettings(user, dto);
   }
 
   @Patch('me/reader-storage-mode')
@@ -258,7 +258,7 @@ export class UserController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission(Permission.ManageUsers)
   @Auditable({
-    action: AuditAction.UserSuperuserEnable,
+    action: (req) => ((req.body as SetSuperuserDto).isSuperuser ? AuditAction.UserSuperuserEnable : AuditAction.UserSuperuserDisable),
     resource: AuditResource.User,
     getResourceId: (req) => parseInt(req.params['id'] as string, 10),
     description: (req) => {
@@ -267,18 +267,20 @@ export class UserController {
       return `${action} superuser for user #${req.params['id']}`;
     },
   })
-  setSuperuser(
-    @Param('id', ParseIntPipe) id: number,
-    @Body('isSuperuser', ParseBoolPipe) isSuperuser: boolean,
-    @CurrentUser() requestingUser: RequestUser,
-  ) {
-    return this.userService.setSuperuser(id, isSuperuser, requestingUser);
+  setSuperuser(@Param('id', ParseIntPipe) id: number, @Body() dto: SetSuperuserDto, @CurrentUser() requestingUser: RequestUser) {
+    return this.userService.setSuperuser(id, dto.isSuperuser, requestingUser);
   }
 
   @Get(':id/libraries')
   @RequirePermission(Permission.ManageUsers)
   getLibraries(@Param('id', ParseIntPipe) id: number) {
     return this.userService.getLibraryIds(id);
+  }
+
+  @Get(':id/library-access')
+  @RequirePermission(Permission.ManageUsers)
+  getLibraryGrants(@Param('id', ParseIntPipe) id: number) {
+    return this.userService.getLibraryGrants(id);
   }
 
   @Put(':id/libraries')

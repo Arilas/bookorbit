@@ -1,30 +1,32 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ChevronsDown, CircleDashed, Download } from '@lucide/vue'
-import type { MergeStrategy } from '@bookorbit/types'
+import { ChevronsDown, CircleDashed, Download, ListPlus } from '@lucide/vue'
+import type { MetadataMergeStrategy } from '@bookorbit/types'
 
 const { t } = useI18n()
 
-defineProps<{ modelValue: MergeStrategy; disabled?: boolean }>()
-const emit = defineEmits<{ 'update:modelValue': [value: MergeStrategy] }>()
+const props = defineProps<{ modelValue: MetadataMergeStrategy; disabled?: boolean; allowMergeExisting?: boolean }>()
+const emit = defineEmits<{ 'update:modelValue': [value: MetadataMergeStrategy] }>()
 
-const ICONS = { fillMissing: CircleDashed, overwriteIfProvided: Download, overwrite: ChevronsDown } as const
+const ICONS = { fillMissing: CircleDashed, mergeExisting: ListPlus, overwriteIfProvided: Download, overwrite: ChevronsDown } as const
 
 // Order the segments least to most destructive so the control reads as a dial.
-const ORDER: MergeStrategy[] = ['fillMissing', 'overwriteIfProvided', 'overwrite']
+const options = computed(() => {
+  const order: MetadataMergeStrategy[] = props.allowMergeExisting
+    ? ['fillMissing', 'mergeExisting', 'overwriteIfProvided', 'overwrite']
+    : ['fillMissing', 'overwriteIfProvided', 'overwrite']
 
-const options = computed(() =>
-  ORDER.map((value) => ({
+  return order.map((value) => ({
     value,
     icon: ICONS[value],
     short: t(`settings.metadata.mergeStrategy.${value}.short`),
     label: t(`settings.metadata.mergeStrategy.${value}.label`),
     description: t(`settings.metadata.mergeStrategy.${value}.description`),
-  })),
-)
+  }))
+})
 
-function select(value: MergeStrategy) {
+function select(value: MetadataMergeStrategy) {
   emit('update:modelValue', value)
 }
 </script>
@@ -45,7 +47,7 @@ function select(value: MergeStrategy) {
       :aria-label="`${option.label}. ${option.description}`"
       :title="`${option.label} - ${option.description}`"
       :disabled="disabled"
-      class="inline-flex h-6 min-w-0 items-center gap-1.5 rounded px-2 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary disabled:cursor-not-allowed"
+      class="inline-flex h-6 min-w-0 grow items-center justify-center gap-1.5 rounded-xs px-2 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary disabled:cursor-not-allowed"
       :class="
         modelValue === option.value
           ? 'bg-background font-semibold text-foreground shadow-xs'

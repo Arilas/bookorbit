@@ -1,12 +1,19 @@
 import { registerAs } from '@nestjs/config';
 import { join, resolve } from 'path';
 
+import { DEV_CLIENT_ORIGIN } from './dev-client-origin';
 export const appConfig = registerAs('app', () => ({
   nodeEnv: process.env.NODE_ENV ?? 'development',
-  appUrl: process.env.APP_URL ?? 'http://localhost:5173',
+  host: process.env.HOST?.trim() || '0.0.0.0',
+  appUrl: process.env.APP_URL ?? DEV_CLIENT_ORIGIN,
+  // Private-use scheme the iOS app registers with ASWebAuthenticationSession. Compiled into the
+  // client binary, so it is the same for every provider on every deployment; configurable only so
+  // a rebranded fork can change it.
+  nativeRedirectUri: process.env.NATIVE_REDIRECT_URI?.trim() || 'bookorbit://oauth2-callback',
   version: process.env.APP_VERSION ?? 'Local build',
   githubReleasesRepo: process.env.GITHUB_RELEASES_REPO?.trim() || 'bookorbit/bookorbit',
   githubReleasesToken: process.env.GITHUB_RELEASES_TOKEN?.trim() || undefined,
+  metadataProviderDirectoryUrl: parseDirectoryUrl(process.env.METADATA_PROVIDER_DIRECTORY_URL),
   oidcAllowLocalIssuers: parseBooleanFlag(process.env.OIDC_ALLOW_LOCAL_ISSUERS, false),
   swaggerEnabled: parseBooleanFlag(process.env.SWAGGER_ENABLED, false),
   koboCloudscraperPython: process.env.KOBO_CLOUDSCRAPER_PYTHON?.trim() || undefined,
@@ -24,6 +31,7 @@ export const authConfig = registerAs('auth', () => ({
   appPasswordRefreshExpiresIn: process.env.APP_PASSWORD_REFRESH_EXPIRES_IN ?? '90d',
   setupBootstrapToken: process.env.SETUP_BOOTSTRAP_TOKEN ?? '',
   refreshRotationGraceMs: parsePositiveInteger(process.env.AUTH_REFRESH_ROTATION_GRACE_MS, 30_000),
+  passwordLoginEnabled: !parseBooleanFlag(process.env.DISABLE_LOCAL_AUTH, false),
 }));
 
 export const storageConfig = registerAs('storage', () => {
@@ -38,9 +46,44 @@ export const storageConfig = registerAs('storage', () => {
   };
 });
 
+export const coverSlotsConfig = registerAs('coverSlots', () => ({
+  backfillMode: process.env.COVER_SLOTS_BACKFILL_MODE?.trim().toLowerCase() || (process.env.NODE_ENV === 'test' ? 'skip' : 'background'),
+}));
+
 export const fileWriteConfig = registerAs('fileWrite', () => ({
   debounceMs: parsePositiveInteger(process.env.FILE_WRITE_DEBOUNCE_MS, 3_000),
   maxConcurrentWrites: parsePositiveInteger(process.env.FILE_WRITE_MAX_CONCURRENT_WRITES, 2),
+}));
+
+export const djvuConfig = registerAs('djvu', () => ({
+  maxConcurrent: parsePositiveInteger(process.env.DJVU_MAX_CONCURRENT, 2),
+  timeoutMs: parsePositiveInteger(process.env.DJVU_TIMEOUT_MS, 30_000),
+  maxSourceBytes: parsePositiveInteger(process.env.DJVU_MAX_SOURCE_BYTES, 256 * 1024 * 1024),
+  cacheBytes: parsePositiveInteger(process.env.DJVU_CACHE_BYTES, 64 * 1024 * 1024),
+}));
+
+export const audiolessEpubConfig = registerAs('audiolessEpub', () => ({
+  maxConcurrentBuilds: parsePositiveInteger(process.env.AUDIOLESS_EPUB_MAX_CONCURRENT_BUILDS, 2),
+  maxSourceEntries: parsePositiveInteger(process.env.AUDIOLESS_EPUB_MAX_SOURCE_ENTRIES, 50_000),
+  maxMetadataBytes: parsePositiveInteger(process.env.AUDIOLESS_EPUB_MAX_METADATA_BYTES, 16 * 1024 * 1024),
+  maxOutputBytes: parsePositiveInteger(process.env.AUDIOLESS_EPUB_MAX_OUTPUT_BYTES, 2 * 1024 * 1024 * 1024),
+}));
+
+export const readAloudConfig = registerAs('readAloud', () => {
+  const appDataPath = resolve(process.env.APP_DATA_PATH ?? '/data');
+  return {
+    workerUrl: process.env.READ_ALOUD_WORKER_URL?.trim().replace(/\/$/, '') || undefined,
+    workerToken: process.env.READ_ALOUD_WORKER_TOKEN?.trim() || undefined,
+    workRoot: join(appDataPath, 'read-aloud', 'jobs'),
+    maxOutputBytes: parsePositiveInteger(process.env.READ_ALOUD_MAX_OUTPUT_BYTES, 20 * 1024 * 1024 * 1024),
+    requestTimeoutMs: parsePositiveInteger(process.env.READ_ALOUD_WORKER_REQUEST_TIMEOUT_MS, 30_000),
+  };
+});
+
+/** External audio tools. The binaries are looked up on PATH unless an absolute path is given. */
+export const audioToolsConfig = registerAs('audioTools', () => ({
+  ffmpegPath: process.env.FFMPEG_PATH?.trim() || 'ffmpeg',
+  ffprobePath: process.env.FFPROBE_PATH?.trim() || 'ffprobe',
 }));
 
 export const emailConfig = registerAs('email', () => ({
@@ -50,6 +93,15 @@ export const emailConfig = registerAs('email', () => ({
 export const migrationConfig = registerAs('migration', () => ({
   encryptionKey: process.env.MIGRATION_ENCRYPTION_KEY ?? '',
   importRoot: process.env.MIGRATION_IMPORT_ROOT?.trim() ? resolve(process.env.MIGRATION_IMPORT_ROOT) : undefined,
+}));
+
+/**
+ * Download-client and (from phase 3) indexer credentials. Unlike the email and migration keys,
+ * `RequestCredentialService` refuses to store a secret when this is unset rather than falling
+ * back to plaintext.
+ */
+export const bookRequestConfig = registerAs('bookRequest', () => ({
+  encryptionKey: process.env.BOOK_REQUEST_ENCRYPTION_KEY ?? '',
 }));
 
 export const oidcRuntimeConfig = registerAs('oidcRuntime', () => ({
@@ -74,4 +126,13 @@ function parseBooleanFlag(value: string | undefined, fallback: boolean): boolean
   if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
   if (['false', '0', 'no', 'off'].includes(normalized)) return false;
   return fallback;
+}
+
+const DEFAULT_METADATA_PROVIDER_DIRECTORY_URL = 'https://raw.githubusercontent.com/bookorbit/bookorbit-metadata-providers/main/directory.json';
+
+/** Null when the online list of ready-made metadata providers is turned off. */
+function parseDirectoryUrl(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return DEFAULT_METADATA_PROVIDER_DIRECTORY_URL;
+  return trimmed.toLowerCase() === 'off' ? null : trimmed;
 }

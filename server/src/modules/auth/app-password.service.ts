@@ -6,7 +6,7 @@ import { AuditAction, AuditResource, type RotateAppPasswordResponse } from '@boo
 import type { RequestUser } from '../../common/types/request-user';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { AUDIT_EVENT, AuditEventsService } from '../audit/audit-events.service';
-import { AppPasswordRepository, omitAppPasswordSecretHash } from './app-password.repository';
+import { AppPasswordRepository, type VerifiedAppPassword } from './app-password.repository';
 import type { CreateAppPasswordDto } from './dto/create-app-password.dto';
 import type { RotateAppPasswordDto } from './dto/rotate-app-password.dto';
 
@@ -154,13 +154,22 @@ export class AppPasswordService {
 
       const expiresAt = parseAppPasswordExpiration(dto.expiresAt);
       const generated = generateAppPasswordSecret();
-      const row = await this.appPasswordRepo.rotateOwnedWithSessions(actor.id, id, {
-        selector: generated.selector,
-        secretHash: generated.secretHash,
-        secretHint: generated.secretHint,
-        expiresAt,
-      });
-      if (!row) throw new NotFoundException('Application password not found');
+      const result = await this.appPasswordRepo.rotateOwnedWithinActiveLimit(
+        actor.id,
+        id,
+        {
+          selector: generated.selector,
+          secretHash: generated.secretHash,
+          secretHint: generated.secretHint,
+          expiresAt,
+        },
+        MAX_ACTIVE_APP_PASSWORDS,
+      );
+      if (result.status === 'not_found') throw new NotFoundException('Application password not found');
+      if (result.status === 'active_limit_reached') {
+        throw new BadRequestException(`Maximum of ${MAX_ACTIVE_APP_PASSWORDS} active application passwords per user`);
+      }
+      const row = result.credential;
 
       this.auditEvents.emit(AUDIT_EVENT, {
         userId: actor.id,
@@ -208,7 +217,7 @@ export class AppPasswordService {
     });
   }
 
-  async verify(userId: number, rawPassword: string, ip?: string) {
+  async verify(userId: number, rawPassword: string): Promise<VerifiedAppPassword | null> {
     const parsed = APP_PASSWORD_PATTERN.exec(rawPassword);
     if (!parsed) return null;
 
@@ -217,16 +226,24 @@ export class AppPasswordService {
     const matches = secretsMatch(secret!, credential?.secretHash ?? DUMMY_SECRET_HASH);
     if (!credential || !matches) return null;
 
-    await this.markUsed(credential.id, ip);
-    return omitAppPasswordSecretHash(credential);
+    return {
+      id: credential.id,
+      label: credential.label,
+      selector: credential.selector,
+      expiresAt: credential.expiresAt,
+    };
   }
 
   findUsableById(userId: number, id: number) {
     return this.appPasswordRepo.findUsableById(userId, id);
   }
 
-  markUsed(id: number, ip?: string): Promise<void> {
-    return this.appPasswordRepo.touchLastUsed(id, ip);
+  findUsableGenerationById(userId: number, id: number) {
+    return this.appPasswordRepo.findUsableGenerationById(userId, id);
+  }
+
+  markUsed(userId: number, id: number, selector: string, ip?: string): Promise<boolean> {
+    return this.appPasswordRepo.touchLastUsedGeneration(userId, id, selector, ip);
   }
 
   revokeForRefreshReplay(id: number) {

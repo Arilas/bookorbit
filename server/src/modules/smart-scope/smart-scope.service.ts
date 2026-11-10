@@ -1,8 +1,11 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import type { SQL } from 'drizzle-orm';
+import { and, type SQL } from 'drizzle-orm';
 
 import type { BookQuery, BooksPage, GroupRule, JumpBucketsQuery, JumpBucketsResponse, SortSpec } from '@bookorbit/types';
+import { normalizeCoverAspectRatio } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
+import { excludeAudioOnlyBooks } from '../../common/utils/audio-only-book-sql.utils';
+import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { normalizeIconValue } from '../../common/utils/icon-value.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { resolveTimeZone } from '../../common/utils/timezone.utils';
@@ -16,6 +19,14 @@ import { CreateSmartScopeDto } from './dto/create-smart-scope.dto';
 import { ReorderSmartScopesDto } from './dto/reorder-smart-scopes.dto';
 import { UpdateSmartScopeDto } from './dto/update-smart-scope.dto';
 import { SmartScopeRepository } from './smart-scope.repository';
+
+/**
+ * Counting every scope is the one place a single request scales with how many scopes a user has
+ * kept, and each count is a full aggregate over their library. Unbounded, a user with enough scopes
+ * takes the whole connection pool for themselves and starves every other request until they finish.
+ * Four keeps the listing responsive while leaving most of the pool for everyone else.
+ */
+const SCOPE_COUNT_CONCURRENCY = 4;
 
 /**
  * SmartScopes: server-backed, rule-based dynamic datasets.
@@ -67,7 +78,12 @@ export class SmartScopeService {
   }
 
   private toResponse(smartScope: SmartScope, user: RequestUser, koboSyncEnabled: boolean) {
-    return { ...smartScope, isOwner: smartScope.userId === user.id, koboSyncEnabled };
+    return {
+      ...smartScope,
+      coverAspectRatio: normalizeCoverAspectRatio(smartScope.coverAspectRatio),
+      isOwner: smartScope.userId === user.id,
+      koboSyncEnabled,
+    };
   }
 
   private async resolveKoboSyncEnabled(smartScope: SmartScope, user: RequestUser): Promise<boolean> {
@@ -79,34 +95,41 @@ export class SmartScopeService {
   async findAll(user: RequestUser) {
     const smartScopes = await this.smartScopeRepo.findAllForUser(user.id);
     const accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
-    const timeZone = resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
     const sharedScopeIds = smartScopes.filter((smartScope) => smartScope.userId !== user.id).map((smartScope) => smartScope.id);
     const subscribedIds = new Set(await this.smartScopeRepo.findKoboSubscribedScopeIds(user.id, sharedScopeIds));
     const koboSyncEnabledFor = (smartScope: SmartScope) => (smartScope.userId === user.id ? smartScope.syncToKobo : subscribedIds.has(smartScope.id));
-    return Promise.all(
-      smartScopes.map(async (smartScope) => {
-        if (!smartScope.filter) {
-          return { ...this.toResponse(smartScope, user, koboSyncEnabledFor(smartScope)), bookCount: 0 };
-        }
-        const startedAt = Date.now();
-        let where: SQL | undefined;
-        try {
-          const filter = validateGroupRule(smartScope.filter);
-          if (!filter) return { ...this.toResponse(smartScope, user, koboSyncEnabledFor(smartScope)), bookCount: 0 };
-          where = this.queryBuilder.buildWhere(filter, { accessibleLibraryIds, userId: user.id, timeZone });
-        } catch (err) {
-          if (!(err instanceof BadRequestException)) throw err;
-          const errorClass = err.constructor.name;
-          const error = sanitizeLogValue(err.message);
-          this.logger.error(
-            `[smart_scope.count] [fail] scopeId=${smartScope.id} userId=${user.id} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${error}" - smart scope filter is invalid`,
-          );
-          return { ...this.toResponse(smartScope, user, koboSyncEnabledFor(smartScope)), bookCount: null };
-        }
-        const bookCount = await this.bookReadService.countWhere(where);
-        return { ...this.toResponse(smartScope, user, koboSyncEnabledFor(smartScope)), bookCount };
-      }),
+    return mapWithConcurrency(smartScopes, SCOPE_COUNT_CONCURRENCY, (smartScope) =>
+      this.toCountedResponse(smartScope, user, koboSyncEnabledFor(smartScope), accessibleLibraryIds),
     );
+  }
+
+  private async toCountedResponse(smartScope: SmartScope, user: RequestUser, koboSyncEnabled: boolean, accessibleLibraryIds?: number[]) {
+    const response = this.toResponse(smartScope, user, koboSyncEnabled);
+    if (!smartScope.filter) return { ...response, bookCount: 0 };
+
+    const startedAt = Date.now();
+    try {
+      const filter = validateGroupRule(smartScope.filter);
+      if (!filter) return { ...response, bookCount: 0 };
+      const libraryIds = accessibleLibraryIds ?? (await this.libraryService.findAccessibleLibraryIds(user));
+      const timeZone = resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
+      const where = this.queryBuilder.buildWhere(filter, {
+        accessibleLibraryIds: libraryIds,
+        userId: user.id,
+        timeZone,
+        contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+      });
+      const bookCount = await this.bookReadService.countWhere(where);
+      return { ...response, bookCount };
+    } catch (err) {
+      if (!(err instanceof BadRequestException)) throw err;
+      const errorClass = err.constructor.name;
+      const error = sanitizeLogValue(err.message);
+      this.logger.error(
+        `[smart_scope.count] [fail] scopeId=${smartScope.id} userId=${user.id} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${error}" - smart scope filter is invalid`,
+      );
+      return { ...response, bookCount: null };
+    }
   }
 
   async findOne(id: number, user: RequestUser) {
@@ -158,8 +181,9 @@ export class SmartScopeService {
       defaultSort: dto.defaultSort ?? [],
       isPublic: dto.isPublic ?? false,
       syncToKobo: dto.syncToKobo ?? false,
+      coverAspectRatio: dto.coverAspectRatio,
     });
-    return this.toResponse(smartScope, user, smartScope.syncToKobo);
+    return this.toCountedResponse(smartScope, user, smartScope.syncToKobo);
   }
 
   async update(id: number, dto: UpdateSmartScopeDto, user: RequestUser) {
@@ -179,8 +203,9 @@ export class SmartScopeService {
       defaultSort: dto.defaultSort,
       isPublic: dto.isPublic,
       syncToKobo: dto.syncToKobo,
+      coverAspectRatio: dto.coverAspectRatio,
     });
-    return this.toResponse(updated, user, await this.resolveKoboSyncEnabled(updated, user));
+    return this.toCountedResponse(updated, user, await this.resolveKoboSyncEnabled(updated, user));
   }
 
   async remove(id: number, user: RequestUser) {
@@ -221,11 +246,18 @@ export class SmartScopeService {
     );
   }
 
-  async executeSmartScopeBookIds(id: number, user: RequestUser, size: number, libraryIdsRestriction?: readonly number[]): Promise<number[]> {
+  async executeSmartScopeBookIds(
+    id: number,
+    user: RequestUser,
+    size: number,
+    libraryIdsRestriction?: readonly number[],
+    options: { excludeAudioOnly?: boolean } = {},
+  ): Promise<number[]> {
     const query: BookQuery = { sort: [], pagination: { page: 0, size } };
     const prepared = await this.prepareBooksQuery(id, user, query, libraryIdsRestriction);
     if (!prepared) return [];
-    return this.bookService.executeBookIdsQuery(user.id, prepared.where, prepared.effectiveQuery);
+    const where = options.excludeAudioOnly ? and(prepared.where, excludeAudioOnlyBooks()) : prepared.where;
+    return this.bookService.executeBookIdsQuery(user.id, where, prepared.effectiveQuery);
   }
 
   async queryBooks(id: number, user: RequestUser, query: BookQuery, libraryIdsRestriction?: readonly number[]): Promise<BooksPage> {
@@ -243,6 +275,7 @@ export class SmartScopeService {
     try {
       const result = await this.bookService.executeBooksQuery(user.id, where, effectiveQuery, {
         seriesSelectionFilter: query.filter,
+        viewer: user,
       });
       const durationMs = Date.now() - start;
       if (durationMs >= 500) {

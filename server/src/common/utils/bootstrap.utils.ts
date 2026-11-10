@@ -10,16 +10,17 @@ const BODY_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
 const HSTS_MAX_AGE_SECONDS = 365 * 24 * 60 * 60;
 const HSTS_HEADER_VALUE = `max-age=${HSTS_MAX_AGE_SECONDS}; includeSubDomains`;
 
-export function parseTrustProxy(value: string | undefined): string | boolean | number {
+export function parseTrustProxy(value: string | undefined): string | boolean {
   const raw = value?.trim();
   if (!raw) return DEFAULT_TRUST_PROXY;
 
   const normalized = raw.toLowerCase();
-  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
-  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', 'no', 'off'].includes(normalized)) return false;
+  if (['true', 'yes', 'on'].includes(normalized)) return true;
 
-  const hopCount = Number(raw);
-  if (Number.isInteger(hopCount) && hopCount >= 0) return hopCount;
+  if (!Number.isNaN(Number(raw))) {
+    throw new Error('Numeric TRUST_PROXY hop counts are not supported; configure trusted proxy IP or CIDR ranges');
+  }
 
   return raw;
 }
@@ -115,6 +116,18 @@ export function shouldInjectEmptyJsonBody(method: string, headers: IncomingHttpH
   return contentLength === undefined || contentLength === '0';
 }
 
+// The injected '{}' rewrites content-length and becomes the parsed body, so only this marker still
+// says the client sent nothing. App Attest needs that to hash the bytes the client really signed.
+const requestsWithInjectedEmptyBody = new WeakSet<object>();
+
+export function markEmptyBodyInjected(request: object): void {
+  requestsWithInjectedEmptyBody.add(request);
+}
+
+export function hasInjectedEmptyBody(request: object): boolean {
+  return requestsWithInjectedEmptyBody.has(request);
+}
+
 export function buildEmptyJsonBodyStream(headers: IncomingHttpHeaders): Readable {
   headers['content-length'] = String(Buffer.byteLength(EMPTY_JSON_BODY));
   return Readable.from([Buffer.from(EMPTY_JSON_BODY)]);
@@ -156,4 +169,32 @@ export function registerConditionalHsts(fastify: FastifyInstance): void {
     applyConditionalHsts(request, reply);
     done(null, payload);
   });
+}
+
+/**
+ * Nest's `@RouteConfig({ bodyLimit })` only reaches Fastify's user-space `config` object, while
+ * Fastify reads `bodyLimit` from the route options. Without copying it across, a route that asks
+ * for a larger body silently keeps the 1 MiB default and its DTO length limit is unreachable.
+ */
+export function applyDeclaredBodyLimit(route: { config?: unknown; bodyLimit?: number }): void {
+  const declared = (route.config as { bodyLimit?: unknown } | undefined)?.bodyLimit;
+  if (typeof declared === 'number' && Number.isInteger(declared) && declared > 0) route.bodyLimit = declared;
+}
+
+export function registerDeclaredBodyLimits(fastify: FastifyInstance): void {
+  fastify.addHook('onRoute', applyDeclaredBodyLimit);
+}
+
+/**
+ * `@fastify/compress` reads its per-route opt-out from the route options, which Nest's
+ * `@RouteConfig({ compress: false })` cannot reach. Raw file routes need it: the plugin's default
+ * type check gzips `+xml` and `octet-stream` bodies (FB2, unknown formats) and drops Content-Length.
+ * Register before the compress plugin so this hook runs first.
+ */
+export function applyDeclaredCompressionOptOut(route: { config?: unknown; compress?: unknown }): void {
+  if ((route.config as { compress?: unknown } | undefined)?.compress === false) route.compress = false;
+}
+
+export function registerDeclaredCompressionOptOuts(fastify: FastifyInstance): void {
+  fastify.addHook('onRoute', applyDeclaredCompressionOptOut);
 }

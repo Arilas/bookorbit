@@ -1,4 +1,11 @@
-import { MetadataProviderKey, type BookDockMetadata } from '@bookorbit/types';
+import {
+  isExternalMetadataProviderKeySyntax,
+  isKnownMetadataProviderKey,
+  isMetadataProviderKeySyntax,
+  parseSeriesIndex,
+  type BookDockMetadata,
+  type MetadataProviderKey,
+} from '@bookorbit/types';
 
 const PASSTHROUGH_FIELDS = [
   'title',
@@ -14,7 +21,6 @@ const PASSTHROUGH_FIELDS = [
   'isbn10',
   'isbn13',
   'seriesName',
-  'seriesIndex',
   'genres',
   'coverUrl',
   'abridged',
@@ -40,9 +46,9 @@ const BOOK_DOCK_METADATA_FIELDS = new Set<keyof BookDockMetadata>([
   'chapters',
   'seriesMemberships',
   'communityRatings',
+  'externalProviderIds',
   'comicMetadata',
 ]);
-const METADATA_PROVIDER_KEYS = new Set<string>(Object.values(MetadataProviderKey));
 
 export function normalizeBookDockMetadata(value: unknown): BookDockMetadata | null {
   if (!isRecord(value)) return null;
@@ -53,12 +59,15 @@ export function normalizeBookDockMetadata(value: unknown): BookDockMetadata | nu
     if (value[field] !== undefined) target[field] = value[field];
   }
 
+  if (value.seriesIndex !== undefined) target.seriesIndex = parseSeriesIndex(value.seriesIndex);
+
   const durationSeconds = value.durationSeconds !== undefined ? value.durationSeconds : value.duration;
   if (durationSeconds !== undefined) target.durationSeconds = durationSeconds;
 
   copyChapters(value, normalized);
   copySeriesMemberships(value, normalized);
   copyCommunityRatings(value, normalized);
+  copyExternalProviderIds(value, normalized);
   copyComicMetadata(value, normalized);
 
   return normalized;
@@ -110,9 +119,27 @@ function copySeriesMemberships(source: Record<string, unknown>, target: BookDock
   target.seriesMemberships = source.seriesMemberships.flatMap((value) => {
     if (!isRecord(value) || typeof value.seriesName !== 'string') return [];
     const membership: NonNullable<BookDockMetadata['seriesMemberships']>[number] = { seriesName: value.seriesName };
-    if (value.seriesIndex === null || typeof value.seriesIndex === 'number') membership.seriesIndex = value.seriesIndex;
+    if (value.seriesIndex !== undefined) membership.seriesIndex = parseSeriesIndex(value.seriesIndex);
     return [membership];
   });
+}
+
+/** External provider ids, kept only where the key could name one and the id is a bounded string. */
+function copyExternalProviderIds(source: Record<string, unknown>, target: BookDockMetadata): void {
+  if (source.externalProviderIds === undefined) return;
+  if (!isRecord(source.externalProviderIds)) {
+    target.externalProviderIds = null;
+    return;
+  }
+  const entries = Object.entries(source.externalProviderIds).filter(
+    ([key, id]) =>
+      !isKnownMetadataProviderKey(key) &&
+      isExternalMetadataProviderKeySyntax(key) &&
+      typeof id === 'string' &&
+      id.trim().length > 0 &&
+      id.length <= 512,
+  );
+  target.externalProviderIds = entries.length > 0 ? (Object.fromEntries(entries.slice(0, 50)) as Record<string, string>) : null;
 }
 
 function copyCommunityRatings(source: Record<string, unknown>, target: BookDockMetadata): void {
@@ -127,7 +154,7 @@ function copyCommunityRatings(source: Record<string, unknown>, target: BookDockM
     if (
       !isRecord(value) ||
       typeof value.provider !== 'string' ||
-      !METADATA_PROVIDER_KEYS.has(value.provider) ||
+      !isMetadataProviderKeySyntax(value.provider) ||
       typeof value.rating !== 'number' ||
       !Number.isFinite(value.rating) ||
       value.rating < 0 ||

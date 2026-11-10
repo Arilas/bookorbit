@@ -3,6 +3,7 @@ import { BadRequestException, ExecutionContext, ForbiddenException } from '@nest
 import type { RequestUser } from '../types/request-user';
 import { LibraryAccessGuard } from './library-access.guard';
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
+import { LIBRARY_ACCESS_KEY } from '../decorators/require-library-access.decorator';
 
 function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
   return {
@@ -41,7 +42,7 @@ function makeGuard(
   } = {},
 ) {
   const reflector = {
-    getAllAndOverride: vi.fn().mockReturnValue(overrides.required),
+    getAllAndOverride: vi.fn((key: string) => (key === LIBRARY_ACCESS_KEY ? overrides.required : undefined)),
   };
   const findFirst = vi.fn().mockResolvedValue(overrides.row);
   const db = {
@@ -81,6 +82,12 @@ describe('LibraryAccessGuard', () => {
     });
     await expect(guard.canActivate(makeContext(makeUser(), { id: '12' }))).resolves.toBe(true);
     expect(findFirst).toHaveBeenCalled();
+  });
+
+  it('rejects partially numeric library ids', async () => {
+    const { guard } = makeGuard({ required: 'viewer' });
+
+    await expect(guard.canActivate(makeContext(makeUser(), { libraryId: '12x' }))).rejects.toThrow(BadRequestException);
   });
 
   it('throws ForbiddenException when no access row exists', async () => {

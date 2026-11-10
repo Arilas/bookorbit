@@ -14,7 +14,17 @@
     "previous": "Forrige",
     "retry": "Forsøg igen",
     "yes": "Ja",
-    "no": "Nej"
+    "no": "Nej",
+    "show": "Vis",
+    "hide": "Skjul",
+    "undo": "Fortryd",
+    "pagination": {
+      "label": "Paginering",
+      "pageOf": "Side {page} af {totalPages}",
+      "previousPage": "Forrige side",
+      "nextPage": "Næste side",
+      "goToPage": "Gå til side {page}"
+    }
   },
   "settings": {
     "privacySharing": {
@@ -97,9 +107,23 @@
       },
       "theme": {
         "title": "Tema",
+        "style": {
+          "label": "Udseende",
+          "hint": "Det overordnede udseende af appen. Tilstand, accent, hjørner og baggrund beholder deres indstillinger.",
+          "bookorbit": {
+            "description": "Tonede flader, glaspaneler og overskrifter med seriffer."
+          },
+          "nostalgia": {
+            "label": "Nostalgisk",
+            "description": "Neutrale flader, systemskrift, flade paneler og en glød i toppen."
+          }
+        },
         "colorScheme": {
           "label": "Farve skema",
           "hint": "Lys eller mørk grænseflade"
+        },
+        "surfacePalette": {
+          "label": "Overflade"
         },
         "accents": {
           "grey": "Grå",
@@ -252,6 +276,14 @@
         "showSpineOnComics": {
           "label": "Vis rygsøjle på tegneserier",
           "hint": "Påfør rygsøjlen og glans effekt på tegneserieomslag (cbz, cbr, cb7)"
+        },
+        "detailCoverTint": {
+          "single": {
+            "hint": "Kun omslagets dominerende farve"
+          },
+          "duotone": {
+            "label": "To farver"
+          }
         },
         "shadow": {
           "title": "Dække skygge styrke",
@@ -447,7 +479,8 @@
         "book-covers": "Bogomslag",
         "icons": "Ikoner",
         "layout": "Layout",
-        "behavior": "Opførsel"
+        "behavior": "Opførsel",
+        "language": "Sprog"
       }
     },
     "account": {
@@ -893,8 +926,10 @@
         "reasonNoFilePathMatch": "Filsti matcher ikke nogen bog i dette bibliotek",
         "reasonNoFileHashMatch": "Filhash matchede ikke nogen bog i dette bibliotek",
         "reasonNoIsbnMatch": "ISBN matcher ikke nogen bog i dette bibliotek",
+        "reasonNoAsinMatch": "ASIN matchede ikke nogen bog i dette bibliotek",
         "reasonInsufficientSourceData": "Ikke nok metadata til at forsøge at matche",
         "reasonAmbiguousIsbnMatch": "Flere bøger matchede den samme ISBN",
+        "reasonAmbiguousAsinMatch": "Flere bøger matchede det samme ASIN",
         "reasonAmbiguousFileHashMatch": "Flere bøger matchede den samme fil hash",
         "reasonAmbiguousFilePathMatch": "Flere bøger matchede den samme filsti",
         "reasonAmbiguousTitleAuthorMatch": "Flere bøger matchede samme titel og forfatter",
@@ -935,6 +970,7 @@
         "refresh": "Opdater",
         "sourceUser": "Kilde Bruger",
         "targetUser": "Mål Bruger",
+        "doNotImport": "Importer ikke denne bruger",
         "noSourceUsersLoaded": "Ingen kildebrugere indlæst endnu.",
         "noActiveTargetUsers": "Ingen aktive målbrugere fundet. Opret eller genaktivér en BookOrbit-bruger før mapping.",
         "pathPrefixMappings": "Sti Præfiks Tilføjelser",
@@ -1038,9 +1074,9 @@
         "syncMetadataToFiles": "Synkroniser metadata til filer",
         "deleteLibrary": "Slet bibliotek",
         "bookCount": "{count, plural, =0 {ingen bøger} one {# bog} other {# bøger}}",
+        "folderCount": "{count, plural, =0 {ingen mapper} one {# mappe} other {# mapper}}",
         "fileMode": "Fil tilstand",
         "folderMode": "Mappe tilstand",
-        "folderCount": "{count, plural, =0 {ingen mapper} one {# mappe} other {# mapper}}",
         "emptyTitle": "Ingen biblioteker endnu",
         "emptyHint": "Tilføj et bibliotek for at begynde at organisere dine bøger.",
         "addFirstLibrary": "Tilføj dit første bibliotek",
@@ -1065,7 +1101,15 @@
         "libraryDeleted": "\"{name}\" slettet",
         "deleteFailed": "Kunne ikke slette biblioteket",
         "refreshingCovers": "Opdatering af dækker {pct}% ({processed}/{total})",
-        "coversRefreshed": "Dækker opdateret ({count} behandlet)"
+        "coversRefreshed": "Dækker opdateret ({count} behandlet)",
+        "moreActions": "Flere handlinger for {name}",
+        "filterLabel": "Filtrer biblioteker",
+        "filterPlaceholder": "Filtrer efter navn eller sti",
+        "filterClear": "Ryd filter",
+        "sortLabel": "Sorter",
+        "noMatchesTitle": "Ingen biblioteker matcher dette filter",
+        "neverScanned": "Aldrig scannet",
+        "scanningPercent": "Scanner {pct}%"
       },
       "authorEnrichment": {
         "configuration": "Konfiguration",
@@ -3002,19 +3046,8 @@
       "refreshMetadata": "Opdater Metadata",
       "deleteAuthor": "Slet Forfatter"
     },
-    "listRow": {
-      "noRecentAdditions": "Ingen seneste tilføjelser",
-      "portraitAlt": "{name} portræt"
-    },
     "filters": {
-      "title": "Forfatter Filtre",
-      "clearAll": "Ryd alle",
-      "allLibraries": "Alle Biblioteker",
-      "allAuthors": "Alle forfattere",
-      "hasPhoto": "Har foto",
-      "missingPhoto": "Manglende foto",
-      "minBooks": "Min. bøger",
-      "anyPlaceholder": "Alle"
+      "allLibraries": "Alle Biblioteker"
     },
     "header": {
       "never": "Aldrig",
@@ -4500,6 +4533,8 @@
       "columnVisibilityHint": "Brug kolonnens synlighedspanel i tabelhovedet til at vise eller skjule kolonner.",
       "columnVisibilityMobileHint": "Søjlesynlighed kan håndteres fra tabelhovedet.",
       "searchPlaceholder": "Søg titel, forfatter, serie, fortæller...",
+      "clearSearch": "Clear search",
+      "closeSearch": "Close search",
       "mobileSearch": {
         "description": "Søg efter titel, forfatter, serie eller fortæller.",
         "done": "Udført"
@@ -4514,6 +4549,7 @@
         "display": "Vis",
         "coverSize": "Dækningsstørrelse",
         "gridGap": "Grid hul",
+        "pixelValue": "{value} pixels",
         "showJumpRails": "Vis hoppe skinner",
         "columnsHint": "Brug kolonnens synlighedspanel i tabelhovedet til at vise eller skjule kolonner.",
         "coverShape": "Forside-form",
@@ -4958,6 +4994,9 @@
       "failed": "Afsendelse mislykkedes"
     }
   },
+  "errors": {
+    "network": "Could not reach BookOrbit. Check your connection, then try again."
+  },
   "hardcover": {
     "settings": {
       "subtitle": "Synkroniser dine læsefremskridt, status og vurderinger til Hardcover."
@@ -5192,9 +5231,7 @@
         "browseDescription": "Vælg en eller flere mapper uden at forlade browseren.",
         "selectedTitle": "Valgte mapper",
         "addFolders": "Tilføj mapper",
-        "manualEntry": "Indtast en sti manuelt",
         "absolutePath": "Absolut serversti",
-        "addFolder": "Tilføj mappe",
         "removeFolder": "Fjern {folder}",
         "manualCheckHint": "Manuelle stier kontrolleres sammen med resten af de valgte mapper.",
         "pathPlaceholder": "/sti/til/bøger",
@@ -6326,25 +6363,15 @@
       "series": "Serie"
     },
     "bulkRename": {
-      "previewToolbar": "Omdøb forhåndsvisning",
-      "renameSettings": "Omdøb indstillinger",
       "library": "Bibliotek",
       "selectLibraryPlaceholder": "Vælg et bibliotek...",
       "noEligibleLibraries": "Ingen biblioteker har filnavnet aktiveret. Aktivér det i Biblioteks indstillinger.",
       "refresh": "Opdater",
-      "applyRename": "Anvend Omdøb",
-      "showFullPaths": "Vis fulde stier",
-      "columnsMenu": "Kolonner",
-      "renamingInProgress": "Omdøbning af filer - du kan annullere til enhver tid.",
-      "executionFailed": "Masse omdøbning mislykkedes",
       "previewFailed": "Kunne ikke indlæse forhåndsvisning",
-      "noBooksMatch": "Ingen bøger fundet som matcher det aktuelle filter.",
+      "executionFailed": "Masse omdøbning mislykkedes",
       "openBookDetails": "Åbn bogdetaljer",
-      "columns": {
-        "title": "Titel",
-        "currentPath": "Nuværende Sti",
-        "newPath": "Ny Sti",
-        "status": "Status"
+      "filter": {
+        "all": "Alle"
       },
       "status": {
         "willRename": "Vil Omdøbe",
@@ -6353,38 +6380,18 @@
         "noPattern": "Intet Mønster",
         "error": "Fejl"
       },
-      "filter": {
-        "all": "Alle"
-      },
-      "summary": {
-        "label": "Summary",
-        "toRename": "{count} for at omdøbe",
-        "unchanged": "{count} uændret",
-        "collisions": "{count, plural, =0 {# kollision} one {# kollision} other {# kollisioner}}",
-        "errors": "{count, plural, =0 {# fejl} one {# fejl} other {# fejl}}"
-      },
       "empty": {
         "title": "Vælg et bibliotek for at starte",
         "description": "Vælg et bibliotek ovenfor for at forhåndsvise omdøbning ændringer, filter efter status, og anvend bulk omdøbe kørsel.",
         "chooseLibrary": "Vælg Bibliotek"
       },
-      "completed": {
-        "title": "Bulk omdøbning fuldført",
-        "stats": "{succeeded} omdøbt, {failed} mislykkedes, {skipped} skippet ({processed} i alt)"
-      },
-      "pagination": {
-        "showing": "Viser {from}-{to} af {total}"
-      },
       "confirmDialog": {
-        "title": "Bekræft Masse Omdøb",
-        "body": "{count, plural, =0 {Dette vil omdøbe # bog på disk. Filer med kollisioner eller fejl vil blive sprunget over. Denne handling kan ikke fortrydes.} one {Dette vil omdøbe # bog på disken. Filer med kollisioner eller fejl vil blive sprunget over. Denne handling kan ikke fortrydes.} other {Dette vil omdøbe # bøger på disken. Filer med kollisioner eller fejl vil blive sprunget over. Denne handling kan ikke fortrydes.}}",
-        "renameButton": "{count, plural, =0 {Omdøb # bog} one {Omdøb # bog} other {Omdøb # bøger}}"
+        "title": "{count, plural, one {Omdøb # fil på disken?} other {Omdøb # filer på disken?}}",
+        "body": "Dette flytter rigtige filer inde i {library}. BookOrbit registrerer hver flytning, men fortrydelse betyder at omdøbe dem igen."
       }
     },
     "bookDuplicates": {
-      "scanSettings": "Scan indstillinger",
       "title": "Dupliker Bøger",
-      "description": "Scan filer og metadata for potentielle duplikerede poster. Intet slettes under en scanning.",
       "scope": "Biblioteks anvendelsesområde",
       "allLibraries": "Alle tilgængelige biblioteker",
       "similarity": "Tilsvarende titel tærskel",
@@ -6396,7 +6403,6 @@
         "queued": "Skan i kø",
         "running": "Scanner bøger"
       },
-      "groupsFound": "{count, plural, =0 {Ingen dublerede grupper} one {En dubleret gruppe} other {# dublerede grupper}}",
       "filter": "Match type",
       "allReasons": "Alle matchtyper",
       "reasons": {
@@ -6405,17 +6411,7 @@
         "exact_metadata": "Præcis titel og forfattere",
         "fuzzy_metadata": "Lignende titel og forfatter"
       },
-      "similarityValue": "{percent}% titellighed",
       "notDuplicates": "Ikke dubletter",
-      "keepThis": "Behold denne bog",
-      "discardThis": "Kassér denne bog",
-      "selectKeeperFirst": "Vælg en bruger først",
-      "noDirectMatch": "Ingen direkte match med keeper",
-      "moreFiles": "+{count} mere",
-      "showDetails": "Vis detaljer",
-      "hideDetails": "Skjul detaljer",
-      "deleteSelected": "Slet {count} valgt",
-      "openBook": "Åbn detaljer for {title}",
       "unknownAuthor": "Ukendt forfatter",
       "unknown": "Ukendt",
       "none": "Ingen",
@@ -6426,14 +6422,8 @@
         "library": "Bibliotek",
         "isbn": "ISBN",
         "formats": "Formater",
-        "fileLocation": "Fil",
-        "files": "Filer",
-        "readingStatus": "Læser status",
-        "progress": "Fremskridt",
-        "path": "Biblioteks sti",
         "collections": "Samlinger",
-        "added": "Tilføjet",
-        "updated": "Opdateret"
+        "added": "Tilføjet"
       },
       "initial": {
         "title": "Find duplikerede bøger",
@@ -6444,8 +6434,6 @@
         "description": "Ingen bøger matchede det aktuelle omfang, lighed niveau, og match filter."
       },
       "deleteDialog": {
-        "title": "Slet duplikerede bøger permanent?",
-        "description": "{count, plural, =0 {Dette vil permanent slette # valgte bog og dens filer.} one {Dette vil permanent slette # valgte bog og dens filer.} other {Dette vil permanent slette # valgte bøger og deres filer.}}",
         "warning": "Metadata, samlinger, læsedata og enhedstilstand overføres ikke til den gemte bog. Tilknyttede data for andre brugere fjernes også.",
         "confirm": "{count, plural, =0 {Slet # bog} one {Slet # bog} other {Slet # bøger}}",
         "success": "{count, plural, =0 {Ingen bøger slettet} one {En duplikeret bog slettet} other {# duplikerede bøger slettet}}"
@@ -6568,7 +6556,6 @@
       "retry": "Forsøg igen"
     },
     "bookView": {
-      "sort": "Sortér",
       "sortOn": "Til",
       "resetSort": "Nulstil sortering til standard",
       "filters": "Filtre",

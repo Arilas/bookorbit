@@ -25,8 +25,9 @@ function makeService() {
     })),
     findForVerification: vi.fn(),
     findUsableById: vi.fn(),
-    touchLastUsed: vi.fn().mockResolvedValue(undefined),
-    rotateOwnedWithSessions: vi.fn(),
+    findUsableGenerationById: vi.fn(),
+    touchLastUsedGeneration: vi.fn().mockResolvedValue(true),
+    rotateOwnedWithinActiveLimit: vi.fn(),
     revokeOwnedWithSessions: vi.fn(),
     revokeByIdWithSessions: vi.fn(),
     revokeAllForUser: vi.fn(),
@@ -153,7 +154,7 @@ describe('AppPasswordService', () => {
     const secret = 'B'.repeat(43);
     const rawPassword = `boap_${selector}_${secret}`;
 
-    it('uses a constant-time digest check, records usage, and omits the digest from its result', async () => {
+    it('uses a constant-time digest check and returns only the internal verified binding', async () => {
       const { service, appPasswordRepo } = makeService();
       appPasswordRepo.findForVerification.mockResolvedValue({
         id: 3,
@@ -164,11 +165,11 @@ describe('AppPasswordService', () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
 
-      const result = await service.verify(7, rawPassword, '10.0.0.8');
+      const result = await service.verify(7, rawPassword);
 
       expect(appPasswordRepo.findForVerification).toHaveBeenCalledWith(7, selector);
-      expect(appPasswordRepo.touchLastUsed).toHaveBeenCalledWith(3, '10.0.0.8');
-      expect(result).toEqual(expect.objectContaining({ id: 3, label: 'KOReader' }));
+      expect(appPasswordRepo.touchLastUsedGeneration).not.toHaveBeenCalled();
+      expect(result).toEqual(expect.objectContaining({ id: 3, label: 'KOReader', selector }));
       expect(result).not.toHaveProperty('secretHash');
     });
 
@@ -180,7 +181,7 @@ describe('AppPasswordService', () => {
       });
 
       await expect(service.verify(7, rawPassword)).resolves.toBeNull();
-      expect(appPasswordRepo.touchLastUsed).not.toHaveBeenCalled();
+      expect(appPasswordRepo.touchLastUsedGeneration).not.toHaveBeenCalled();
     });
 
     it('performs the dummy digest path for an unknown selector', async () => {
@@ -189,7 +190,7 @@ describe('AppPasswordService', () => {
 
       await expect(service.verify(7, rawPassword)).resolves.toBeNull();
       expect(appPasswordRepo.findForVerification).toHaveBeenCalledWith(7, selector);
-      expect(appPasswordRepo.touchLastUsed).not.toHaveBeenCalled();
+      expect(appPasswordRepo.touchLastUsedGeneration).not.toHaveBeenCalled();
     });
 
     it('rejects malformed input before querying storage', async () => {
@@ -205,27 +206,35 @@ describe('AppPasswordService', () => {
       const { service, appPasswordRepo, auditEvents } = makeService();
       const createdAt = new Date('2026-01-01T00:00:00.000Z');
       const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-      appPasswordRepo.rotateOwnedWithSessions.mockImplementation((_userId: number, id: number, data: Record<string, unknown>) => ({
-        id,
-        userId: 7,
-        label: 'KOReader on Kobo',
-        secretHint: data.secretHint,
-        expiresAt: data.expiresAt,
-        lastUsedAt: null,
-        lastUsedIp: null,
-        createdAt,
+      appPasswordRepo.rotateOwnedWithinActiveLimit.mockImplementation((_userId: number, id: number, data: Record<string, unknown>) => ({
+        status: 'rotated',
+        credential: {
+          id,
+          userId: 7,
+          label: 'KOReader on Kobo',
+          secretHint: data.secretHint,
+          expiresAt: data.expiresAt,
+          lastUsedAt: null,
+          lastUsedIp: null,
+          createdAt,
+        },
       }));
 
       const result = await service.rotate(makeActor(), 11, { expiresAt }, '10.0.0.10');
 
       expect(result.password).toMatch(/^boap_[a-f0-9]{24}_[A-Za-z0-9_-]{43}$/);
       const [, selector, secret] = /^boap_([a-f0-9]{24})_([A-Za-z0-9_-]{43})$/.exec(result.password)!;
-      expect(appPasswordRepo.rotateOwnedWithSessions).toHaveBeenCalledWith(7, 11, {
-        selector,
-        secretHash: createHash('sha256').update(secret!).digest('hex'),
-        secretHint: secret!.slice(-4),
-        expiresAt: new Date(expiresAt),
-      });
+      expect(appPasswordRepo.rotateOwnedWithinActiveLimit).toHaveBeenCalledWith(
+        7,
+        11,
+        {
+          selector,
+          secretHash: createHash('sha256').update(secret!).digest('hex'),
+          secretHint: secret!.slice(-4),
+          expiresAt: new Date(expiresAt),
+        },
+        25,
+      );
       expect(result.appPassword).toEqual({
         id: 11,
         label: 'KOReader on Kobo',
@@ -250,21 +259,34 @@ describe('AppPasswordService', () => {
     it('allows an expired but non-revoked credential to be renewed', async () => {
       const { service, appPasswordRepo } = makeService();
       const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      appPasswordRepo.rotateOwnedWithSessions.mockResolvedValue({
-        id: 9,
-        userId: 7,
-        label: 'Expired reader',
-        secretHint: 'abcd',
-        expiresAt,
-        lastUsedAt: null,
-        lastUsedIp: null,
-        createdAt: new Date('2025-01-01T00:00:00.000Z'),
+      appPasswordRepo.rotateOwnedWithinActiveLimit.mockResolvedValue({
+        status: 'rotated',
+        credential: {
+          id: 9,
+          userId: 7,
+          label: 'Expired reader',
+          secretHint: 'abcd',
+          expiresAt,
+          lastUsedAt: null,
+          lastUsedIp: null,
+          createdAt: new Date('2025-01-01T00:00:00.000Z'),
+        },
       });
 
       await expect(service.rotate(makeActor(), 9, { expiresAt: expiresAt.toISOString() })).resolves.toEqual(
         expect.objectContaining({ appPassword: expect.objectContaining({ id: 9, status: 'active' }) }),
       );
-      expect(appPasswordRepo.rotateOwnedWithSessions).toHaveBeenCalledWith(7, 9, expect.any(Object));
+      expect(appPasswordRepo.rotateOwnedWithinActiveLimit).toHaveBeenCalledWith(7, 9, expect.any(Object), 25);
+    });
+
+    it('rejects renewal when all active credential slots are occupied', async () => {
+      const { service, appPasswordRepo, auditEvents } = makeService();
+      appPasswordRepo.rotateOwnedWithinActiveLimit.mockResolvedValue({ status: 'active_limit_reached' });
+
+      await expect(service.rotate(makeActor(), 9, { expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() })).rejects.toThrow(
+        'Maximum of 25 active application passwords per user',
+      );
+      expect(auditEvents.emit).not.toHaveBeenCalled();
     });
 
     it('rejects shared accounts before replacing the secret', async () => {
@@ -275,7 +297,7 @@ describe('AppPasswordService', () => {
           expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
         }),
       ).rejects.toThrow('Shared accounts cannot rotate application passwords');
-      expect(appPasswordRepo.rotateOwnedWithSessions).not.toHaveBeenCalled();
+      expect(appPasswordRepo.rotateOwnedWithinActiveLimit).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -287,12 +309,12 @@ describe('AppPasswordService', () => {
       const { service, appPasswordRepo } = makeService();
 
       await expect(service.rotate(makeActor(), 9, { expiresAt })).rejects.toThrow(BadRequestException);
-      expect(appPasswordRepo.rotateOwnedWithSessions).not.toHaveBeenCalled();
+      expect(appPasswordRepo.rotateOwnedWithinActiveLimit).not.toHaveBeenCalled();
     });
 
     it('does not reveal whether a missing credential belongs to another user', async () => {
       const { service, appPasswordRepo } = makeService();
-      appPasswordRepo.rotateOwnedWithSessions.mockResolvedValue(null);
+      appPasswordRepo.rotateOwnedWithinActiveLimit.mockResolvedValue({ status: 'not_found' });
 
       await expect(service.rotate(makeActor(), 999, { expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() })).rejects.toThrow(
         NotFoundException,
@@ -324,12 +346,14 @@ describe('AppPasswordService', () => {
     it('keeps read validation and usage tracking as separate operations', async () => {
       const { service, appPasswordRepo } = makeService();
       appPasswordRepo.findUsableById.mockResolvedValue({ id: 5 });
+      appPasswordRepo.findUsableGenerationById.mockResolvedValue({ id: 5, selector: 'verified-selector' });
 
       await expect(service.findUsableById(7, 5)).resolves.toEqual({ id: 5 });
-      expect(appPasswordRepo.touchLastUsed).not.toHaveBeenCalled();
+      await expect(service.findUsableGenerationById(7, 5)).resolves.toEqual({ id: 5, selector: 'verified-selector' });
+      expect(appPasswordRepo.touchLastUsedGeneration).not.toHaveBeenCalled();
 
-      await service.markUsed(5, '127.0.0.1');
-      expect(appPasswordRepo.touchLastUsed).toHaveBeenCalledWith(5, '127.0.0.1');
+      await service.markUsed(7, 5, 'verified-selector', '127.0.0.1');
+      expect(appPasswordRepo.touchLastUsedGeneration).toHaveBeenCalledWith(7, 5, 'verified-selector', '127.0.0.1');
     });
 
     it('delegates replay and account-wide revocation', async () => {

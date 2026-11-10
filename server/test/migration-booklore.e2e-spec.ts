@@ -527,7 +527,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
       language: 'en',
       pageCount: 321,
       seriesName: 'Series Prime',
-      seriesIndex: 2.5,
+      seriesIndex: '2.5',
       rating: 5,
       googleBooksId: 'google-101',
       goodreadsId: 'gr-101',
@@ -758,12 +758,12 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
 
     const isbnCoverDir = coverDirectoryForBook(ctx, scenario.books.isbn.bookId);
     const audioCoverDir = coverDirectoryForBook(ctx, scenario.books.audio.bookId);
-    await access(join(isbnCoverDir, 'cover_custom.jpg'));
-    await access(join(isbnCoverDir, 'thumbnail.jpg'));
-    await access(join(audioCoverDir, 'cover_custom.png'));
-    await access(join(audioCoverDir, 'thumbnail.jpg'));
+    await access(join(isbnCoverDir, 'ebook', 'cover_custom.jpg'));
+    await access(join(isbnCoverDir, 'ebook', 'thumbnail.jpg'));
+    await access(join(audioCoverDir, 'audio', 'cover_custom.png'));
+    await access(join(audioCoverDir, 'audio', 'thumbnail.jpg'));
 
-    const audioCoverBytes = await readFile(join(audioCoverDir, 'cover_custom.png'));
+    const audioCoverBytes = await readFile(join(audioCoverDir, 'audio', 'cover_custom.png'));
     expect(audioCoverBytes[0]).toBe(0x89);
     expect(audioCoverBytes[1]).toBe(0x50);
 
@@ -971,7 +971,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
       language: 'en',
       pageCount: 222,
       seriesName: 'Variant Series',
-      seriesIndex: 1.25,
+      seriesIndex: '1.25',
       rating: 4,
       googleBooksId: 'variant-google-id',
       durationSeconds: 987,

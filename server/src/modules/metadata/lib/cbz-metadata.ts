@@ -1,6 +1,7 @@
 import { readFile } from 'fs/promises';
 import { XMLParser } from 'fast-xml-parser';
 import { createExtractorFromData, UnrarError } from 'node-unrar-js';
+import { parseSeriesIndex } from '@bookorbit/types';
 import { extractCbzZipEntry, isSupportedCbzZipCompression, readCbzZipIndex } from '../../../common/cbz-zip-reader';
 import { getSevenZip } from '../../../common/sevenzip';
 import { parsePublishedDateKey, parsePublishedYear } from '../../../common/utils/published-date.utils';
@@ -25,7 +26,7 @@ export interface ParsedCbzMetadata {
   title: string | null;
   subtitle: string | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   /** Total books the tagger recorded for the series, from ComicInfo Count or ComicBookInfo numberOfIssues. */
   seriesTotalBooks: number | null;
   description: string | null;
@@ -57,7 +58,7 @@ export interface ParsedCbzMetadata {
 
 // ── Parsers ───────────────────────────────────────────────────────────────────
 
-const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false });
 
 function splitDelimited(value: string | null | undefined): string[] {
   if (!value) return [];
@@ -201,7 +202,7 @@ function parseComicInfoXml(xmlBuf: Buffer): ParsedCbzMetadata | null {
       title: str('Title'),
       subtitle: managedNotes.get('subtitle') ?? null,
       seriesName: str('Series'),
-      seriesIndex: num('Number'),
+      seriesIndex: parseSeriesIndex(str('Number')),
       seriesTotalBooks: normalizeSeriesTotalBooks(num('Count')) ?? null,
       description: str('Summary') ?? str('Description'),
       publisher: str('Publisher'),
@@ -258,6 +259,7 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       .filter((c) => c.role === 'Writer')
       .map((c) => ({ name: c.person, sortName: null }));
 
+    const genres = [...new Set(splitDelimited(typeof cbi['genre'] === 'string' ? cbi['genre'] : null))];
     const tags = ((cbi['tags'] as string[]) ?? []).filter(Boolean);
 
     const publicationYear = parsePublishedYear(cbi['publicationYear']) ?? null;
@@ -273,7 +275,7 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       title: (cbi['title'] as string) ?? null,
       subtitle: null,
       seriesName: (cbi['series'] as string) ?? null,
-      seriesIndex: cbi['issue'] != null ? (Number.isFinite(Number(cbi['issue'])) ? Number(cbi['issue']) : null) : null,
+      seriesIndex: parseSeriesIndex(cbi['issue']),
       seriesTotalBooks: normalizeSeriesTotalBooks(cbi['numberOfIssues']) ?? null,
       description: (cbi['comments'] as string) ?? null,
       publisher: (cbi['publisher'] as string) ?? null,
@@ -285,7 +287,7 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       isbn10: null,
       isbn13: null,
       authors: writers,
-      genres: [],
+      genres,
       tags,
       googleBooksId: null,
       goodreadsId: null,

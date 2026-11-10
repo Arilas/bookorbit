@@ -5,12 +5,14 @@ import { useRouter } from 'vue-router'
 import { X } from '@lucide/vue'
 import { useSmartScopes } from '@/features/smart-scope/composables/useSmartScopes'
 import IconPicker from '@/components/IconPicker.vue'
-import type { GroupRule, SortSpec } from '@bookorbit/types'
+import type { CoverAspectRatio, GroupRule, SortSpec } from '@bookorbit/types'
 
 const props = defineProps<{
   open: boolean
   filter: GroupRule | undefined
   sort: SortSpec[]
+  /** The grid shape of the view the scope is saved from, so a scope cut from a square library stays square. */
+  coverAspectRatio?: CoverAspectRatio
 }>()
 
 const emit = defineEmits<{ close: [] }>()
@@ -43,6 +45,7 @@ async function submit() {
       icon: trimmedIcon.value,
       filter: props.filter,
       defaultSort: props.sort,
+      coverAspectRatio: props.coverAspectRatio,
     })
     name.value = ''
     icon.value = ''
@@ -59,7 +62,7 @@ async function submit() {
 <template>
   <Teleport to="body">
     <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center">
-      <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="emit('close')" />
+      <div class="absolute inset-0 bg-scrim" @click="emit('close')" />
       <div class="relative z-10 w-full max-w-md mx-4 bg-card border border-border rounded-lg shadow-2xl p-6">
         <div class="flex items-center justify-between mb-5">
           <h2 class="text-base font-semibold text-foreground">{{ t('smartScope.saveAsDialog.title') }}</h2>

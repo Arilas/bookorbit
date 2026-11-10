@@ -3,12 +3,13 @@ export const DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE =
 export const DEFAULT_UPLOAD_PATTERN_BOOK_PER_FOLDER =
   "<{authors:first}|Unknown Author>/<{series}/><{seriesIndex}. ><{title}|{originalFilename}>< ({year})>/<{seriesIndex}. ><{title}|{originalFilename}>< ({year})>";
 export const DEFAULT_DOWNLOAD_PATTERN = "{originalFilename}";
-export const DEFAULT_KOREADER_DEVICE_PATTERN = "<Series/{series}/|Standalone/{authors:first} - ><{seriesIndex:fixed2} - >{title}";
+export const DEFAULT_KOREADER_DEVICE_PATTERN = "<Series/{series}/|Standalone/{authors:first} - |Standalone/><{seriesIndex:fixed2} - >{title}";
 
 export const EXAMPLE_PATTERN_METADATA: Record<string, string> = {
   title: "Neuromancer",
   subtitle: "20th Anniversary Edition",
   authors: "William Gibson",
+  narrators: "Robertson Dean",
   year: "1984",
   series: "Sprawl",
   seriesIndex: "01",
@@ -18,12 +19,14 @@ export const EXAMPLE_PATTERN_METADATA: Record<string, string> = {
   library: "Books",
   originalFilename: "neuromancer",
   extension: "epub",
+  readaloud: "readaloud",
 };
 
 export const PATTERN_TOKENS = [
   { token: "title", description: "Book title" },
   { token: "subtitle", description: "Book subtitle" },
   { token: "authors", description: "Author(s), comma-separated" },
+  { token: "narrators", description: "Narrator(s), comma-separated" },
   { token: "year", description: "Publication year" },
   { token: "series", description: "Series name" },
   { token: "seriesIndex", description: "Series index (zero-padded)" },
@@ -33,6 +36,7 @@ export const PATTERN_TOKENS = [
   { token: "library", description: "Library name" },
   { token: "originalFilename", description: "Original filename (without extension)" },
   { token: "extension", description: "File extension (without dot)" },
+  { token: "readaloud", description: "The word readaloud for an EPUB with media overlays" },
 ] as const;
 
 export type PatternToken = (typeof PATTERN_TOKENS)[number]["token"];
@@ -90,13 +94,21 @@ export function applyModifier(value: string, modifier: string, fieldName: string
       }
       return target.charAt(0).toUpperCase();
     }
+    case "max3": {
+      const parts = value
+        .split(", ")
+        .map((part) => part.trim())
+        .filter(Boolean);
+      return parts.length > 3 ? "" : parts.join(", ");
+    }
     case "upper":
       return value.toUpperCase();
     case "lower":
       return value.toLowerCase();
     case "fixed2": {
-      const numeric = Number(value);
-      return Number.isFinite(numeric) ? numeric.toFixed(2) : value;
+      if (!/^\d+(?:\.\d+)?$/.test(value)) return value;
+      const [whole, fraction] = value.split(".");
+      return `${whole}.${(fraction ?? "").padEnd(2, "0")}`;
     }
     default:
       return value;
@@ -112,23 +124,46 @@ function resolveModifierPlaceholders(block: string, values: Record<string, strin
 
 function checkAllPlaceholdersPresent(block: string, values: Record<string, string>): boolean {
   const matches = [...block.matchAll(MODIFIER_PLACEHOLDER_REGEX)];
-  return matches.every((m) => values[m[1]]?.trim());
+  return matches.every(([, fieldName, modifier]) => {
+    const raw = values[fieldName] ?? "";
+    if (!raw.trim()) return false;
+    return (modifier ? applyModifier(raw, modifier, fieldName) : raw).trim().length > 0;
+  });
+}
+
+export interface PlaceholderResolution {
+  text: string;
+  /** An optional group could not fill its primary side and used its `|fallback`. */
+  usedFallback: boolean;
+  /** An optional group with no fallback could not be filled and resolved to nothing. */
+  droppedOptional: boolean;
+}
+
+/** replacePlaceholders, also reporting which optional-group branch each group took. */
+export function resolvePlaceholders(pattern: string, values: Record<string, string>): PlaceholderResolution {
+  let usedFallback = false;
+  let droppedOptional = false;
+  // Optional blocks: <primary|fallback|...|default>. The first branch whose placeholders all
+  // fill wins; the last branch of a block with a fallback is used as-is, as a lone fallback is.
+  const resolved = pattern.replace(/<([^<>]+)>/g, (_, blockContent: string) => {
+    const branches = blockContent.split("|");
+    const conditional = branches.length > 1 ? branches.slice(0, -1) : branches;
+    const filled = conditional.findIndex((branch) => checkAllPlaceholdersPresent(branch, values));
+
+    if (filled === 0) return resolveModifierPlaceholders(branches[0], values);
+    if (branches.length > 1) {
+      usedFallback = true;
+      return resolveModifierPlaceholders(filled > 0 ? branches[filled] : branches[branches.length - 1], values);
+    }
+    droppedOptional = true;
+    return "";
+  });
+
+  return { text: resolveModifierPlaceholders(resolved, values).trim(), usedFallback, droppedOptional };
 }
 
 export function replacePlaceholders(pattern: string, values: Record<string, string>): string {
-  // Handle optional blocks with else clause: <primary|fallback>
-  pattern = pattern.replace(/<([^<>]+)>/g, (_, blockContent: string) => {
-    const pipeIndex = blockContent.indexOf("|");
-    const primary = pipeIndex >= 0 ? blockContent.substring(0, pipeIndex) : blockContent;
-    const fallback = pipeIndex >= 0 ? blockContent.substring(pipeIndex + 1) : null;
-
-    if (checkAllPlaceholdersPresent(primary, values)) {
-      return resolveModifierPlaceholders(primary, values);
-    }
-    return fallback != null ? resolveModifierPlaceholders(fallback, values) : "";
-  });
-
-  return resolveModifierPlaceholders(pattern, values).trim();
+  return resolvePlaceholders(pattern, values).text;
 }
 
 export function validatePattern(pattern: string): boolean {
@@ -161,6 +196,22 @@ function stripTrailingDotsAndSpaces(value: string): string {
   let end = value.length;
   while (end > 0 && (value[end - 1] === "." || value[end - 1] === " ")) end -= 1;
   return end === value.length ? value : value.slice(0, end);
+}
+
+/**
+ * Token values are sanitized before modifiers and literal pattern text run, so an assembled
+ * segment can still end in a dot or space: `{authors:sort}` rewrites "J.K. Rowling" to
+ * "Rowling, J.K.". Windows and SMB reject those names and serve a mangled 8.3 alias instead.
+ * Only the trailing run is trimmed here; re-running sanitizePathSegment would append a second
+ * reserved-name guard ("NUL.txt_" -> "NUL.txt__").
+ */
+function normalizeResolvedSegments(path: string, options: Required<PathResolverOptions>): string {
+  if (!options.sanitizeForCrossPlatform || !path) return path;
+
+  return path
+    .split("/")
+    .map((segment) => (segment ? stripTrailingDotsAndSpaces(segment) || options.replacementCharacter : segment))
+    .join("/");
 }
 
 function sanitizeResolutionValues(values: Record<string, string>, options: Required<PathResolverOptions>): Record<string, string> {
@@ -263,7 +314,7 @@ function limitPathSegmentBytes(path: string, dotExt: string): string {
 export function resolveUploadPath(pattern: string, values: Record<string, string>, ext: string, options?: PathResolverOptions): string | null {
   const normalizedOptions = normalizeResolverOptions(options);
   const resolvedValues = sanitizeResolutionValues(values, normalizedOptions);
-  const resolved = replacePlaceholders(pattern, resolvedValues);
+  const resolved = normalizeResolvedSegments(replacePlaceholders(pattern, resolvedValues), normalizedOptions);
   if (!resolved) return null;
 
   const dotExt = normalizeDotExt(ext);
@@ -277,6 +328,17 @@ export function resolveUploadPath(pattern: string, values: Record<string, string
 }
 
 /**
+ * Appends text to the file stem of a resolved path, before its extension, keeping the last
+ * segment within the byte limit. A segment that has to be shortened ends in a hash of the full
+ * name, so two suffixed names stay distinct even when the suffix itself is cut.
+ */
+export function appendToPathStem(path: string, suffix: string, ext: string): string {
+  const dotExt = normalizeDotExt(ext);
+  const extension = dotExt && path.toLowerCase().endsWith(dotExt.toLowerCase()) ? path.slice(-dotExt.length) : "";
+  return limitPathSegmentBytes(`${path.slice(0, path.length - extension.length)}${suffix}${extension}`, dotExt);
+}
+
+/**
  * Resolves a file naming pattern to a filename (no path separators).
  * - If the resolved pattern contains folder segments, only the last segment is used.
  * - If the resolved pattern ends with '/', originalFilename is used.
@@ -287,7 +349,7 @@ export function resolveUploadPath(pattern: string, values: Record<string, string
 export function resolveDownloadFilename(pattern: string, values: Record<string, string>, ext: string, options?: PathResolverOptions): string | null {
   const normalizedOptions = normalizeResolverOptions(options);
   const resolvedValues = sanitizeResolutionValues(values, normalizedOptions);
-  const resolved = replacePlaceholders(pattern, resolvedValues);
+  const resolved = normalizeResolvedSegments(replacePlaceholders(pattern, resolvedValues), normalizedOptions);
   if (!resolved) return null;
 
   const dotExt = normalizeDotExt(ext);

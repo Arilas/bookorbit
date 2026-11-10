@@ -6,32 +6,32 @@ describe('auditActorAuthFromUser', () => {
     expect(
       auditActorAuthFromUser(
         makeUser({
-          authMethod: 'app_password',
+          authenticationMethod: 'app_password',
           appPasswordId: 42,
-          appPasswordLabel: 'iPhone app',
+          appPasswordName: 'iPhone app',
         }),
       ),
     ).toEqual({
-      authMethod: 'app_password',
+      authenticationMethod: 'app_password',
       appPasswordId: 42,
-      appPasswordLabel: 'iPhone app',
+      appName: 'iPhone app',
     });
   });
 
-  it('retains the credential id when a legacy request user has no label', () => {
-    expect(auditActorAuthFromUser(makeUser({ authMethod: 'app_password', appPasswordId: 42 }))).toEqual({
-      authMethod: 'app_password',
+  it('retains the credential id when the trusted request context has no name', () => {
+    expect(auditActorAuthFromUser(makeUser({ authenticationMethod: 'app_password', appPasswordId: 42 }))).toEqual({
+      authenticationMethod: 'app_password',
       appPasswordId: 42,
-      appPasswordLabel: null,
+      appName: null,
     });
   });
 
   it.each([
     undefined,
-    makeUser({ authMethod: 'primary', appPasswordId: 42, appPasswordLabel: 'spoofed' }),
-    makeUser({ authMethod: 'app_password', appPasswordId: undefined }),
-    makeUser({ authMethod: 'app_password', appPasswordId: 0 }),
-    makeUser({ authMethod: 'app_password', appPasswordId: 1.5 }),
+    makeUser({ authenticationMethod: 'password', appPasswordId: 42, appPasswordName: 'spoofed' }),
+    makeUser({ authenticationMethod: 'app_password', appPasswordId: undefined }),
+    makeUser({ authenticationMethod: 'app_password', appPasswordId: 0 }),
+    makeUser({ authenticationMethod: 'app_password', appPasswordId: 1.5 }),
   ])('does not attribute primary, missing, or invalid credential context', (user) => {
     expect(auditActorAuthFromUser(user)).toBeUndefined();
   });

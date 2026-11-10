@@ -31,15 +31,19 @@ Transfer.TEMP_DIR_NAME = TEMP_DIR_NAME
 Transfer.POLL_INTERVAL = POLL_INTERVAL
 
 local function normalize(path)
-    return tostring(path or ""):gsub("\\", "/"):gsub("/+", "/"):gsub("/$", "")
+    local normalized = tostring(path or ""):gsub("\\", "/"):gsub("/+", "/")
+    if normalized == "/" then return normalized end
+    return normalized:gsub("/$", "")
 end
 
 function Transfer.tempDir(root)
-    return normalize(root) .. "/" .. TEMP_DIR_NAME
+    local normalized_root = normalize(root)
+    return (normalized_root ~= "/" and normalized_root or "") .. "/" .. TEMP_DIR_NAME
 end
 
 function Transfer.ensureTempDir(root)
     local dir = Transfer.tempDir(root)
+    if not Transfer.isInsideRoot(root, dir) then return nil end
     if lfs.attributes(dir, "mode") == "directory" then return dir end
     util.makePath(dir)
     if lfs.attributes(dir, "mode") ~= "directory" then return nil end
@@ -52,9 +56,21 @@ function Transfer.isInsideRoot(root, path)
     local normalized_root = normalize(root)
     local normalized_path = normalize(path)
     if normalized_root == "" or normalized_path == "" then return false end
-    if normalized_path:sub(1, #normalized_root + 1) ~= normalized_root .. "/" then return false end
+    if normalized_root == "/" then
+        if normalized_path == "/" or normalized_path:sub(1, 1) ~= "/" then return false end
+    elseif normalized_path:sub(1, #normalized_root + 1) ~= normalized_root .. "/" then
+        return false
+    end
     for segment in normalized_path:gmatch("[^/]+") do
         if segment == ".." then return false end
+    end
+    -- The configured root may itself be a link, but descendants must not
+    -- redirect staging or publication outside that authorized directory.
+    local current = normalized_root == "/" and "" or normalized_root
+    local relative = normalized_path:sub(#current + 2)
+    for segment in relative:gmatch("[^/]+") do
+        current = current .. "/" .. segment
+        if lfs.symlinkattributes(current, "mode") == "link" then return false end
     end
     return true
 end
@@ -64,6 +80,7 @@ end
 function Transfer.sweepStale(root, opts)
     opts = opts or {}
     local dir = Transfer.tempDir(root)
+    if not Transfer.isInsideRoot(root, dir) then return 0 end
     if lfs.attributes(dir, "mode") ~= "directory" then return 0 end
     local now = opts.now or os.time()
     local max_age = opts.max_age or STALE_TEMP_AGE
@@ -113,6 +130,9 @@ function Transfer.run(opts)
     local base = string.format("bo_%d_%d", opts.generation or 0, os.time())
     local temp_path = dir .. "/" .. base .. ".part"
     local progress_path = dir .. "/" .. base .. ".progress"
+    if not Transfer.isInsideRoot(root, temp_path) or not Transfer.isInsideRoot(root, progress_path) then
+        return nil, "unsafe_destination"
+    end
 
     local state = {
         progress_path = progress_path,
@@ -161,10 +181,17 @@ function Transfer.run(opts)
         return nil, "unsafe_destination"
     end
 
-    local renamed, rename_err = os.rename(completed_path, opts.destination)
+    local expected_hash = opts.expected_hash or (type(result) == "table" and result.server_hash)
+    if expected_hash then
+        local digest = type(result) == "table" and result.hash
+        if not digest then local ok, hash = pcall(util.partialMD5, completed_path); digest = ok and hash or nil end
+        if digest ~= expected_hash then util.removeFile(completed_path); return nil, "hash_mismatch" end
+    end
+
+    local renamed = os.rename(completed_path, opts.destination)
     if not renamed then
         util.removeFile(completed_path)
-        return nil, tostring(rename_err or "publish_failed")
+        return nil, "publish_failed"
     end
     return true, nil, type(result) == "table" and result or {}
 end

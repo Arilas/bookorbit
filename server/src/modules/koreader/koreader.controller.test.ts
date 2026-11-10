@@ -76,7 +76,7 @@ describe('KoreaderController', () => {
 
     const progressDto = { document: 'abc', percentage: 0.5 } as never;
     await controller.saveProgress(user, progressDto);
-    expect(koreaderService.saveProgress).toHaveBeenCalledWith(7, progressDto);
+    expect(koreaderService.saveProgress).toHaveBeenCalledWith(user, progressDto);
 
     await expect(controller.getProgress(user, 'abc')).resolves.toEqual({ document: 'abc', percentage: 0.5 });
     expect(koreaderService.getProgress).toHaveBeenCalledWith(7, 'abc');
@@ -94,7 +94,7 @@ describe('KoreaderController', () => {
     const user = { id: 7 } as never;
 
     await expect(controller.createCredentials(user, { username: 'reader', password: 'secret1' } as never)).resolves.toEqual({ success: true });
-    expect(koreaderService.createCredentials).toHaveBeenCalledWith(7, 'reader', 'secret1');
+    expect(koreaderService.createCredentials).toHaveBeenCalledWith(7, 'reader', 'secret1', undefined);
 
     await expect(controller.updateCredentials(user, { syncEnabled: false } as never)).resolves.toEqual({ success: true });
     expect(koreaderService.updateCredentials).toHaveBeenCalledWith(7, { syncEnabled: false });

@@ -6,6 +6,7 @@ import { BookService } from '../../book/book.service';
 import { ReadingSessionService } from '../../reading-session/reading-session.service';
 import type { KoboDeviceContext } from '../guards/kobo-token.guard';
 import type { KoboAnalyticsBody, KoboAnalyticsEvent } from '../kobo-analytics.types';
+import { koboSourceDeviceKey, koboStatisticsSessionIdPrefix } from '../kobo-statistics-session.util';
 import { KoboBookIdentityService } from './kobo-book-identity.service';
 import { KoboAnalyticsResolverService } from './kobo-analytics-resolver.service';
 
@@ -117,7 +118,7 @@ export class KoboAnalyticsService {
       return;
     }
 
-    const bookId = await this.bookIdentityService.resolveBookIdByEntitlementId(user.id, volumeid);
+    const bookId = await this.bookIdentityService.resolveBookIdByEntitlementId(user.id, volumeid, { followMerges: true });
     if (bookId === null) {
       this.logger.debug(
         `[kobo.analytics.rating] [ignore] invalid volumeid userId=${user.id} eventId=${ev.Id} volumeid="${sanitizeLogValue(volumeid)}" event="${formatAnalyticsPayload(ev, 800)}"`,
@@ -139,7 +140,7 @@ export class KoboAnalyticsService {
       return;
     }
 
-    const bookId = await this.bookIdentityService.resolveBookIdByEntitlementId(user.id, volumeid);
+    const bookId = await this.bookIdentityService.resolveBookIdByEntitlementId(user.id, volumeid, { followMerges: true });
     if (bookId === null) {
       this.logger.debug(
         `[kobo.analytics.session] [ignore] invalid volumeid userId=${user.id} eventId=${ev.Id} volumeid="${sanitizeLogValue(volumeid)}" event="${formatAnalyticsPayload(ev, 800)}"`,
@@ -178,6 +179,10 @@ export class KoboAnalyticsService {
       },
       user,
       'kobo',
+      {
+        sourceDeviceKey: koboSourceDeviceKey(deviceId),
+        estimateSessionIdPrefix: koboStatisticsSessionIdPrefix(deviceId),
+      },
     );
   }
 

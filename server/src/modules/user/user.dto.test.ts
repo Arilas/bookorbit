@@ -1,12 +1,14 @@
 import 'reflect-metadata';
 
 import { plainToInstance } from 'class-transformer';
+import { ValidationPipe } from '@nestjs/common';
 import { validate } from 'class-validator';
 import { Permission } from '@bookorbit/types';
 
 import { CreateUserDto } from './dto/create-user.dto';
 import { SetLibrariesDto } from './dto/set-libraries.dto';
 import { SetPermissionsDto } from './dto/set-permissions.dto';
+import { SetSuperuserDto } from './dto/set-superuser.dto';
 import { UpdateMeDto } from './dto/update-me.dto';
 import { UpdateMeSettingsDto } from './dto/update-me-settings.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -16,6 +18,17 @@ async function hasErrors(dto: object): Promise<boolean> {
 }
 
 describe('User DTO validation', () => {
+  it('accepts optional shelf sync settings through the global validation contract', async () => {
+    const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true });
+    for (const settings of [
+      { dashboardConfig: { readingGoal: 12 } },
+      { dashboardShelfConfig: { syncAcrossSessions: true, shelfLayout: 'two-columns', scrollers: [] } },
+      { dashboardShelfConfig: { syncAcrossSessions: false } },
+    ]) {
+      const result = await pipe.transform({ settings }, { type: 'body', metatype: UpdateMeSettingsDto });
+      expect(result.settings).toEqual(settings);
+    }
+  });
   it('CreateUserDto requires email, enforces username minimum length, and validates permission enums', async () => {
     const bad = plainToInstance(CreateUserDto, { username: 'ab', name: 'n', permissionNames: [1, 2] });
     expect(await hasErrors(bad)).toBe(true);
@@ -33,6 +46,12 @@ describe('User DTO validation', () => {
     expect(await hasErrors(plainToInstance(SetPermissionsDto, { permissionNames: [1, 2] }))).toBe(true);
     expect(await hasErrors(plainToInstance(SetPermissionsDto, { permissionNames: [Permission.LibraryDownload] }))).toBe(false);
     expect(await hasErrors(plainToInstance(SetPermissionsDto, { permissionNames: [] }))).toBe(false);
+  });
+
+  it('SetSuperuserDto requires a boolean', async () => {
+    expect(await hasErrors(plainToInstance(SetSuperuserDto, { isSuperuser: true }))).toBe(false);
+    expect(await hasErrors(plainToInstance(SetSuperuserDto, { isSuperuser: 'true' }))).toBe(true);
+    expect(await hasErrors(plainToInstance(SetSuperuserDto, {}))).toBe(true);
   });
 
   it('SetLibrariesDto requires positive integer IDs', async () => {

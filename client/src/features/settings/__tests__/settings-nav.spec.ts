@@ -50,11 +50,20 @@ describe('settings navigation model', () => {
 
 describe('visibleSettingsNav', () => {
   it('drops groups with no reachable destination', () => {
-    expect(visibleSettingsNav(NOBODY).map((group) => group.id)).toEqual(['you'])
+    expect(visibleSettingsNav(NOBODY).map((group) => group.id)).toEqual(['you', 'library'])
+    const library = visibleSettingsNav(NOBODY).find((group) => group.id === 'library')
+    expect(library?.items.flatMap((item) => item.children?.map((child) => child.id) ?? [item.id])).toEqual(['metadata-reminders'])
   })
 
   it('keeps every group for a superuser', () => {
-    expect(visibleSettingsNav(SUPERUSER).map((group) => group.id)).toEqual(['you', 'library', 'devices', 'server'])
+    expect(visibleSettingsNav(SUPERUSER).map((group) => group.id)).toEqual(['you', 'library', 'devices', 'accounts', 'server'])
+  })
+
+  it('hides only request administration when Requests are hidden', () => {
+    const normal = visibleSettingsNav(SUPERUSER).flatMap((group) => group.items.map((item) => item.id))
+    const hidden = visibleSettingsNav({ ...SUPERUSER, showBookRequests: false }).flatMap((group) => group.items.map((item) => item.id))
+    expect(normal).toContain('requests')
+    expect(hidden).toEqual(normal.filter((id) => id !== 'requests'))
   })
 
   it('hides notifications without notification access', () => {
@@ -83,10 +92,12 @@ describe('visibleSettingsNav', () => {
   })
 
   it('keeps app-password management available only to primary non-demo sessions', () => {
-    const primaryIds = visibleSettingsNav({ ...NOBODY, authMethod: 'primary' })[0]?.items.map((item) => item.id)
-    const appPasswordIds = visibleSettingsNav({ ...NOBODY, authMethod: 'app_password' })[0]?.items.map((item) => item.id)
-    const demoIds = visibleSettingsNav({ ...NOBODY, authMethod: 'primary', isDemoRestricted: true })[0]?.items.map((item) => item.id)
-    const sharedIds = visibleSettingsNav({ ...NOBODY, authMethod: 'primary', provisioningMethod: 'shared' })[0]?.items.map((item) => item.id)
+    const primaryIds = visibleSettingsNav({ ...NOBODY, authenticationMethod: 'password' })[0]?.items.map((item) => item.id)
+    const appPasswordIds = visibleSettingsNav({ ...NOBODY, authenticationMethod: 'app_password' })[0]?.items.map((item) => item.id)
+    const demoIds = visibleSettingsNav({ ...NOBODY, authenticationMethod: 'password', isDemoRestricted: true })[0]?.items.map((item) => item.id)
+    const sharedIds = visibleSettingsNav({ ...NOBODY, authenticationMethod: 'password', provisioningMethod: 'shared' })[0]?.items.map(
+      (item) => item.id,
+    )
 
     expect(primaryIds).toContain('app-passwords')
     expect(appPasswordIds).not.toContain('app-passwords')
@@ -97,9 +108,22 @@ describe('visibleSettingsNav', () => {
   it('only exposes the metadata pages the permission allows', () => {
     const library = visibleSettingsNav({ ...NOBODY, permissions: ['manage_libraries'] }).find((group) => group.id === 'library')
     const ids = library?.items.map((item) => item.id) ?? []
+    const metadataChildren = library?.items.find((item) => item.id === 'metadata')?.children?.map((child) => child.id) ?? []
+
     expect(ids).toContain('libraries')
-    expect(ids).toContain('metadata-custom-fields')
-    expect(ids).not.toContain('metadata-providers')
+    expect(metadataChildren).toContain('metadata-custom-fields')
+    expect(metadataChildren).not.toContain('metadata-providers')
+  })
+
+  it('drops a grouping row once every child behind it is hidden', () => {
+    const server = visibleSettingsNav({ ...NOBODY, permissions: [Permission.ManageBookDock] }).find((group) => group.id === 'server')
+    expect(server?.items.map((item) => item.id)).not.toContain('users-access')
+  })
+
+  it('keeps a grouping row when a single child survives', () => {
+    const server = visibleSettingsNav({ ...NOBODY, permissions: ['manage_users'] }).find((group) => group.id === 'server')
+    const access = server?.items.find((item) => item.id === 'users-access')
+    expect(access?.children?.map((child) => child.id)).toEqual(['users'])
   })
 })
 

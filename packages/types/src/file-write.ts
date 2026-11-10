@@ -187,11 +187,20 @@ export function getBookFileWriteFormatFields(format: string | null | undefined):
   return BOOK_FILE_WRITE_FORMAT_FIELDS[key as keyof typeof BOOK_FILE_WRITE_FORMAT_FIELDS] ?? [];
 }
 
+export type WriteResultFileCounts = {
+  processed: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+};
+
 export type WriteResult = {
   status: "success" | "skipped" | "failed";
   fieldsWritten: string[];
   durationMs: number;
   reason?: string;
+  /** Per-file outcome counts, present when a book wrote to more than one file. `status` stays the aggregate. */
+  fileCounts?: WriteResultFileCounts;
 };
 
 export type LibraryFileSyncProgressEvent =
@@ -241,8 +250,34 @@ export interface BulkRenamePreviewPage {
   items: BulkRenamePreviewItem[];
   total: number;
   totalByStatus: Record<BulkRenameStatus, number>;
+  /**
+   * The naming pattern the preview was resolved against, so the client can attribute each
+   * changed path segment to the pattern segment that produced it.
+   */
+  pattern: string;
 }
 
+/**
+ * How a run is narrowed. The candidate list can run to tens of thousands and the client only
+ * holds the pages it has loaded, so neither side of the selection is ever sent in full: the
+ * request states whichever side is small.
+ *
+ * `excludeBookIds` means "rename every candidate except these" and backs the default review
+ * flow, where the reviewer skips a handful. `includeBookIds` means "rename only these" and backs
+ * the flow that starts from an empty selection. Sending both is rejected; sending neither
+ * renames every candidate.
+ */
+export interface BulkRenameExecuteRequest {
+  excludeBookIds?: number[];
+  includeBookIds?: number[];
+}
+
+/**
+ * `started` is emitted before any slow work so the response headers flush immediately and the
+ * client can show real progress instead of an idle request. Its `total` is the server-narrowed
+ * count, which is authoritative: the client only ever knows the pages it has loaded.
+ */
 export type BulkRenameProgressEvent =
+  | { started: true; total: number }
   | { bookId: number; status: "success" | "failed" | "skipped"; reason?: string }
   | { done: true; processed: number; succeeded: number; failed: number; skipped: number };

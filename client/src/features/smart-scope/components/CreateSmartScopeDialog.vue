@@ -58,7 +58,7 @@ async function submit() {
 <template>
   <Teleport to="body">
     <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center">
-      <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="emit('close')" />
+      <div class="absolute inset-0 bg-scrim" @click="emit('close')" />
       <div class="relative z-10 w-full max-w-md mx-4 bg-card border border-border rounded-lg shadow-2xl p-6">
         <div class="flex items-center justify-between mb-5">
           <h2 class="text-base font-semibold text-foreground">{{ t('smartScope.createDialog.title') }}</h2>
@@ -85,12 +85,12 @@ async function submit() {
           </div>
 
           <label class="flex items-center gap-2.5 cursor-pointer select-none">
-            <input type="checkbox" v-model="isPublic" class="h-4 w-4 rounded border border-input accent-primary" />
+            <input type="checkbox" v-model="isPublic" class="h-4 w-4 rounded-xs border border-input accent-primary" />
             <span class="text-sm text-foreground">{{ t('smartScope.visibleToAll') }}</span>
           </label>
 
           <label class="flex items-center gap-2.5 cursor-pointer select-none">
-            <input type="checkbox" v-model="syncToKobo" class="h-4 w-4 rounded border border-input accent-primary" />
+            <input type="checkbox" v-model="syncToKobo" class="h-4 w-4 rounded-xs border border-input accent-primary" />
             <span class="text-sm text-foreground">{{ t('smartScope.syncToKobo') }}</span>
           </label>
 

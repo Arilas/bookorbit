@@ -11,7 +11,7 @@ export interface ParsedBookData {
   publishedYear?: number | null;
   language?: string | null;
   seriesName?: string | null;
-  seriesIndex?: number | null;
+  seriesIndex?: string | null;
   /** Series length declared by the file itself; annotates the series, never the book row. */
   seriesTotalBooks?: number | null;
   authors: { name: string; sortName: string | null }[];
@@ -47,6 +47,11 @@ export interface ParsedBookData {
   comicMetadata?: ParsedCbzComicMetadata | null;
 }
 
+export interface FormatExtractOptions {
+  /** False skips reading the cover; the result's cover is then null. */
+  cover?: boolean;
+}
+
 export interface FormatExtractor {
-  extract(absolutePath: string): Promise<ParsedBookData | null>;
+  extract(absolutePath: string, options?: FormatExtractOptions): Promise<ParsedBookData | null>;
 }

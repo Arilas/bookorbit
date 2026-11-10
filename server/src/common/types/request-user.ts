@@ -1,4 +1,5 @@
 import { Permission } from '@bookorbit/types';
+import type { AuthenticationMethod } from '@bookorbit/types';
 import type { ContentFilterRules } from '@bookorbit/types';
 
 export interface RequestUser {
@@ -10,15 +11,15 @@ export interface RequestUser {
   isSuperuser: boolean;
   isDefaultPassword: boolean;
   tokenVersion: number;
+  sessionId?: number;
   settings: Record<string, unknown>;
   avatarUrl: string | null;
   avatarSource?: 'none' | 'external' | 'uploaded' | null;
   avatarVersion?: number | null;
   provisioningMethod: string;
+  authenticationMethod?: AuthenticationMethod;
+  appPasswordId?: number;
+  appPasswordName?: string;
   permissions: Permission[];
   contentFilters: ContentFilterRules;
-  authMethod?: 'primary' | 'app_password';
-  appPasswordId?: number;
-  appPasswordLabel?: string;
-  sessionFamilyId?: string;
 }

@@ -20,6 +20,7 @@ interface Credentials {
 interface Session {
   accessToken: string;
   refreshToken: string;
+  sessionId: number;
   jar: CookieJar;
 }
 
@@ -88,7 +89,7 @@ async function login(app: NestFastifyApplication, username: string, password: st
   const refreshToken = jar.get('refresh_token');
   expect(refreshToken).toEqual(expect.any(String));
 
-  return { accessToken: body.accessToken, refreshToken: refreshToken!, jar };
+  return { accessToken: body.accessToken, refreshToken: refreshToken!, sessionId: body.sessionId, jar };
 }
 
 async function refresh(app: NestFastifyApplication, session: Session): Promise<void> {
@@ -104,6 +105,7 @@ async function refresh(app: NestFastifyApplication, session: Session): Promise<v
   session.accessToken = body.accessToken;
   mergeCookieJar(session.jar, getSetCookieLines(response.headers));
   session.refreshToken = session.jar.get('refresh_token')!;
+  expect(body.sessionId).toBe(session.sessionId);
   expect(session.refreshToken).toEqual(expect.any(String));
   expect(session.refreshToken).not.toBe(previousRefreshToken);
 }
@@ -114,16 +116,18 @@ async function findRefreshToken(db: Db, rawToken: string) {
   });
 }
 
+async function findAuthSession(db: Db, sessionId: number) {
+  return db.query.authSessions.findFirst({
+    where: eq(schema.authSessions.id, sessionId),
+  });
+}
+
 async function activeAppSessionCount(db: Db, appPasswordId: number): Promise<number> {
   const rows = await db
-    .select({ id: schema.refreshTokens.id })
-    .from(schema.refreshTokens)
+    .select({ id: schema.authSessions.id })
+    .from(schema.authSessions)
     .where(
-      and(
-        eq(schema.refreshTokens.appPasswordId, appPasswordId),
-        isNull(schema.refreshTokens.revokedAt),
-        gt(schema.refreshTokens.expiresAt, new Date()),
-      ),
+      and(eq(schema.authSessions.appPasswordId, appPasswordId), isNull(schema.authSessions.revokedAt), gt(schema.authSessions.expiresAt, new Date())),
     );
   return rows.length;
 }
@@ -196,7 +200,9 @@ describe('Application passwords (e2e)', () => {
     const credentials = await createUser(context.db);
     const primary = await login(context.app, credentials.username, credentials.password);
     const primaryRefreshRow = await findRefreshToken(context.db, primary.refreshToken);
-    expect(primaryRefreshRow?.appPasswordId).toBeNull();
+    expect(primaryRefreshRow?.sessionId).toBe(primary.sessionId);
+    const primarySessionRow = await findAuthSession(context.db, primary.sessionId);
+    expect(primarySessionRow?.appPasswordId).toBeNull();
 
     const created = await createAppPassword(context.app, primary.accessToken, new Date(Date.now() + 180 * 24 * 60 * 60 * 1000));
     expect(created.password).toMatch(/^boap_[a-f0-9]{24}_[A-Za-z0-9_-]{43}$/);
@@ -232,15 +238,19 @@ describe('Application passwords (e2e)', () => {
       headers: { authorization: `Bearer ${deviceA.accessToken}` },
     });
     expect(deviceALoginBody.statusCode).toBe(200);
-    expect(deviceALoginBody.json()).toMatchObject({ authMethod: 'app_password' });
+    expect(deviceALoginBody.json()).toMatchObject({ authenticationMethod: 'app_password' });
 
     const deviceAInitialToken = deviceA.refreshToken;
     const deviceBInitialToken = deviceB.refreshToken;
     const deviceARow = await findRefreshToken(context.db, deviceAInitialToken);
     const deviceBRow = await findRefreshToken(context.db, deviceBInitialToken);
-    expect(deviceARow?.appPasswordId).toBe(created.appPassword.id);
-    expect(deviceBRow?.appPasswordId).toBe(created.appPassword.id);
-    expect(deviceARow!.expiresAt.getTime() - primaryRefreshRow!.expiresAt.getTime()).toBeGreaterThan(30 * 24 * 60 * 60 * 1000);
+    expect(deviceARow?.sessionId).toBe(deviceA.sessionId);
+    expect(deviceBRow?.sessionId).toBe(deviceB.sessionId);
+    const deviceASessionRow = await findAuthSession(context.db, deviceA.sessionId);
+    const deviceBSessionRow = await findAuthSession(context.db, deviceB.sessionId);
+    expect(deviceASessionRow?.appPasswordId).toBe(created.appPassword.id);
+    expect(deviceBSessionRow?.appPasswordId).toBe(created.appPassword.id);
+    expect(deviceASessionRow!.expiresAt.getTime() - primarySessionRow!.expiresAt.getTime()).toBeGreaterThan(30 * 24 * 60 * 60 * 1000);
 
     const browserSessions = await context.app.inject({
       method: 'GET',
@@ -279,6 +289,14 @@ describe('Application passwords (e2e)', () => {
     });
     expect(deniedRevoke.statusCode).toBe(403);
 
+    const deniedRotate = await context.app.inject({
+      method: 'POST',
+      url: `/api/v1/auth/app-passwords/${created.appPassword.id}/rotate`,
+      headers: { authorization: `Bearer ${deviceB.accessToken}` },
+      payload: { expiresAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString() },
+    });
+    expect(deniedRotate.statusCode).toBe(403);
+
     const deniedSessions = await context.app.inject({
       method: 'GET',
       url: '/api/v1/auth/sessions',
@@ -300,6 +318,7 @@ describe('Application passwords (e2e)', () => {
     });
     expect(logoutDeviceA.statusCode).toBe(200);
     expect(await activeAppSessionCount(context.db, created.appPassword.id)).toBe(1);
+    expect((await findAuthSession(context.db, deviceA.sessionId))?.revokedAt).not.toBeNull();
     const deviceAAccessAfterLogout = await context.app.inject({
       method: 'GET',
       url: '/api/v1/auth/me',
@@ -321,6 +340,7 @@ describe('Application passwords (e2e)', () => {
     });
     expect(revoke.statusCode).toBe(204);
     expect(await activeAppSessionCount(context.db, created.appPassword.id)).toBe(0);
+    expect((await findAuthSession(context.db, deviceB.sessionId))?.revokedAt).not.toBeNull();
     expect(await listAppPasswords(context.app, primary.accessToken)).toEqual([]);
 
     const appAccessAfterRevoke = await context.app.inject({
@@ -405,6 +425,16 @@ describe('Application passwords (e2e)', () => {
       where: eq(schema.appPasswords.id, created.appPassword.id),
     });
 
+    const otherCredentials = await createUser(context.db);
+    const otherPrimary = await login(context.app, otherCredentials.username, otherCredentials.password);
+    const foreignRotate = await context.app.inject({
+      method: 'POST',
+      url: `/api/v1/auth/app-passwords/${created.appPassword.id}/rotate`,
+      headers: { authorization: `Bearer ${otherPrimary.accessToken}` },
+      payload: { expiresAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString() },
+    });
+    expect(foreignRotate.statusCode).toBe(404);
+
     const rotated = await rotateAppPassword(
       context.app,
       primary.accessToken,
@@ -423,7 +453,8 @@ describe('Application passwords (e2e)', () => {
       lastUsedAt: null,
       lastUsedIp: null,
     });
-    expect(await findRefreshToken(context.db, oldAppSession.refreshToken)).toBeUndefined();
+    expect((await findAuthSession(context.db, oldAppSession.sessionId))?.revokedAt).toBeInstanceOf(Date);
+    expect(await findRefreshToken(context.db, oldAppSession.refreshToken)).toBeDefined();
 
     const oldAccessResponse = await context.app.inject({
       method: 'GET',
@@ -509,9 +540,9 @@ describe('Application passwords (e2e)', () => {
     expect(auditEntry).toBeDefined();
     expect(auditEntry?.meta).toMatchObject({
       actorAuth: {
-        authMethod: 'app_password',
+        authenticationMethod: 'app_password',
         appPasswordId: created.appPassword.id,
-        appPasswordLabel: 'iPhone app',
+        appName: 'iPhone app',
       },
     });
   }, 15_000);
@@ -555,12 +586,15 @@ describe('Application passwords (e2e)', () => {
     await context.db.update(schema.books).set({ primaryFileId: file.id }).where(eq(schema.books.id, book.id));
 
     const progressResponse = await context.app.inject({
-      method: 'POST',
-      url: `/api/v1/books/files/${file.id}/progress`,
+      method: 'PUT',
+      url: '/api/v1/reading-progress',
       headers: { authorization: `Bearer ${appSession.accessToken}` },
-      payload: { percentage: 37 },
+      payload: { writes: [{ fileId: file.id, percentage: 37 }] },
     });
-    expect(progressResponse.statusCode).toBe(201);
+    expect(progressResponse.statusCode).toBe(200);
+    expect(progressResponse.json()).toMatchObject({
+      results: [{ fileId: file.id, status: 'saved', progress: { percentage: 37, appName: 'iPhone app' } }],
+    });
 
     const endedAt = new Date(Date.now() - 1_000);
     const startedAt = new Date(endedAt.getTime() - 10 * 60 * 1_000);
@@ -599,11 +633,11 @@ describe('Application passwords (e2e)', () => {
 
     const progressRead = await context.app.inject({
       method: 'GET',
-      url: `/api/v1/books/files/${file.id}/progress`,
+      url: `/api/v1/reading-progress?fileId=${file.id}`,
       headers: { authorization: `Bearer ${primary.accessToken}` },
     });
     expect(progressRead.statusCode).toBe(200);
-    expect(progressRead.json()).toMatchObject({ percentage: 37, appName: 'iPhone app' });
+    expect(progressRead.json()).toMatchObject({ items: [{ fileId: file.id, percentage: 37, appName: 'iPhone app' }] });
 
     const sessionsRead = await context.app.inject({
       method: 'GET',
@@ -612,8 +646,8 @@ describe('Application passwords (e2e)', () => {
     });
     expect(sessionsRead.statusCode).toBe(200);
     expect(sessionsRead.json()).toMatchObject({
-      items: [{ sourceAttribution: { key: `app-password:${created.appPassword.id}`, label: 'iPhone app', kind: 'app_password' } }],
-      stats: { bySource: [{ key: `app-password:${created.appPassword.id}`, label: 'iPhone app', totalSeconds: 600 }] },
+      items: [{ sourceAttribution: { key: `app-password:${created.appPassword.id}:bookorbit`, label: 'iPhone app', kind: 'app_password' } }],
+      stats: { bySource: [{ key: `app-password:${created.appPassword.id}:bookorbit`, label: 'iPhone app', totalSeconds: 600 }] },
     });
 
     const sourceDistribution = await context.app.inject({
@@ -624,7 +658,7 @@ describe('Application passwords (e2e)', () => {
     expect(sourceDistribution.statusCode).toBe(200);
     expect(sourceDistribution.json()).toMatchObject({
       totalSeconds: 600,
-      slices: [{ key: `app-password:${created.appPassword.id}`, label: 'iPhone app', readingSeconds: 600 }],
+      slices: [{ key: `app-password:${created.appPassword.id}:bookorbit`, label: 'iPhone app', readingSeconds: 600 }],
     });
 
     const attempts = await context.app.inject({

@@ -11,11 +11,13 @@ export type AuditRequest = Omit<FastifyRequest, 'params' | 'body'> & {
 };
 
 export interface AuditableOptions {
-  action: AuditAction;
+  action: AuditAction | ((req: AuditRequest, responseBody: unknown) => AuditAction);
   resource?: AuditResource;
   getResourceId?: (req: AuditRequest, responseBody: unknown) => number | undefined;
   getMeta?: (req: AuditRequest, responseBody: unknown) => Record<string, unknown> | undefined;
   description: string | ((req: AuditRequest, responseBody: unknown) => string);
+  /** Records the call only when this returns true. Without it every successful call is recorded. */
+  when?: (req: AuditRequest, responseBody: unknown) => boolean;
 }
 
 export const Auditable = (options: AuditableOptions) => {

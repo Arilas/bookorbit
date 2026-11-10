@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import { ArrowLeft } from '@lucide/vue'
 import SidebarSectionPopover from '@/components/sidebar/SidebarSectionPopover.vue'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useBookRequestVisibility } from '@/features/book-requests/composables/useBookRequestVisibility'
 import { visibleSettingsNav, type SettingsNavItem } from '../lib/settings-nav'
 import SettingsNav from './SettingsNav.vue'
 
@@ -12,14 +13,16 @@ withDefaults(defineProps<{ isRail?: boolean }>(), { isRail: false })
 
 const { t } = useI18n()
 const route = useRoute()
-const { isSuperuser, userPermissions, isDemoRestrictedAccount, authMethod, provisioningMethod } = usePermissions()
+const { isSuperuser, userPermissions, isDemoRestrictedAccount, authenticationMethod, provisioningMethod } = usePermissions()
+const { showBookRequests } = useBookRequestVisibility()
 
 const groups = computed(() =>
   visibleSettingsNav({
     isSuperuser: isSuperuser.value,
     permissions: userPermissions.value,
     isDemoRestricted: isDemoRestrictedAccount.value,
-    authMethod: authMethod.value,
+    showBookRequests: showBookRequests.value,
+    authenticationMethod: authenticationMethod.value,
     provisioningMethod: provisioningMethod.value,
   }),
 )

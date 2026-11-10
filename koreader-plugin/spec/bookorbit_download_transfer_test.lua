@@ -10,10 +10,17 @@ package.loaded["ui/uimanager"] = {
     end,
 }
 
-local directories = { ["/downloads/.bookorbit-tmp"] = true }
+local directories = {
+    ["/.bookorbit-tmp"] = true,
+    ["/downloads/.bookorbit-tmp"] = true,
+}
 local files = {}
 local now = 1000
+local links = {}
 package.loaded["libs/libkoreader-lfs"] = {
+    symlinkattributes = function(path)
+        return links[path] and "link" or nil
+    end,
     attributes = function(path, attribute)
         if directories[path] then
             if attribute == "mode" then return "directory" end
@@ -66,10 +73,29 @@ end
 -- Destination containment is checked before anything is written and again
 -- before the publishing rename.
 assertEqual(Transfer.isInsideRoot("/downloads", "/downloads/Books/a.epub"), true, "a path under the root is authorized")
+assertEqual(Transfer.isInsideRoot("/downloads", "/downloads/The Shards.epub"), true,
+    "a file directly under the download root is authorized")
 assertEqual(Transfer.isInsideRoot("/downloads", "/elsewhere/a.epub"), false, "a path outside the root is rejected")
 assertEqual(Transfer.isInsideRoot("/downloads", "/downloads/../etc/passwd"), false, "traversal is rejected")
 assertEqual(Transfer.isInsideRoot("/downloads", "/downloads"), false, "the root itself is not a destination")
 assertEqual(Transfer.tempDir("/downloads"), "/downloads/.bookorbit-tmp", "temporaries live under the destination root")
+assertEqual(Transfer.isInsideRoot("/", "/The Shards.epub"), true, "the filesystem root supports a direct book destination")
+assertEqual(Transfer.isInsideRoot("/", "/Standalone/The Shards.epub"), true, "the filesystem root supports nested destinations")
+assertEqual(Transfer.isInsideRoot("/", "/../etc/passwd"), false, "the filesystem root still rejects traversal")
+assertEqual(Transfer.tempDir("/"), "/.bookorbit-tmp", "the filesystem root gets one temporary directory separator")
+
+links["/downloads/Books"] = true
+assertEqual(Transfer.isInsideRoot("/downloads", "/downloads/Books/a.epub"), false,
+    "a linked destination directory is rejected")
+links["/downloads/Books"] = nil
+links["/downloads/Books/a.epub"] = true
+assertEqual(Transfer.isInsideRoot("/downloads", "/downloads/Books/a.epub"), false,
+    "a linked destination file is rejected")
+links["/downloads/Books/a.epub"] = nil
+links["/downloads/.bookorbit-tmp"] = true
+assertEqual(Transfer.ensureTempDir("/downloads"), nil, "linked staging is rejected")
+assertEqual(Transfer.sweepStale("/downloads"), 0, "cleanup never follows linked staging")
+links["/downloads/.bookorbit-tmp"] = nil
 
 -- Leftovers from a killed run are removed, and the sweep stays bounded.
 files["/downloads/.bookorbit-tmp/bo_1_1.part"] = { size = 10, modified = 1 }
@@ -141,6 +167,25 @@ runScheduled()
 assertEqual(#scheduled, 0, "a poll that fires after completion does not reschedule itself")
 assertEqual(#observed, 1, "no progress is reported once the transfer returned")
 
+-- A user-selected filesystem root used to normalize to an empty string and
+-- reject the destination before perform could start the HTTP request.
+local root_request_started = false
+local root_completed = Transfer.run{
+    root = "/",
+    destination = "/The Shards.epub",
+    generation = 5,
+    expected_bytes = 2089926,
+    is_current = function() return true end,
+    perform = function(download_opts)
+        root_request_started = true
+        files[download_opts.temp_path] = { size = 2089926, modified = now }
+        return { temp_path = download_opts.temp_path, bytes = 2089926 }
+    end,
+}
+assertEqual(root_request_started, true, "the reported book reaches the HTTP transfer callback")
+assertEqual(root_completed, true, "the reported book publishes under a filesystem-root download folder")
+assertEqual(files["/The Shards.epub"] ~= nil, true, "the reported book is published at the requested destination")
+
 -- A cancelled generation discards a late child result instead of publishing it.
 renames = {}
 removed = {}
@@ -189,6 +234,38 @@ local unsafe, unsafe_err = Transfer.run{
 assertEqual(unsafe, nil, "an unauthorized destination fails")
 assertEqual(unsafe_err, "unsafe_destination", "an unauthorized destination says why")
 assertEqual(requested, false, "an unauthorized destination never starts a transfer")
+
+local redirected, redirected_err = Transfer.run{
+    root = "/downloads",
+    destination = "/downloads/Books/a.epub",
+    generation = 8,
+    perform = function(opts)
+        files[opts.temp_path] = { size = 10, modified = now }
+        links["/downloads/Books"] = true
+        return { temp_path = opts.temp_path }
+    end,
+}
+assertEqual(redirected, nil, "a destination redirected during transfer is rejected")
+assertEqual(redirected_err, "unsafe_destination", "publication rechecks links")
+assertEqual(#renames, 0, "a redirected destination publishes nothing")
+links["/downloads/Books"] = nil
+
+local real_time = os.time
+os.time = function() return 1000 end
+local part_link = "/downloads/.bookorbit-tmp/bo_9_1000.part"
+links[part_link] = true
+requested = false
+local linked_part, linked_part_err = Transfer.run{
+    root = "/downloads",
+    destination = "/downloads/Books/a.epub",
+    generation = 9,
+    perform = function() requested = true end,
+}
+assertEqual(linked_part, nil, "a linked staged file is rejected")
+assertEqual(linked_part_err, "unsafe_destination", "linked staged files report a path failure")
+assertEqual(requested, false, "linked staged files never start a transfer")
+links[part_link] = nil
+os.time = real_time
 
 os.rename = real_rename
 

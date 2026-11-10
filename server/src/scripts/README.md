@@ -27,11 +27,17 @@ GITHUB_RELEASES_REPO=neonsolstice/playground pnpm whats-new:preview v4.2.0
 
 ## Other scripts
 
-| File                                 | Run with                                             | Purpose                                       |
-| ------------------------------------ | ---------------------------------------------------- | --------------------------------------------- |
-| `db-seed.ts`                         | `pnpm db:seed`                                       | Seed the dev database.                        |
-| `db-prepare-e2e.ts`                  | `pnpm e2e:db:prepare`                                | Prepare the e2e test database.                |
-| `migrate.ts`                         | `pnpm db:migrate:runtime` (compiled)                 | Apply database migrations at runtime/startup. |
-| `setup-kobo-cloudscraper.ts`         | `pnpm setup:kobo-cloudscraper`                       | Set up the Kobo cloudscraper integration.     |
-| `backfill-reading-session-events.ts` | `tsx src/scripts/backfill-reading-session-events.ts` | One-off backfill of reading-session events.   |
-| `bench-user-statistics.ts`           | `tsx src/scripts/bench-user-statistics.ts`           | Benchmark the user-statistics queries.        |
+| File                                          | Run with                                                            | Purpose                                                           |
+| --------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `db-seed.ts`                                  | `pnpm db:seed`                                                      | Seed the dev database.                                            |
+| `seed-apple-source-stats.ts`                  | `pnpm db:seed:apple-stats`                                          | Seed realistic iOS and Watch reading history.                     |
+| `db-prepare-e2e.ts`                           | `pnpm e2e:db:prepare`                                               | Prepare the e2e test database.                                    |
+| `migrate.ts`                                  | `node dist/scripts/migrate.js` (compiled image)                     | Apply database migrations at runtime/startup.                     |
+| `app-password-migration-compatibility-cli.ts` | `node dist/scripts/app-password-migration-compatibility-cli.js ...` | Reconcile legacy App Password migrations during a staged upgrade. |
+| `setup-kobo-cloudscraper.ts`                  | `pnpm setup:kobo-cloudscraper`                                      | Set up the Kobo cloudscraper integration.                         |
+| `backfill-reading-session-events.ts`          | `tsx src/scripts/backfill-reading-session-events.ts`                | One-off backfill of reading-session events.                       |
+| `bench-user-statistics.ts`                    | `tsx src/scripts/bench-user-statistics.ts`                          | Benchmark the user-statistics queries.                            |
+
+The source-only `pnpm db:app-password-compat` command is for a development checkout. Production images contain compiled JavaScript, not
+the `tsx` development runner. Follow [the staged upgrade runbook](../../../docs/APP_PASSWORD_MIGRATION_UPGRADE.md) and invoke the compiled
+compatibility CLI with `node` inside the image.

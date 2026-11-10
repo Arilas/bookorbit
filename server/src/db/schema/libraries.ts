@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   check,
   doublePrecision,
@@ -14,7 +15,7 @@ import {
   uniqueIndex,
   varchar,
 } from 'drizzle-orm/pg-core';
-import { FieldPreferenceOverrides, BookMetadataFetchConfigOverride } from '@bookorbit/types';
+import { FieldPreferenceOverrides, BookMetadataFetchConfigOverride, AddedAtSource, RegexMetadataConfig } from '@bookorbit/types';
 
 export const libraries = pgTable(
   'libraries',
@@ -34,17 +35,19 @@ export const libraries = pgTable(
       .$type<string[]>()
       .notNull()
       .default(['folderStructure', 'embedded', 'nfoFile', 'opfFile', 'sidecar']),
+    regexMetadata: jsonb('regex_metadata').$type<RegexMetadataConfig>(),
     formatPriority: jsonb('format_priority')
       .$type<string[]>()
       .notNull()
       .default(['epub', 'pdf', 'cbz', 'cbr', 'cb7', 'mobi', 'azw3', 'azw', 'fb2', 'm4b', 'mp3', 'm4a', 'opus', 'ogg', 'flac']),
     allowedFormats: jsonb('allowed_formats').$type<string[]>().notNull().default([]),
     organizationMode: varchar('organization_mode', { length: 20 }).notNull().default('book_per_folder'),
+    addedAtSource: varchar('added_at_source', { length: 20 }).$type<AddedAtSource>().notNull().default('imported'),
     excludePatterns: jsonb('exclude_patterns').$type<string[]>().notNull().default([]),
 
     // Reading progress thresholds
     readingThreshold: doublePrecision('reading_threshold').notNull().default(0.25),
-    markAsFinishedPercentComplete: integer('mark_as_finished_percent_complete').notNull().default(98),
+    markAsFinishedPercentComplete: doublePrecision('mark_as_finished_percent_complete').notNull().default(98),
 
     // File write-back settings
     fileWriteEnabled: boolean('file_write_enabled').notNull().default(false),
@@ -61,6 +64,9 @@ export const libraries = pgTable(
     fileWriteKindleMaxFileSizeMb: integer('file_write_kindle_max_file_size_mb').notNull().default(100),
     fileWriteAudioEnabled: boolean('file_write_audio_enabled').notNull().default(false),
     fileWriteAudioMaxFileSizeMb: integer('file_write_audio_max_file_size_mb').notNull().default(500),
+    fileWriteAllFiles: boolean('file_write_all_files').notNull().default(false),
+    fileWriteReadAlongEnabled: boolean('file_write_read_along_enabled').notNull().default(false),
+    fileWriteReadAlongMaxFileSizeMb: integer('file_write_read_along_max_file_size_mb').notNull().default(1000),
     fileRenameEnabled: boolean('file_rename_enabled').notNull().default(false),
 
     // File naming pattern for uploads (null = use global default)
@@ -80,6 +86,7 @@ export const libraries = pgTable(
     scanMode: varchar('scan_mode', { length: 20 }).notNull().default('auto'),
     pollInterval: integer('poll_interval_seconds').default(300),
 
+    koreaderHashRevision: bigint('koreader_hash_revision', { mode: 'number' }).notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()
@@ -90,6 +97,7 @@ export const libraries = pgTable(
     uniqueIndex('libraries_name_lower_uidx').on(sql`lower(${t.name})`),
     check('libraries_display_order_nonnegative_chk', sql`${t.displayOrder} >= 0`),
     check('libraries_organization_mode_chk', sql`${t.organizationMode} in ('book_per_folder', 'book_per_file')`),
+    check('libraries_added_at_source_chk', sql`${t.addedAtSource} in ('imported', 'file_modified', 'file_created')`),
     check('libraries_reading_threshold_range_chk', sql`${t.readingThreshold} >= 0 and ${t.readingThreshold} <= 100`),
     check('libraries_mark_finished_percent_range_chk', sql`${t.markAsFinishedPercentComplete} >= 0 and ${t.markAsFinishedPercentComplete} <= 100`),
     check('libraries_scan_mode_chk', sql`${t.scanMode} in ('auto', 'manual')`),
@@ -110,12 +118,14 @@ export const libraryFolders = pgTable(
       .notNull()
       .references(() => libraries.id, { onDelete: 'cascade' }),
     path: varchar('path', { length: 4096 }).notNull(),
+    scanStateVersion: bigint('scan_state_version', { mode: 'number' }).notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
     index('library_folders_library_id_idx').on(t.libraryId),
     uniqueIndex('library_folders_library_path_uidx').on(t.libraryId, t.path),
     unique('library_folders_id_library_id_unique').on(t.id, t.libraryId),
+    check('library_folders_scan_state_version_nonnegative_chk', sql`${t.scanStateVersion} >= 0`),
   ],
 );
 

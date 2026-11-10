@@ -14,21 +14,26 @@ function isDeletionBook(value: unknown): value is BookDeletionAuditBook {
   )
 }
 
-export function getAuditAppPasswordActor(entry: AuditLogEntry): AuditAppPasswordActor | null {
-  if (!isRecord(entry.meta) || !isRecord(entry.meta.actorAuth)) return null
+export function parseAuditAppPasswordActor(value: unknown): AuditAppPasswordActor | null {
+  if (!isRecord(value)) return null
 
-  const { authMethod, appPasswordId, appPasswordLabel } = entry.meta.actorAuth
+  const { authenticationMethod, appPasswordId, appName } = value
   if (
-    authMethod !== 'app_password' ||
+    authenticationMethod !== 'app_password' ||
     typeof appPasswordId !== 'number' ||
     !Number.isSafeInteger(appPasswordId) ||
     appPasswordId <= 0 ||
-    (typeof appPasswordLabel !== 'string' && appPasswordLabel !== null)
+    (typeof appName !== 'string' && appName !== null)
   ) {
     return null
   }
 
-  return { authMethod, appPasswordId, appPasswordLabel }
+  return { authenticationMethod, appPasswordId, appName }
+}
+
+export function getAuditAppPasswordActor(entry: AuditLogEntry): AuditAppPasswordActor | null {
+  if (!isRecord(entry.meta)) return null
+  return parseAuditAppPasswordActor(entry.meta.actorAuth)
 }
 
 export function getBookDeletionAuditMeta(entry: AuditLogEntry): BookDeletionAuditMeta | null {

@@ -1,35 +1,39 @@
 {
-  "totalRoutes": 381,
+  "totalRoutes": 677,
   "byPermission": {
-    "(none)": 169,
-    "Permission.ManageMetadataConfig": 34,
-    "Permission.EmailSend": 30,
-    "Permission.LibraryEditMetadata": 33,
-    "Permission.BookDockAccess": 16,
-    "Permission.ManageAppSettings": 22,
-    "Permission.ManageLibraries": 16,
-    "Permission.ManageUsers": 11,
+    "(none)": 268,
+    "Permission.ManageMetadataConfig": 47,
+    "Permission.EmailSend": 34,
+    "Permission.LibraryEditMetadata": 59,
+    "Permission.BookDockAccess": 17,
+    "Permission.ManageAppSettings": 62,
+    "Permission.ManageLibraries": 33,
+    "Permission.ManageUsers": 14,
     "Permission.ManageEmail": 8,
-    "Permission.KoboSync": 7,
+    "Permission.KoboSync": 13,
     "Permission.NotificationAccess": 6,
-    "Permission.DemoRestricted": 6,
-    "Permission.KoreaderSync": 8,
+    "Permission.DemoRestricted": 16,
+    "Permission.KoreaderSync": 9,
     "Permission.OpdsAccess": 4,
-    "Permission.ViewAuditLog": 1,
+    "Permission.ViewAuditLog": 4,
     "Permission.ViewUserActivity": 6,
-    "Permission.LibraryDeleteBooks": 1,
-    "Permission.LibraryDownload": 1,
+    "Permission.LibraryDeleteBooks": 20,
+    "Permission.LibraryDownload": 4,
     "Permission.LibraryUpload": 2,
     "Permission.ManageBookDock": 3,
     "Permission.ManageIcons": 1,
     "Permission.HardcoverSync": 1,
     "Permission.ReadwiseSync": 1,
-    "Permission.StorygraphSync": 1
+    "Permission.StorygraphSync": 1,
+    "Permission.BookRequestAccess": 27,
+    "Permission.ManageBookRequests": 21,
+    "Permission.BookRequestSelfFulfill": 12,
+    "Permission.LibraryGenerateReadAloud": 10,
+    "Permission.LibraryMergeBooks": 15
   },
   "byLibraryAccess": {
-    "'viewer'": 3,
-    "'editor'": 1,
-    "viewer": 1
+    "'viewer'": 6,
+    "'editor'": 8
   },
   "routeChunks": [
     "routes-01.json",
@@ -39,6 +43,8 @@
     "routes-05.json",
     "routes-06.json",
     "routes-07.json",
-    "routes-08.json"
+    "routes-08.json",
+    "routes-09.json",
+    "routes-10.json"
   ]
 }

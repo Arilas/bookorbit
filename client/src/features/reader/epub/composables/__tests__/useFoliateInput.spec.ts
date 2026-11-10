@@ -55,6 +55,24 @@ function makeTouchEvent(type: string, touches: TouchLike[], changedTouches = tou
   return event
 }
 
+function linkTo(href: string | null): HTMLAnchorElement {
+  const a = document.createElement('a')
+  if (href !== null) a.setAttribute('href', href)
+  return a
+}
+
+function elementInside(parent: Element): HTMLElement {
+  const child = document.createElement('span')
+  parent.appendChild(child)
+  return child
+}
+
+// The fake iframe document is a bare EventTarget, so the element an event lands on is set by hand.
+function withTarget<T extends Event>(event: T, target: EventTarget): T {
+  Object.defineProperty(event, 'target', { value: target })
+  return event
+}
+
 describe('useFoliateInput', () => {
   afterEach(() => {
     vi.useRealTimers()
@@ -153,6 +171,78 @@ describe('useFoliateInput', () => {
     expect(move.defaultPrevented).toBe(false)
     expect(end.defaultPrevented).toBe(false)
     expect(handleSelectionEnd).toHaveBeenCalledWith(doc)
+
+    input.cleanup()
+  })
+
+  it.each(['paginated', 'scrolled'])('brackets a selection gesture in %s flow until touchend', (flow) => {
+    const handleInteractionStart = vi.fn<(doc: Document) => void>()
+    const handleInteractionEnd = vi.fn<(doc: Document) => void>()
+    const selection = {
+      isCollapsed: false,
+      rangeCount: 1,
+    } as Selection
+    const view: ViewLike = {
+      prev: vi.fn<() => void>(),
+      next: vi.fn<() => void>(),
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+      renderer: { getAttribute: (name) => (name === 'flow' ? flow : null) },
+    }
+    const input = useFoliateInput(
+      () => view,
+      undefined,
+      vi.fn<() => void>(),
+      vi.fn<() => void>(),
+      undefined,
+      handleInteractionStart,
+      handleInteractionEnd,
+    )
+    const doc = makeDocTarget(selection)
+    input.attachIframeClicks(doc)
+
+    doc.dispatchEvent(makeTouchEvent('touchstart', [{ clientX: 20, clientY: 30 }]))
+    doc.dispatchEvent(new Event('selectionchange'))
+
+    expect(handleInteractionStart).toHaveBeenCalledWith(doc)
+    expect(handleInteractionEnd).not.toHaveBeenCalled()
+
+    doc.dispatchEvent(makeTouchEvent('touchend', [], [{ clientX: 30, clientY: 40 }]))
+
+    expect(handleInteractionEnd).toHaveBeenCalledWith(doc)
+
+    input.cleanup()
+  })
+
+  it('finishes selection interaction without navigating when touch is cancelled', () => {
+    const goLeft = vi.fn<() => void>()
+    const goRight = vi.fn<() => void>()
+    const handleInteractionEnd = vi.fn<(doc: Document) => void>()
+    const view: ViewLike = {
+      prev: vi.fn<() => void>(),
+      next: vi.fn<() => void>(),
+      goLeft,
+      goRight,
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+      renderer: { getAttribute: (name) => (name === 'flow' ? 'paginated' : null) },
+    }
+    const input = useFoliateInput(
+      () => view,
+      undefined,
+      vi.fn<() => void>(),
+      vi.fn<() => void>(),
+      undefined,
+      vi.fn<(doc: Document) => void>(),
+      handleInteractionEnd,
+    )
+    const doc = makeDocTarget()
+    input.attachIframeClicks(doc)
+
+    doc.dispatchEvent(makeTouchEvent('touchstart', [{ clientX: 100, clientY: 100 }]))
+    doc.dispatchEvent(makeTouchEvent('touchcancel', [], [{ clientX: 20, clientY: 100 }]))
+
+    expect(handleInteractionEnd).toHaveBeenCalledWith(doc)
+    expect(goLeft).not.toHaveBeenCalled()
+    expect(goRight).not.toHaveBeenCalled()
 
     input.cleanup()
   })
@@ -291,6 +381,58 @@ describe('useFoliateInput', () => {
     input.cleanup()
   })
 
+  it('does not report a click on a followed link as a page-turn click', () => {
+    const postMessage = vi.spyOn(window, 'postMessage').mockImplementation(() => {})
+    const view: ViewLike = { prev: vi.fn<() => void>(), next: vi.fn<() => void>(), getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect }
+    const input = useFoliateInput(() => view, vi.fn<() => void>(), vi.fn<() => void>(), vi.fn<() => void>())
+    const doc = makeDocTarget()
+    input.attachIframeClicks(doc)
+
+    doc.dispatchEvent(new Event('mousedown'))
+    doc.dispatchEvent(withTarget(new MouseEvent('click', { clientX: 10, clientY: 50 }), elementInside(linkTo('chapter2.xhtml'))))
+    expect(postMessage).not.toHaveBeenCalled()
+
+    doc.dispatchEvent(new Event('mousedown'))
+    doc.dispatchEvent(withTarget(new MouseEvent('click', { clientX: 10, clientY: 50 }), elementInside(linkTo(null))))
+    expect(postMessage).toHaveBeenCalledTimes(1)
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'foliate-click' }), window.location.origin)
+
+    postMessage.mockRestore()
+    input.cleanup()
+  })
+
+  it('does not report a tap on a followed link as a page-turn tap', () => {
+    const postMessage = vi.spyOn(window, 'postMessage').mockImplementation(() => {})
+    const view: ViewLike = { prev: vi.fn<() => void>(), next: vi.fn<() => void>(), getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect }
+    const input = useFoliateInput(() => view, vi.fn<() => void>(), vi.fn<() => void>(), vi.fn<() => void>())
+    const doc = makeDocTarget()
+    input.attachIframeClicks(doc)
+    const link = elementInside(linkTo('chapter2.xhtml'))
+
+    doc.dispatchEvent(withTarget(makeTouchEvent('touchstart', [{ clientX: 10, clientY: 50 }]), link))
+    doc.dispatchEvent(withTarget(makeTouchEvent('touchend', [], [{ clientX: 10, clientY: 50 }]), link))
+
+    expect(postMessage).not.toHaveBeenCalled()
+
+    postMessage.mockRestore()
+    input.cleanup()
+  })
+
+  it('still turns the page for a swipe that starts on a link', () => {
+    const view: ViewLike = { prev: vi.fn<() => void>(), next: vi.fn<() => void>(), getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect }
+    const input = useFoliateInput(() => view, vi.fn<() => void>(), vi.fn<() => void>(), vi.fn<() => void>())
+    const doc = makeDocTarget()
+    input.attachIframeClicks(doc)
+    const link = elementInside(linkTo('chapter2.xhtml'))
+
+    doc.dispatchEvent(withTarget(makeTouchEvent('touchstart', [{ clientX: 90, clientY: 50 }]), link))
+    doc.dispatchEvent(withTarget(makeTouchEvent('touchend', [], [{ clientX: 10, clientY: 50 }]), link))
+
+    expect(view.next).toHaveBeenCalledTimes(1)
+
+    input.cleanup()
+  })
+
   it('uses physical left and right helpers for arrow keys when available', () => {
     const prev = vi.fn<() => void>()
     const next = vi.fn<() => void>()
@@ -315,6 +457,48 @@ describe('useFoliateInput', () => {
     expect(goRight).toHaveBeenCalledTimes(1)
     expect(prev).toHaveBeenCalledTimes(1)
     expect(next).toHaveBeenCalledTimes(1)
+
+    input.cleanup()
+  })
+
+  it('calls canNavigate before keyboard paging and continues when allowed', () => {
+    const prev = vi.fn<() => void>()
+    const next = vi.fn<() => void>()
+    const canNavigate = vi.fn<() => boolean>(() => true)
+    const view: ViewLike = {
+      prev,
+      next,
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+    }
+
+    const input = useFoliateInput(() => view, undefined, vi.fn<() => void>(), vi.fn<() => void>(), canNavigate)
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+
+    expect(canNavigate).toHaveBeenCalledTimes(1)
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(prev).not.toHaveBeenCalled()
+
+    input.cleanup()
+  })
+
+  it('blocks keyboard paging when canNavigate returns false', () => {
+    const prev = vi.fn<() => void>()
+    const next = vi.fn<() => void>()
+    const canNavigate = vi.fn<() => boolean>(() => false)
+    const view: ViewLike = {
+      prev,
+      next,
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+    }
+
+    const input = useFoliateInput(() => view, undefined, vi.fn<() => void>(), vi.fn<() => void>(), canNavigate)
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+
+    expect(canNavigate).toHaveBeenCalledTimes(1)
+    expect(next).not.toHaveBeenCalled()
+    expect(prev).not.toHaveBeenCalled()
 
     input.cleanup()
   })
@@ -357,6 +541,18 @@ describe('useFoliateInput', () => {
     expect(next).toHaveBeenCalledTimes(1)
 
     vi.advanceTimersByTime(300)
+
+    doc.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'foliate-click', clientX: 50 }, origin: window.location.origin }))
+    vi.advanceTimersByTime(300)
+    // On desktop view, middle-zone click should NOT trigger onMiddleTap
+    expect(onMiddleTap).toHaveBeenCalledTimes(0)
+
+    // On mobile view (simulated by touch points), middle-zone click SHOULD trigger onMiddleTap
+    Object.defineProperty(navigator, 'maxTouchPoints', {
+      configurable: true,
+      get: () => 5,
+    })
 
     doc.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'foliate-click', clientX: 50 }, origin: window.location.origin }))
@@ -415,6 +611,53 @@ describe('useFoliateInput', () => {
     expect(prev).not.toHaveBeenCalled()
     expect(next).not.toHaveBeenCalled()
 
+    input.cleanup()
+
+    if (originalMaxTouchPoints) {
+      Object.defineProperty(navigator, 'maxTouchPoints', originalMaxTouchPoints)
+    }
+    if (originalOntouchstart) {
+      Object.defineProperty(window, 'ontouchstart', originalOntouchstart)
+    }
+  })
+
+  it.each([
+    { holdMs: 250, expectedNavigationCount: 1 },
+    { holdMs: 500, expectedNavigationCount: 0 },
+  ])('handles a $holdMs ms pointer hold before the delayed click-zone action', ({ holdMs, expectedNavigationCount }) => {
+    vi.useFakeTimers()
+
+    const next = vi.fn<() => void>()
+    const view: ViewLike = {
+      prev: vi.fn<() => void>(),
+      next,
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+    }
+    const input = useFoliateInput(() => view, undefined, vi.fn<() => void>(), vi.fn<() => void>())
+    const doc = makeDocTarget()
+    input.attachIframeClicks(doc)
+
+    const originalMaxTouchPoints = Object.getOwnPropertyDescriptor(navigator, 'maxTouchPoints')
+    const originalOntouchstart = Object.getOwnPropertyDescriptor(window, 'ontouchstart')
+    Object.defineProperty(navigator, 'maxTouchPoints', {
+      configurable: true,
+      get: () => 0,
+    })
+    Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'ontouchstart')
+
+    const postMessage = vi.spyOn(window, 'postMessage').mockImplementation(() => {})
+
+    doc.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    vi.advanceTimersByTime(holdMs)
+    doc.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 95, clientY: 100 }))
+    const message = postMessage.mock.calls[0]?.[0]
+    if (message) window.dispatchEvent(new MessageEvent('message', { data: message, origin: window.location.origin }))
+    vi.advanceTimersByTime(300)
+
+    expect(postMessage).toHaveBeenCalledTimes(expectedNavigationCount)
+    expect(next).toHaveBeenCalledTimes(expectedNavigationCount)
+
+    postMessage.mockRestore()
     input.cleanup()
 
     if (originalMaxTouchPoints) {
@@ -505,6 +748,59 @@ describe('useFoliateInput', () => {
     if (originalOntouchstart) {
       Object.defineProperty(window, 'ontouchstart', originalOntouchstart)
     }
+  })
+
+  it('toggles overlays on parent document click near top/bottom on desktop', () => {
+    const onMiddleTap = vi.fn<() => void>()
+    const view: ViewLike = {
+      prev: vi.fn<() => void>(),
+      next: vi.fn<() => void>(),
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+    }
+
+    const input = useFoliateInput(() => view, onMiddleTap, vi.fn<() => void>(), vi.fn<() => void>())
+
+    const originalInnerHeight = window.innerHeight
+    Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true })
+
+    const originalMaxTouchPoints = Object.getOwnPropertyDescriptor(navigator, 'maxTouchPoints')
+    const originalOntouchstart = Object.getOwnPropertyDescriptor(window, 'ontouchstart')
+    Object.defineProperty(navigator, 'maxTouchPoints', {
+      configurable: true,
+      get: () => 0,
+    })
+    Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'ontouchstart')
+
+    const clickEventTop = new MouseEvent('click', { bubbles: true })
+    Object.defineProperty(clickEventTop, 'target', { value: view })
+    Object.defineProperty(clickEventTop, 'clientY', { value: 20 })
+    document.dispatchEvent(clickEventTop)
+
+    expect(onMiddleTap).toHaveBeenCalledTimes(1)
+
+    const clickEventBottom = new MouseEvent('click', { bubbles: true })
+    Object.defineProperty(clickEventBottom, 'target', { value: view })
+    Object.defineProperty(clickEventBottom, 'clientY', { value: 780 })
+    document.dispatchEvent(clickEventBottom)
+
+    expect(onMiddleTap).toHaveBeenCalledTimes(2)
+
+    const clickEventMiddle = new MouseEvent('click', { bubbles: true })
+    Object.defineProperty(clickEventMiddle, 'target', { value: view })
+    Object.defineProperty(clickEventMiddle, 'clientY', { value: 400 })
+    document.dispatchEvent(clickEventMiddle)
+
+    expect(onMiddleTap).toHaveBeenCalledTimes(2)
+
+    input.cleanup()
+
+    if (originalMaxTouchPoints) {
+      Object.defineProperty(navigator, 'maxTouchPoints', originalMaxTouchPoints)
+    }
+    if (originalOntouchstart) {
+      Object.defineProperty(window, 'ontouchstart', originalOntouchstart)
+    }
+    Object.defineProperty(window, 'innerHeight', { value: originalInnerHeight, configurable: true })
   })
 
   it('stops responding to document keydown after cleanup', () => {

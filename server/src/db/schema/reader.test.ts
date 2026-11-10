@@ -1,4 +1,4 @@
-import { getTableConfig } from 'drizzle-orm/pg-core';
+import { PgDialect, getTableConfig } from 'drizzle-orm/pg-core';
 
 import {
   annotations,
@@ -6,6 +6,7 @@ import {
   readerDefaultPreferences,
   readerPreferences,
   readingProgress,
+  readingSessionSyncCursors,
   readingSessions,
   userReadingDailyStats,
 } from './reader';
@@ -58,8 +59,19 @@ describe('reader schema', () => {
     expect(indexNames).toContain('rs_user_started_at_idx');
     expect(indexNames).toContain('rs_book_file_started_at_idx');
     expect(indexNames).toContain('rs_user_book_file_idx');
+    expect(indexNames).toContain('rs_user_book_source_device_started_idx');
     expect(fkMap.get('user_id')?.onDelete).toBe('cascade');
     expect(fkMap.get('book_file_id')?.onDelete).toBe('cascade');
+  });
+
+  it('keeps cumulative sync cursors isolated by user, book, source, and device', () => {
+    const config = getTableConfig(readingSessionSyncCursors);
+    const pkColumns = config.primaryKeys.map((pk) => pk.columns.map((col) => col.name));
+    const fkMap = fkByColumn(readingSessionSyncCursors);
+
+    expect(pkColumns).toContainEqual(['user_id', 'book_id', 'source', 'source_device_key']);
+    expect(fkMap.get('user_id')?.onDelete).toBe('cascade');
+    expect(fkMap.get('book_id')?.onDelete).toBe('cascade');
   });
 
   it('stores user daily reading aggregates keyed by user, library, and day', () => {
@@ -91,6 +103,16 @@ describe('reader schema', () => {
     expect(annotationFks.get('book_id')?.onDelete).toBe('cascade');
     expect(annotations.color.default).toBe('yellow');
     expect(annotations.style.default).toBe('highlight');
+  });
+
+  it('frees a deleted audio bookmark position but keeps CFI tombstones unique for KOReader revival', () => {
+    const dialect = new PgDialect();
+    const predicates = new Map(getTableConfig(bookmarks).indexes.map((idx) => [idx.config.name, idx.config.where]));
+    const positionPredicate = dialect.sqlToQuery(predicates.get('bookmarks_user_book_pos_uidx')!).sql;
+    const cfiPredicate = dialect.sqlToQuery(predicates.get('bookmarks_user_book_cfi_uidx')!).sql;
+
+    expect(positionPredicate).toContain('"deleted_at" is null');
+    expect(cfiPredicate).not.toContain('deleted_at');
   });
 
   it('keeps reader preference uniqueness scoped to user and format/file', () => {

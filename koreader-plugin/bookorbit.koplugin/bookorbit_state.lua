@@ -31,8 +31,21 @@ local function deepCopy(value)
     return copy
 end
 
-function BookOrbitState.open()
+function BookOrbitState.open(account_identity)
     local self = setmetatable({}, BookOrbitState)
+    if account_identity then
+        local legacy = LuaSettings:open(DataStorage:getSettingsDir() .. "/" .. STATE_FILE)
+        local owner = legacy:readSetting("account_identity")
+        if not owner and account_identity ~= "anonymous" then
+            legacy:saveSetting("account_identity", account_identity)
+            self.settings = legacy
+            self:flush()
+            owner = account_identity
+        end
+        if owner ~= account_identity then
+            self.filename = "bookorbit_sync_state_" .. require("ffi/sha2").md5(account_identity) .. ".lua"
+        end
+    end
     self:reload()
     return self
 end
@@ -42,6 +55,7 @@ function BookOrbitState.snapshot(tables, flush_handler)
         books = deepCopy(tables.books or {}),
         unmatched = deepCopy(tables.unmatched or {}),
         files = deepCopy(tables.files or {}),
+        statsRows = deepCopy(tables.statsRows or {}),
         global = deepCopy(tables.global or {}),
         flush_handler = flush_handler,
     }, BookOrbitState)
@@ -51,18 +65,54 @@ end
 -- reference, so a reload cannot strand a caller on an orphaned snapshot it
 -- would later flush over newer state.
 function BookOrbitState:reload()
-    local settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/" .. STATE_FILE)
+    self.files_by_digest = nil
+    local settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/" .. (self.filename or STATE_FILE))
     self.settings = settings
     -- readSetting with a default persists the returned live table on flush.
     self.books = settings:readSetting("books", {})
     self.unmatched = settings:readSetting("unmatched", {})
     self.files = settings:readSetting("files", {})
+    self.statsRows = settings:readSetting("statsRows", {})
     self.global = settings:readSetting("global", {})
     return self
 end
 
 function BookOrbitState:getBook(md5)
     return self.books[md5]
+end
+
+-- A partial MD5 may identify several KOReader statistics rows. Those rows
+-- need independent cursors: advancing one book's watermark must never hide
+-- an older event belonging to another book with the same digest. Row ids are
+-- local to statistics.sqlite3, so the persisted metadata guards against an id
+-- being reused after that database is rebuilt.
+function BookOrbitState:getStatsRow(id, md5, title, authors)
+    id = tonumber(id)
+    if not id or not md5 then return nil end
+    local key = tostring(id)
+    local row = self.statsRows[key]
+    if not row or row.md5 ~= md5 or row.title ~= title or row.authors ~= authors then
+        row = {
+            md5 = md5,
+            title = title,
+            authors = authors,
+            statsWatermark = 0,
+        }
+        self.statsRows[key] = row
+    end
+    row.statsWatermark = row.statsWatermark or 0
+    return row
+end
+
+function BookOrbitState:bindStatsRow(id, md5, title, authors, book_file_id, book_id)
+    local row = self:getStatsRow(id, md5, title, authors)
+    if not row then return nil end
+    if row.bookFileId ~= book_file_id or row.bookId ~= book_id then
+        row.statsWatermark = 0
+    end
+    row.bookFileId = book_file_id
+    row.bookId = book_id
+    return row
 end
 
 -- Maps BookOrbit bookId -> local file path and bookFileId -> local file path
@@ -90,8 +140,10 @@ end
 -- folder merge re-parents a file to another book without changing its id. The
 -- token the match was verified against is stored alongside the time so one
 -- library change does not force a request on every later book sync until the
--- user runs a full sweep.
-function BookOrbitState:setMatched(md5, book_file_id, book_id, file, verified_version)
+-- user runs a full sweep. `position_compatible` is the match's positionCompatible
+-- field: false marks a copy whose bytes differ from the library file, which the
+-- server matches but cannot place highlights or exact positions in.
+function BookOrbitState:setMatched(md5, book_file_id, book_id, file, verified_version, position_compatible)
     local previous = self.books[md5]
     local identity_changed = previous ~= nil
         and (previous.fileId ~= book_file_id or previous.bookId ~= book_id)
@@ -104,6 +156,7 @@ function BookOrbitState:setMatched(md5, book_file_id, book_id, file, verified_ve
     book.annCount = book.annCount or 0
     book.matchVerifiedAt = os.time()
     book.matchVerifiedVersion = verified_version or (self.global and self.global.libraryVersion) or nil
+    book.positionIncompatible = position_compatible == false or nil
     self.books[md5] = book
     self.unmatched[md5] = nil
 end
@@ -151,6 +204,14 @@ function BookOrbitState.applyLibraryVersion(state, version, now)
     return changed
 end
 
+-- A highlight or bookmark exchange that learns the copy is position
+-- incompatible records it here, so later exchanges skip the book until the next
+-- match check says otherwise.
+function BookOrbitState:markPositionIncompatible(md5)
+    local book = self.books[md5]
+    if book then book.positionIncompatible = true end
+end
+
 function BookOrbitState:setUnmatched(md5)
     self.books[md5] = nil
     self.unmatched[md5] = os.time()
@@ -158,12 +219,59 @@ end
 
 function BookOrbitState:rememberFile(file, md5)
     if file and md5 then
+        if self.files[file] ~= md5 then self.files_by_digest = nil end
         self.files[file] = md5
         local book = self.books[md5]
         if book and not book.file then
             book.file = file
         end
     end
+end
+
+-- Copies share a server rendition but have separate sidecars. An incomplete
+-- local copy cannot authoritatively delete annotations belonging to another.
+function BookOrbitState:hasOtherCopy(md5, file)
+    if not self.files_by_digest then
+        self.files_by_digest = {}
+        for path, digest in pairs(self.files) do
+            local paths = self.files_by_digest[digest] or {}
+            paths[#paths + 1] = path
+            self.files_by_digest[digest] = paths
+        end
+    end
+    for _, path in ipairs(self.files_by_digest[md5] or {}) do
+        if path ~= file and lfs.attributes(path, "mode") == "file" then return true end
+    end
+    return false
+end
+
+-- Repairs a path whose cached digest no longer matches the file on disk. A
+-- server identity is never copied between digests: only an identity already
+-- verified for the recomputed digest may be used to recover an ambiguous
+-- server match.
+function BookOrbitState:repairFileIdentity(file, old_md5, new_md5)
+    if not file or not new_md5 then return nil end
+    self.files_by_digest = nil
+    self.files[file] = new_md5
+
+    if old_md5 and old_md5 ~= new_md5 then
+        local old_book = self.books[old_md5]
+        if old_book and old_book.file == file then
+            old_book.file = nil
+            BookOrbitState.expireMatch(old_book)
+        end
+        self.unmatched[new_md5] = nil
+    end
+
+    local new_book = self.books[new_md5]
+    if new_book then
+        new_book.file = file
+        if old_md5 ~= new_md5 then
+            BookOrbitState.expireMatch(new_book)
+            new_book.statsWatermark = 0
+        end
+    end
+    return new_book
 end
 
 function BookOrbitState:flush()

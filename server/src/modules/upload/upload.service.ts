@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { access as fsAccess, stat } from 'fs/promises';
 import { basename, dirname, extname, join, relative } from 'path';
@@ -6,11 +6,15 @@ import { Readable } from 'stream';
 import { and, asc, eq } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
-import { formatSeriesIndex } from '../../common/utils/series-index-format.utils';
+import { splitMetadataIsbn } from '../../common/text-match/isbn-normalize';
+import { buildPatternTokens, patternReferencesToken } from '../../common/utils/pattern-tokens.utils';
+import { selectPrimaryFileKeepingCurrent } from '../../common/utils/primary-file-selection.utils';
 
 import { DB } from '../../db';
+import { realignAudioTrackOrder } from '../../db/audio-track-order';
 import * as schema from '../../db/schema';
 import { books, bookFiles, libraries, libraryFolders } from '../../db/schema';
+import { FileLockService, bookOperationLockKey } from '../../common/services/file-lock.service';
 import type { RequestUser } from '../../common/types/request-user';
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import { LibraryService } from '../library/library.service';
@@ -18,18 +22,24 @@ import { UploadValidatorService } from './upload-validator.service';
 import { UploadStorageService } from './upload-storage.service';
 import { UploadProcessorService } from './upload-processor.service';
 import { FileRenameService } from '../file-write/file-rename.service';
-import { resolveDownloadFilename, resolveUploadPath } from '@bookorbit/types';
+import { isAudioFormat, resolveUploadPath } from '@bookorbit/types';
 import type { AddBookFileResult, UploadResult } from '@bookorbit/types';
 import { extractEpubMetadata } from '../metadata/lib/epub';
 import { extractCbzMetadata, extractCbrMetadata, extractCb7Metadata } from '../metadata/lib/cbz-metadata';
 import { parseMobiFile } from '../metadata/lib/mobi-parser';
 import { parsePdfFile, type PdfParseWarning } from '../metadata/lib/pdf-parser';
+import { extractAudioMetadata } from '../metadata/extractors/audio.extractor';
 import { computeFileHash } from '../scanner/lib/hash';
 import { resolveExistingPathSpelling } from '../../common/utils/path-identity.utils';
+import { resolveSingleFileBookPath } from '../../common/utils/book-path.utils';
+import { inspectEpubMediaOverlayFields, mediaOverlayCapabilityFromFields } from '../reader/epub/epub-media-overlay-capability';
+import { PathPolicyService } from '../path/path-policy.service';
+import { FORMATS_WITH_UNBOUNDED_METADATA_READS, MAX_BUFFERED_METADATA_BYTES } from '../../common/constants/upload.constants';
+import { UploadDestinationExistsError } from './upload-storage.service';
+import { uploadError } from './upload-errors';
 
 type Db = NodePgDatabase<typeof schema>;
-
-type PrimaryFileCandidate = Pick<typeof bookFiles.$inferSelect, 'id' | 'format' | 'sizeBytes'>;
+type StoredUploadResult = UploadResult & { absolutePath: string; created: boolean; libraryId: number };
 
 @Injectable()
 export class UploadService {
@@ -43,6 +53,8 @@ export class UploadService {
     private readonly storage: UploadStorageService,
     private readonly processor: UploadProcessorService,
     private readonly moduleRef: ModuleRef,
+    private readonly pathPolicy: PathPolicyService,
+    private readonly fileLocks: FileLockService,
   ) {}
 
   private resolveFileRenameService(): FileRenameService | null {
@@ -53,7 +65,52 @@ export class UploadService {
     }
   }
 
+  private async inspectMediaOverlayFields(absolutePath: string, format: string | null) {
+    return inspectEpubMediaOverlayFields(absolutePath, format, (err) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[upload.media_overlay_capability] [fail] path="${sanitizeLogValue(absolutePath)}" errorClass=${error.constructor.name} error="${sanitizeLogValue(error.message)}" - EPUB media-overlay inspection failed`,
+      );
+    });
+  }
+
   async upload(libraryId: number, folderId: number | undefined, rawFilename: string, fileStream: Readable, user: RequestUser): Promise<UploadResult> {
+    const stored = await this.storeUpload(libraryId, folderId, rawFilename, fileStream, user);
+    if (stored.created) {
+      this.processor.processNewBookImportAsync(stored.bookId, stored.libraryId, stored.absolutePath, stored.format);
+    } else {
+      this.processor.extractMetadataAsync(stored.bookId, stored.absolutePath, stored.format);
+    }
+    return { bookId: stored.bookId, filename: stored.filename, format: stored.format, sizeBytes: stored.sizeBytes };
+  }
+
+  uploadForSession(
+    libraryId: number,
+    folderId: number | undefined,
+    rawFilename: string,
+    fileStream: Readable,
+    user: RequestUser,
+    uploadSessionId: string,
+  ): Promise<StoredUploadResult> {
+    return this.storeUpload(libraryId, folderId, rawFilename, fileStream, user, uploadSessionId);
+  }
+
+  async processStoredUpload(stored: StoredUploadResult): Promise<void> {
+    if (stored.created) {
+      await this.processor.processNewBookImport(stored.bookId, stored.libraryId, stored.absolutePath, stored.format);
+    } else {
+      await this.processor.extractMetadata(stored.bookId, stored.absolutePath, stored.format);
+    }
+  }
+
+  private async storeUpload(
+    libraryId: number,
+    folderId: number | undefined,
+    rawFilename: string,
+    fileStream: Readable,
+    user: RequestUser,
+    uploadSessionId?: string,
+  ): Promise<StoredUploadResult> {
     const event = 'upload.book';
     const startedAt = Date.now();
     this.logger.log(
@@ -70,46 +127,61 @@ export class UploadService {
     const format = this.validator.validateFormat(filename, library.allowedFormats);
 
     const { tempPath, sizeBytes } = await this.storage.streamToTemp(fileStream);
+    if (sizeBytes === 0) {
+      await this.storage.cleanup(tempPath);
+      throw uploadError.empty();
+    }
     let destinationPath: string | null = null;
     let shouldCleanupDestination = false;
 
     try {
+      await this.validator.validateContent(tempPath, format);
       const { absolutePath, bookFolderPath } = await this.resolveDestination(library, folder.path, tempPath, filename, format);
+      await this.pathPolicy.assertWithinRoot(absolutePath, folder.path);
       destinationPath = absolutePath;
 
-      if (await this.destinationExists(absolutePath)) {
-        throw new ConflictException(`A file named "${basename(absolutePath)}" already exists at the target location`);
-      }
+      // The file may land in a book that is already there, so it lands under that book's lock, the
+      // one write-back, rename and merge take. Spelled as on disk, which is how the book row has it.
+      const lockFolder = (await resolveExistingPathSpelling(bookFolderPath, folder.path)) ?? bookFolderPath;
+      const { bookId, created, persistedAbsolutePath } = await this.processor.withFolderBookLock(libraryId, lockFolder, async () => {
+        if (await this.destinationExists(absolutePath)) {
+          throw uploadError.destinationConflict(`A file named "${basename(absolutePath)}" already exists at the target location`);
+        }
 
-      shouldCleanupDestination = true;
-      await this.storage.moveToPath(tempPath, absolutePath);
+        shouldCleanupDestination = true;
+        await this.storage.moveToPath(tempPath, absolutePath);
 
-      const persistedAbsolutePath = (await resolveExistingPathSpelling(absolutePath, folder.path)) ?? absolutePath;
-      const persistedBookFolderPath = bookFolderPath === absolutePath ? persistedAbsolutePath : dirname(persistedAbsolutePath);
-      const persistedRelPath = relative(folder.path, persistedAbsolutePath);
-      destinationPath = persistedAbsolutePath;
+        const persistedPath = (await resolveExistingPathSpelling(absolutePath, folder.path)) ?? absolutePath;
+        const persistedBookFolderPath = bookFolderPath === absolutePath ? persistedPath : dirname(persistedPath);
+        const persistedRelPath = relative(folder.path, persistedPath);
+        destinationPath = persistedPath;
 
-      const { bookId, created } = await this.processor.createBookRecord(
-        libraryId,
-        folder.id,
-        persistedBookFolderPath,
-        persistedAbsolutePath,
-        persistedRelPath,
-        format,
-        sizeBytes,
-      );
-
-      if (created) {
-        this.processor.processNewBookImportAsync(bookId, libraryId, persistedAbsolutePath, format);
-      } else {
-        this.processor.extractMetadataAsync(bookId, persistedAbsolutePath, format);
-      }
+        const createArgs = [libraryId, folder.id, persistedBookFolderPath, persistedPath, persistedRelPath, format, sizeBytes] as const;
+        const record = uploadSessionId
+          ? await this.processor.createBookRecord(...createArgs, { uploadSessionId })
+          : await this.processor.createBookRecord(...createArgs);
+        return { ...record, persistedAbsolutePath: persistedPath };
+      });
 
       this.logger.log(
         `[${event}] [end] libraryId=${libraryId} userId=${user.id} folderId=${folder.id} bookId=${bookId} format=${format} sizeBytes=${sizeBytes} durationMs=${Date.now() - startedAt} - upload completed`,
       );
-      return { bookId, filename: basename(persistedAbsolutePath), format, sizeBytes };
-    } catch (err) {
+      return {
+        bookId,
+        filename: basename(persistedAbsolutePath),
+        format,
+        sizeBytes,
+        absolutePath: persistedAbsolutePath,
+        created,
+        libraryId,
+      };
+    } catch (caught) {
+      let err = caught;
+      if (err instanceof UploadDestinationExistsError) {
+        err = uploadError.destinationConflict(
+          `A file named "${destinationPath ? basename(destinationPath) : filename}" already exists at the target location`,
+        );
+      }
       const { errorClass, errorMessage } = this.parseError(err);
       this.logger.error(
         `[${event}] [fail] libraryId=${libraryId} userId=${user.id} folderId=${folder.id} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - upload failed`,
@@ -160,130 +232,72 @@ export class UploadService {
 
     if (sizeBytes === 0) {
       await this.storage.cleanup(tempPath);
-      throw new BadRequestException('File must not be empty');
+      throw uploadError.empty();
     }
 
     let destination: string | null = null;
     let shouldCleanupDestination = false;
 
     try {
+      await this.validator.validateContent(tempPath, format);
       const fileHash = await computeFileHash(tempPath);
 
-      const [existingWithHash] = await this.db
-        .select({ id: bookFiles.id })
-        .from(bookFiles)
-        .where(and(eq(bookFiles.bookId, bookId), eq(bookFiles.fileHash, fileHash)))
-        .limit(1);
-
-      if (existingWithHash) {
-        throw new ConflictException('This file is already attached to this book');
-      }
-
-      destination = join(bookRow.folderPath, filename);
-
-      if (await this.destinationExists(destination)) {
-        throw new ConflictException(`A file named "${filename}" already exists in this book's folder`);
-      }
-
-      shouldCleanupDestination = true;
-      await this.storage.moveToPath(tempPath, destination);
-      // File is on disk. Do not delete it on any subsequent failure — the scanner
-      // will reconcile any orphan. This also prevents the catch block from deleting
-      // a file that a concurrent upload may have written to the same path.
-      shouldCleanupDestination = false;
-
-      const fileStat = await stat(destination, { bigint: true });
-      const ino = fileStat.ino;
-      const relPath = relative(bookRow.libraryFolderPath, destination);
-
-      const { inserted, isPrimary, finalStatus } = await this.db.transaction(async (tx) => {
-        const [lockedBook] = await tx
-          .select({
-            primaryFileId: books.primaryFileId,
-            status: books.status,
-            formatPriority: libraries.formatPriority,
-          })
+      // The upload streamed without the lock; the write into the folder takes it, and re-reads the
+      // folder, because a merge or rename may have moved the book while the bytes arrived.
+      const result = await this.fileLocks.withLock(bookOperationLockKey(bookId), async () => {
+        const [current] = await this.db
+          .select({ folderPath: books.folderPath, libraryFolderId: books.libraryFolderId, libraryFolderPath: libraryFolders.path })
           .from(books)
-          .innerJoin(libraries, eq(books.libraryId, libraries.id))
+          .innerJoin(libraryFolders, eq(books.libraryFolderId, libraryFolders.id))
           .where(eq(books.id, bookId))
-          .for('update', { of: books })
+          .limit(1);
+        if (!current) throw new NotFoundException(`Book ${bookId} not found`);
+
+        const [existingWithHash] = await this.db
+          .select({ id: bookFiles.id })
+          .from(bookFiles)
+          .where(and(eq(bookFiles.bookId, bookId), eq(bookFiles.fileHash, fileHash)))
           .limit(1);
 
-        if (!lockedBook) throw new NotFoundException(`Book ${bookId} not found`);
-
-        const [inserted] = await tx
-          .insert(bookFiles)
-          .values({
-            bookId,
-            libraryFolderId: bookRow.libraryFolderId,
-            absolutePath: destination,
-            relPath,
-            ino,
-            sizeBytes,
-            mtime: fileStat.mtime,
-            fileHash,
-            format,
-            role: 'content',
-          })
-          .returning({
-            id: bookFiles.id,
-            format: bookFiles.format,
-            role: bookFiles.role,
-            sizeBytes: bookFiles.sizeBytes,
-            absolutePath: bookFiles.absolutePath,
-            createdAt: bookFiles.createdAt,
-            durationSeconds: bookFiles.durationSeconds,
-          });
-
-        if (!inserted) throw new Error('Failed to insert book file record');
-
-        const contentFiles = await tx
-          .select({ id: bookFiles.id, format: bookFiles.format, sizeBytes: bookFiles.sizeBytes })
-          .from(bookFiles)
-          .where(and(eq(bookFiles.bookId, bookId), eq(bookFiles.role, 'content')))
-          .orderBy(asc(bookFiles.id));
-
-        const winner = this.pickPrimaryFile(contentFiles, lockedBook.primaryFileId, lockedBook.formatPriority);
-        const nextPrimaryFileId = winner?.id ?? null;
-        const needsPrimaryUpdate = nextPrimaryFileId !== lockedBook.primaryFileId;
-        const needsStatusUpdate = lockedBook.status === 'missing';
-
-        if (needsPrimaryUpdate || needsStatusUpdate) {
-          await tx
-            .update(books)
-            .set({
-              ...(needsPrimaryUpdate ? { primaryFileId: nextPrimaryFileId } : {}),
-              ...(needsStatusUpdate ? { status: 'present' } : {}),
-              updatedAt: new Date(),
-            })
-            .where(eq(books.id, bookId));
+        if (existingWithHash) {
+          throw uploadError.duplicate('This file is already attached to this book');
         }
 
-        return {
-          inserted,
-          isPrimary: inserted.id === nextPrimaryFileId,
-          finalStatus: needsStatusUpdate ? 'present' : lockedBook.status,
-        };
+        destination = join(current.folderPath, filename);
+        await this.pathPolicy.assertWithinRoot(destination, current.folderPath);
+
+        if (await this.destinationExists(destination)) {
+          throw uploadError.destinationConflict(`A file named "${filename}" already exists in this book's folder`);
+        }
+
+        shouldCleanupDestination = true;
+        await this.storage.moveToPath(tempPath, destination);
+        // File is on disk. Do not delete it on any subsequent failure; the scanner
+        // will reconcile any orphan. This also prevents the catch block from deleting
+        // a file that a concurrent upload may have written to the same path.
+        shouldCleanupDestination = false;
+
+        return this.registerBookFile({
+          bookId,
+          libraryFolderId: current.libraryFolderId,
+          libraryFolderPath: current.libraryFolderPath,
+          destination,
+          sizeBytes,
+          fileHash,
+          format,
+        });
       });
 
-      this.processor.extractAudioDurationAsync(bookId, destination, format);
-
       this.logger.log(
-        `[${event}] [end] bookId=${bookId} userId=${user.id} fileId=${inserted.id} format=${format} sizeBytes=${sizeBytes} durationMs=${Date.now() - startedAt} - add file to book completed`,
+        `[${event}] [end] bookId=${bookId} userId=${user.id} fileId=${result.id} format=${format} sizeBytes=${sizeBytes} durationMs=${Date.now() - startedAt} - add file to book completed`,
       );
 
-      return {
-        id: inserted.id,
-        format: inserted.format,
-        role: isPrimary ? 'primary' : inserted.role,
-        sizeBytes: inserted.sizeBytes,
-        absolutePath: inserted.absolutePath,
-        createdAt: inserted.createdAt.toISOString(),
-        filename: basename(destination),
-        durationSeconds: inserted.durationSeconds,
-        bookStatus: finalStatus,
-      };
-    } catch (err) {
+      return result;
+    } catch (caught) {
+      let err = caught;
+      if (err instanceof UploadDestinationExistsError) {
+        err = uploadError.destinationConflict(`A file named "${filename}" already exists in this book's folder`);
+      }
       const errorClass = err instanceof Error ? err.name : 'Error';
       const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
@@ -297,16 +311,120 @@ export class UploadService {
     }
   }
 
-  private pickPrimaryFile(files: PrimaryFileCandidate[], currentPrimaryFileId: number | null, formatPriority: string[]): PrimaryFileCandidate | null {
-    const candidates = files.filter((file) => (file.sizeBytes ?? 0) > 0);
-    if (candidates.length === 0) return null;
+  /**
+   * Records a file that is already in place inside the book folder: inserts the row, re-picks the
+   * primary file and queues the same follow-ups an upload gets. Shared by uploads and by files the
+   * server generates itself, which must not go through the upload size limit.
+   */
+  async registerBookFile(params: {
+    bookId: number;
+    libraryFolderId: number;
+    libraryFolderPath: string;
+    destination: string;
+    sizeBytes: number;
+    fileHash: string;
+    format: string;
+  }): Promise<AddBookFileResult> {
+    const { bookId, libraryFolderId, libraryFolderPath, destination, sizeBytes, fileHash, format } = params;
+    const fileStat = await stat(destination, { bigint: true });
+    const ino = fileStat.ino;
+    const relPath = relative(libraryFolderPath, destination);
+    const mediaOverlayFields = await this.inspectMediaOverlayFields(destination, format);
 
-    const currentPrimary = candidates.find((file) => file.id === currentPrimaryFileId) ?? null;
-    const preferredFormat = formatPriority.find((candidateFormat) => candidates.some((file) => file.format === candidateFormat));
+    const { inserted, isPrimary, finalStatus } = await this.db.transaction(async (tx) => {
+      const [lockedBook] = await tx
+        .select({
+          primaryFileId: books.primaryFileId,
+          status: books.status,
+          formatPriority: libraries.formatPriority,
+        })
+        .from(books)
+        .innerJoin(libraries, eq(books.libraryId, libraries.id))
+        .where(eq(books.id, bookId))
+        .for('update', { of: books })
+        .limit(1);
 
-    if (preferredFormat === undefined) return currentPrimary ?? candidates[0] ?? null;
-    if (currentPrimary?.format === preferredFormat) return currentPrimary;
-    return candidates.find((file) => file.format === preferredFormat) ?? null;
+      if (!lockedBook) throw new NotFoundException(`Book ${bookId} not found`);
+
+      const [inserted] = await tx
+        .insert(bookFiles)
+        .values({
+          bookId,
+          libraryFolderId,
+          absolutePath: destination,
+          relPath,
+          ino,
+          sizeBytes,
+          mtime: fileStat.mtime,
+          fileHash,
+          format,
+          role: 'content',
+          ...mediaOverlayFields,
+        })
+        .returning({
+          id: bookFiles.id,
+          format: bookFiles.format,
+          role: bookFiles.role,
+          sizeBytes: bookFiles.sizeBytes,
+          absolutePath: bookFiles.absolutePath,
+          createdAt: bookFiles.createdAt,
+          durationSeconds: bookFiles.durationSeconds,
+        });
+
+      if (!inserted) throw new Error('Failed to insert book file record');
+      // A track added by hand has no number yet, which would play it after every other track.
+      if (isAudioFormat(format)) await realignAudioTrackOrder(tx, bookId);
+
+      const contentFiles = await tx
+        .select({
+          id: bookFiles.id,
+          format: bookFiles.format,
+          sizeBytes: bookFiles.sizeBytes,
+          mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
+        })
+        .from(bookFiles)
+        .where(and(eq(bookFiles.bookId, bookId), eq(bookFiles.role, 'content')))
+        .orderBy(asc(bookFiles.id));
+
+      const winner = selectPrimaryFileKeepingCurrent(contentFiles, lockedBook.primaryFileId, lockedBook.formatPriority);
+      const nextPrimaryFileId = winner?.id ?? null;
+      const needsPrimaryUpdate = nextPrimaryFileId !== lockedBook.primaryFileId;
+      const needsStatusUpdate = lockedBook.status === 'missing';
+
+      if (needsPrimaryUpdate || needsStatusUpdate) {
+        await tx
+          .update(books)
+          .set({
+            ...(needsPrimaryUpdate ? { primaryFileId: nextPrimaryFileId } : {}),
+            ...(needsStatusUpdate ? { status: 'present' } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(books.id, bookId));
+      }
+
+      return {
+        inserted,
+        isPrimary: inserted.id === nextPrimaryFileId,
+        finalStatus: needsStatusUpdate ? 'present' : lockedBook.status,
+      };
+    });
+
+    this.processor.extractAudioDurationAsync(bookId, destination, format);
+    this.processor.extractAddedAudioChaptersAsync(bookId, format);
+    this.processor.reconcileCoversAsync([bookId]);
+
+    return {
+      id: inserted.id,
+      format: inserted.format,
+      role: isPrimary ? 'primary' : inserted.role,
+      sizeBytes: inserted.sizeBytes,
+      absolutePath: inserted.absolutePath,
+      createdAt: inserted.createdAt.toISOString(),
+      filename: basename(destination),
+      durationSeconds: inserted.durationSeconds,
+      mediaOverlay: mediaOverlayCapabilityFromFields({ format: inserted.format, ...mediaOverlayFields }),
+      bookStatus: finalStatus,
+    };
   }
 
   async renameBookFiles(bookId: number, user: RequestUser): Promise<void> {
@@ -318,7 +436,7 @@ export class UploadService {
 
     if (!bookRow) throw new NotFoundException(`Book ${bookId} not found`);
 
-    await this.libraryService.verifyUserAccess(user.id, bookRow.libraryId, user.isSuperuser);
+    await this.libraryService.verifyUserAccessLevel(user.id, bookRow.libraryId, user.isSuperuser, 'editor');
 
     const fileRenameService = this.resolveFileRenameService();
     if (!fileRenameService) {
@@ -330,68 +448,64 @@ export class UploadService {
     this.logger.log(`[${event}] [end] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} - rename book files completed`);
   }
 
+  /**
+   * Both organization modes keep the pattern's folder segments, so an upload lands where the
+   * rename and move services would put the same book. The modes differ only in what counts as
+   * the book: in `book_per_file` the file itself is the book key, not the folder holding it.
+   */
   private async resolveDestination(
     library: { name?: string | null; fileNamingPattern?: string | null; organizationMode?: string | null },
     libraryFolderPath: string,
     tempPath: string,
     filename: string,
     format: string,
-  ): Promise<{ absolutePath: string; bookFolderPath: string; relPath: string }> {
+  ): Promise<{ absolutePath: string; bookFolderPath: string }> {
     const pattern =
       library.fileNamingPattern ??
       (library.organizationMode === 'book_per_folder'
         ? await this.appSettings.getUploadPatternBookPerFolder()
         : await this.appSettings.getUploadPattern());
     const sanitizeForCrossPlatform = await this.appSettings.isCrossPlatformPathSanitizationEnabled();
+    const isBookPerFile = library.organizationMode === 'book_per_file';
 
     if (pattern) {
       const stem = basename(filename, extname(filename));
-      const tokens = await this.buildPatternTokens(tempPath, format, stem, library.name);
-      if (library.organizationMode === 'book_per_file') {
-        const resolvedFilename = resolveDownloadFilename(pattern, tokens, format, { sanitizeForCrossPlatform });
-        if (resolvedFilename) {
-          const absolutePath = join(libraryFolderPath, resolvedFilename);
-          return {
-            absolutePath,
-            bookFolderPath: absolutePath,
-            relPath: resolvedFilename,
-          };
-        }
-      } else {
-        const resolved = resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
+      const mediaOverlayAvailable = patternReferencesToken(pattern, 'readaloud')
+        ? (await this.inspectMediaOverlayFields(tempPath, format)).mediaOverlayAvailable
+        : false;
+      const tokens = await this.buildUploadPatternTokens(tempPath, format, stem, library.name, mediaOverlayAvailable);
+      const resolved = resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
 
-        if (resolved) {
-          const absolutePath = join(libraryFolderPath, resolved);
-          const relPath = resolved;
-          const bookFolderPath = dirname(absolutePath);
-          return { absolutePath, bookFolderPath, relPath };
-        }
+      if (resolved) {
+        const absolutePath = join(libraryFolderPath, resolved);
+        return { absolutePath, bookFolderPath: resolveSingleFileBookPath(absolutePath, libraryFolderPath, library.organizationMode) };
       }
     }
 
-    if (library.organizationMode === 'book_per_file') {
+    if (isBookPerFile) {
       const absolutePath = join(libraryFolderPath, filename);
-      return {
-        absolutePath,
-        bookFolderPath: absolutePath,
-        relPath: filename,
-      };
+      return { absolutePath, bookFolderPath: absolutePath };
     }
 
     const stem = basename(filename, extname(filename));
     const bookFolderPath = join(libraryFolderPath, stem);
-    const absolutePath = join(bookFolderPath, filename);
-    const relPath = join(stem, filename);
-    return { absolutePath, bookFolderPath, relPath };
+    return { absolutePath: join(bookFolderPath, filename), bookFolderPath };
   }
 
-  private async buildPatternTokens(tempPath: string, format: string, stem: string, libraryName?: string | null): Promise<Record<string, string>> {
-    const base: Record<string, string> = { originalFilename: stem, extension: format };
-    if (libraryName) base['library'] = libraryName;
+  private async buildUploadPatternTokens(
+    tempPath: string,
+    format: string,
+    stem: string,
+    libraryName?: string | null,
+    mediaOverlayAvailable = false,
+  ): Promise<Record<string, string>> {
+    const fallback = buildPatternTokens({ metadata: {}, originalStem: stem, format, libraryName, mediaOverlayAvailable });
     const event = 'upload.pattern_tokens';
     const startedAt = Date.now();
 
     try {
+      const fileSize = (await stat(tempPath)).size;
+      if (FORMATS_WITH_UNBOUNDED_METADATA_READS.has(format) && fileSize > MAX_BUFFERED_METADATA_BYTES) return fallback;
       let parsed: {
         title?: string | null;
         subtitle?: string | null;
@@ -399,9 +513,11 @@ export class UploadService {
         publishedYear?: number | null;
         language?: string | null;
         seriesName?: string | null;
-        seriesIndex?: number | null;
+        seriesIndex?: string | null;
         isbn13?: string | null;
+        isbn10?: string | null;
         authors: { name: string }[];
+        narrators?: string[];
       } | null = null;
 
       if (format === 'epub') {
@@ -421,7 +537,7 @@ export class UploadService {
             publisher: mobi.publisher,
             publishedYear: year,
             language: mobi.language,
-            isbn13: mobi.isbn,
+            ...splitMetadataIsbn(mobi.isbn),
             seriesName: null,
             seriesIndex: null,
             authors: mobi.authors.map((name) => ({ name })),
@@ -435,22 +551,21 @@ export class UploadService {
         if (pdf) {
           parsed = { title: pdf.title, publisher: pdf.publisher, authors: pdf.authors, seriesName: null, seriesIndex: null };
         }
+      } else if (isAudioFormat(format)) {
+        parsed = await extractAudioMetadata(tempPath);
       }
 
-      if (!parsed) return base;
+      if (!parsed) return fallback;
 
-      if (parsed.title) base['title'] = parsed.title;
-      if (parsed.subtitle) base['subtitle'] = parsed.subtitle;
-      if (parsed.publisher) base['publisher'] = parsed.publisher;
-      if (parsed.language) base['language'] = parsed.language;
-      if (parsed.isbn13) base['isbn'] = parsed.isbn13;
-      if (parsed.publishedYear) base['year'] = String(parsed.publishedYear);
-      if (parsed.seriesName) base['series'] = parsed.seriesName;
-      const seriesIndex = formatSeriesIndex(parsed.seriesIndex ?? null);
-      if (seriesIndex) base['seriesIndex'] = seriesIndex;
-      if (parsed.authors.length > 0) {
-        base['authors'] = parsed.authors.map((a) => a.name).join(', ');
-      }
+      return buildPatternTokens({
+        metadata: parsed,
+        authors: parsed.authors.map((author) => author.name),
+        narrators: parsed.narrators,
+        originalStem: stem,
+        format,
+        libraryName,
+        mediaOverlayAvailable,
+      });
     } catch (err) {
       const { errorClass, errorMessage } = this.parseError(err);
       this.logger.warn(
@@ -458,7 +573,7 @@ export class UploadService {
       );
     }
 
-    return base;
+    return fallback;
   }
 
   private parseError(err: unknown): { errorClass: string; errorMessage: string } {

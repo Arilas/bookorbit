@@ -2,7 +2,6 @@ import {
   BadRequestException,
   Body,
   Controller,
-  DefaultValuePipe,
   Delete,
   Get,
   HttpCode,
@@ -21,6 +20,7 @@ import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pag
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Auditable } from '../../common/decorators/auditable.decorator';
 import type { RequestUser } from '../../common/types/request-user';
+import { OptionalIntQueryPipe } from '../../common/pipes/optional-int-query.pipe';
 import { BookQueryPipe, JumpBucketsQueryPipe } from '../book/pipes/book-query.pipe';
 import { CollectionBooksDto } from './dto/collection-books.dto';
 import { CreateCollectionDto } from './dto/create-collection.dto';
@@ -161,8 +161,8 @@ export class CollectionController {
   getBooks(
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
-    @Query('page', new DefaultValuePipe(0), ParseIntPipe) page: number,
-    @Query('size', new DefaultValuePipe(50), ParseIntPipe) size: number,
+    @Query('page', new OptionalIntQueryPipe(0)) page: number,
+    @Query('size', new OptionalIntQueryPipe(50)) size: number,
     @Query('collapseSeries', new ParseBoolPipe({ optional: true })) collapseSeries?: boolean,
     @Query('q') q?: string,
   ) {

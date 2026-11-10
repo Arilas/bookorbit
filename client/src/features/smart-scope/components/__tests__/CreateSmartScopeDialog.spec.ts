@@ -26,6 +26,7 @@ function makeSmartScope(overrides: Partial<SmartScope> = {}): SmartScope {
     filter: null,
     defaultSort: [],
     isPublic: false,
+    coverAspectRatio: '2/3',
     syncToKobo: false,
     koboSyncEnabled: false,
     isOwner: true,
@@ -49,9 +50,9 @@ const IconPickerStub = defineComponent({
   },
 })
 
-function mountDialog() {
+function mountDialog(props: Record<string, unknown> = {}) {
   return mount(CreateSmartScopeDialog, {
-    props: { open: true },
+    props: { open: true, ...props },
     global: {
       stubs: {
         Teleport: true,
@@ -103,5 +104,16 @@ describe('CreateSmartScopeDialog', () => {
     await flushPromises()
 
     expect(mockState.createSmartScope).toHaveBeenCalledWith(expect.objectContaining({ isPublic: false, syncToKobo: false }))
+  })
+
+  it('offers sharing and Kobo sync, and routes to the new scope', async () => {
+    const wrapper = mountDialog()
+    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(2)
+
+    await fillRequiredFields(wrapper, 'Unread')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(mockState.push).toHaveBeenCalledWith({ name: 'smartScope', params: { id: 11 } })
   })
 })

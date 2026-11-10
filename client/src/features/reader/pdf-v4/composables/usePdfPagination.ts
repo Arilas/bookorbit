@@ -9,10 +9,11 @@ export interface UsePdfPaginationOptions {
   mode: ReadonlyRef<PdfReaderSettings['scrollMode']>
   scrollState: ReadonlyRef<{ currentPage: number; totalPages: number }>
   scroll: ReadonlyRef<Readonly<ScrollScope> | null>
+  touchPageTurningEnabled: ReadonlyRef<boolean>
   onActivity: () => void
 }
 
-export function usePdfPagination({ mode, scrollState, scroll, onActivity }: UsePdfPaginationOptions) {
+export function usePdfPagination({ mode, scrollState, scroll, touchPageTurningEnabled, onActivity }: UsePdfPaginationOptions) {
   let wheelDelta = 0
   let wheelUnlockTimer: ReturnType<typeof setTimeout> | null = null
   let touchStart: { x: number; y: number } | null = null
@@ -49,11 +50,14 @@ export function usePdfPagination({ mode, scrollState, scroll, onActivity }: UseP
     }
   }
 
-  function turnPage(direction: -1 | 1) {
+  // The scroll plugin moves its current page to the target when a turn starts, so a chained turn
+  // computes its target from the page already being scrolled to. Wheel and touch input keep the
+  // lock, because inertial scrolling emits many events for one gesture and would skip pages.
+  function turnPage(direction: -1 | 1, { chained = false }: { chained?: boolean } = {}) {
     const scope = getScrollScope()
     if (!scope) return
     try {
-      if (scope.getPageChangeState().isChanging) return
+      if (!chained && scope.getPageChangeState().isChanging) return
       const spreads = getSpreads(scope)
       if (spreads.length === 0) return
       const target = findAdjacentPage(spreads, pageRange.value.start, direction, scrollState.value.totalPages)
@@ -66,7 +70,7 @@ export function usePdfPagination({ mode, scrollState, scroll, onActivity }: UseP
 
   function previousPage() {
     onActivity()
-    if (mode.value === 'page') turnPage(-1)
+    if (mode.value === 'page') turnPage(-1, { chained: true })
     else {
       try {
         getScrollScope()?.scrollToPreviousPage(behavior.value)
@@ -78,7 +82,7 @@ export function usePdfPagination({ mode, scrollState, scroll, onActivity }: UseP
 
   function nextPage() {
     onActivity()
-    if (mode.value === 'page') turnPage(1)
+    if (mode.value === 'page') turnPage(1, { chained: true })
     else {
       try {
         getScrollScope()?.scrollToNextPage(behavior.value)
@@ -119,7 +123,7 @@ export function usePdfPagination({ mode, scrollState, scroll, onActivity }: UseP
 
   function handleTouchStart(event: TouchEvent) {
     onActivity()
-    if (event.touches.length !== 1) {
+    if (mode.value !== 'page' || !touchPageTurningEnabled.value || event.touches.length !== 1) {
       touchStart = null
       return
     }
@@ -127,7 +131,7 @@ export function usePdfPagination({ mode, scrollState, scroll, onActivity }: UseP
   }
 
   function handleTouchEnd(event: TouchEvent) {
-    if (mode.value !== 'page' || !touchStart || event.changedTouches.length !== 1) {
+    if (mode.value !== 'page' || !touchPageTurningEnabled.value || !touchStart || event.changedTouches.length !== 1) {
       touchStart = null
       return
     }
@@ -138,13 +142,17 @@ export function usePdfPagination({ mode, scrollState, scroll, onActivity }: UseP
     if (Math.abs(deltaX) < 60 || Math.abs(deltaX) < Math.abs(deltaY) * 1.2) return
     const direction: -1 | 1 = deltaX > 0 ? -1 : 1
     if (!canTurnPage(direction, 'horizontal')) return
-    event.preventDefault()
+    if (event.cancelable) event.preventDefault()
     turnPage(direction)
+  }
+
+  function handleTouchCancel() {
+    touchStart = null
   }
 
   onUnmounted(() => {
     if (wheelUnlockTimer) clearTimeout(wheelUnlockTimer)
   })
 
-  return { pageRange, getPageRange, goToPage, previousPage, nextPage, handleWheel, handleTouchStart, handleTouchEnd }
+  return { pageRange, getPageRange, goToPage, previousPage, nextPage, handleWheel, handleTouchStart, handleTouchEnd, handleTouchCancel }
 }

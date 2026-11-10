@@ -1,51 +1,51 @@
 import { ref } from 'vue'
 import { api } from '@/lib/api'
-import type { BookSelectionPayload, Collection } from '@bookorbit/types'
+import { createCoalescedFetch, createRequestGeneration } from '@/lib/async'
+import type { BookSelectionPayload, Collection, CoverAspectRatio, CreateCollectionPayload } from '@bookorbit/types'
 
 const collections = ref<Collection[]>([])
 const loaded = ref(false)
 const loading = ref(false)
 const error = ref<string | null>(null)
-let fetchPromise: Promise<void> | null = null
-let requestGeneration = 0
+const listGeneration = createRequestGeneration()
+
+const loadCollectionList = createCoalescedFetch(async (): Promise<void> => {
+  loading.value = true
+  error.value = null
+  const generation = listGeneration.current()
+  try {
+    const res = await api('/api/v1/collections')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const nextCollections: Collection[] = await res.json()
+    if (!listGeneration.isCurrent(generation)) return
+    collections.value = nextCollections
+    loaded.value = true
+  } catch (e: unknown) {
+    if (!listGeneration.isCurrent(generation)) return
+    error.value = e instanceof Error ? e.message : 'Failed to load collections'
+  } finally {
+    if (listGeneration.isCurrent(generation)) loading.value = false
+  }
+})
 
 export function resetCollections(): void {
-  requestGeneration += 1
+  listGeneration.invalidate()
   collections.value = []
   loaded.value = false
   loading.value = false
   error.value = null
-  fetchPromise = null
+  loadCollectionList.clear()
 }
 
 export function useCollections() {
   async function fetchCollections(): Promise<void> {
     if (loaded.value) return
-    if (fetchPromise) return fetchPromise
-    loading.value = true
-    error.value = null
-    const generation = requestGeneration
-    fetchPromise = api('/api/v1/collections')
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`)
-        }
-        const nextCollections: Collection[] = await res.json()
-        if (generation !== requestGeneration) return
-        collections.value = nextCollections
-        loaded.value = true
-      })
-      .catch((e: unknown) => {
-        if (generation !== requestGeneration) return
-        error.value = e instanceof Error ? e.message : 'Failed to load collections'
-      })
-      .finally(() => {
-        if (generation === requestGeneration) {
-          loading.value = false
-          fetchPromise = null
-        }
-      })
-    return fetchPromise
+    return loadCollectionList()
+  }
+
+  /** Forces a re-fetch after any in-flight list request finishes. */
+  async function refreshCollections(): Promise<void> {
+    return loadCollectionList()
   }
 
   async function fetchCollectionsWithMembership(selectionPayload: BookSelectionPayload): Promise<Collection[]> {
@@ -58,11 +58,17 @@ export function useCollections() {
     return res.json()
   }
 
-  async function createCollection(name: string, icon: string, description?: string): Promise<Collection> {
+  async function createCollection(name: string, icon: string, description?: string, isPublic?: boolean): Promise<Collection> {
+    const payload: CreateCollectionPayload = {
+      name,
+      icon,
+      description,
+      ...(isPublic !== undefined && { isPublic }),
+    }
     const res = await api('/api/v1/collections', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, icon, description }),
+      body: JSON.stringify(payload),
     })
     if (!res.ok) throw new Error('Failed to create collection')
     const created: Collection = await res.json()
@@ -70,11 +76,24 @@ export function useCollections() {
     return created
   }
 
-  async function updateCollection(id: number, name: string, icon: string, syncToKobo?: boolean): Promise<Collection> {
+  async function updateCollection(
+    id: number,
+    name: string,
+    icon: string,
+    syncToKobo?: boolean,
+    isPublic?: boolean,
+    coverAspectRatio?: CoverAspectRatio,
+  ): Promise<Collection> {
     const res = await api(`/api/v1/collections/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, icon, ...(syncToKobo !== undefined && { syncToKobo }) }),
+      body: JSON.stringify({
+        name,
+        icon,
+        ...(syncToKobo !== undefined && { syncToKobo }),
+        ...(isPublic !== undefined && { isPublic }),
+        ...(coverAspectRatio !== undefined && { coverAspectRatio }),
+      }),
     })
     if (!res.ok) throw new Error('Failed to update collection')
     const updated: Collection = await res.json()
@@ -129,6 +148,7 @@ export function useCollections() {
     loading,
     error,
     fetchCollections,
+    refreshCollections,
     fetchCollectionsWithMembership,
     createCollection,
     updateCollection,

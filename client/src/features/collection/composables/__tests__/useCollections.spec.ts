@@ -10,9 +10,13 @@ vi.mock('@/lib/api', () => ({
 function makeCollection(overrides: Partial<Collection> = {}): Collection {
   return {
     id: 7,
+    userId: 1,
     name: 'Favorites',
     icon: 'FolderOpen',
     description: null,
+    isPublic: false,
+    coverAspectRatio: '2/3',
+    isOwner: true,
     syncToKobo: false,
     displayOrder: 0,
     bookCount: 0,
@@ -50,6 +54,23 @@ describe('useCollections', () => {
       icon: 'FolderOpen',
     })
     expect(collections.value).toEqual([created])
+  })
+
+  it('sends explicit visibility when creating a public collection', async () => {
+    const created = makeCollection({ isPublic: true })
+    apiMock.mockResolvedValueOnce(makeResponse(created))
+
+    const { useCollections } = await import('../useCollections')
+    const { createCollection } = useCollections()
+
+    await createCollection('Shared', 'Globe', undefined, true)
+
+    const [, request] = apiMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(request.body))).toEqual({
+      name: 'Shared',
+      icon: 'Globe',
+      isPublic: true,
+    })
   })
 
   it('removes deleted collections from local state', async () => {
@@ -136,5 +157,45 @@ describe('useCollections', () => {
     expect(apiMock).toHaveBeenCalledTimes(2)
     expect(collections.value).toEqual([second])
     expect(loaded.value).toBe(true)
+  })
+
+  it('sends only the fields the create endpoint accepts', async () => {
+    const { useCollections } = await import('../useCollections')
+    apiMock.mockResolvedValueOnce(makeResponse(makeCollection())).mockResolvedValueOnce(makeResponse(makeCollection({ isPublic: true })))
+    const { createCollection } = useCollections()
+
+    await createCollection('Sci-fi', 'Rocket')
+    await createCollection('Shared', 'Users', undefined, true)
+
+    expect(apiMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/v1/collections',
+      expect.objectContaining({ body: JSON.stringify({ name: 'Sci-fi', icon: 'Rocket' }) }),
+    )
+    expect(apiMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/collections',
+      expect.objectContaining({ body: JSON.stringify({ name: 'Shared', icon: 'Users', isPublic: true }) }),
+    )
+  })
+
+  it('sends the grid shape on update only when one is given (issue #1926)', async () => {
+    const { useCollections } = await import('../useCollections')
+    apiMock.mockResolvedValueOnce(makeResponse(makeCollection({ coverAspectRatio: '1/1' }))).mockResolvedValueOnce(makeResponse(makeCollection()))
+    const { updateCollection } = useCollections()
+
+    await updateCollection(1, 'Listening', 'Headphones', false, true, '1/1')
+    await updateCollection(1, 'Listening', 'Headphones')
+
+    const [, square] = apiMock.mock.calls[0] as [string, RequestInit]
+    const [, omitted] = apiMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(String(square.body))).toEqual({
+      name: 'Listening',
+      icon: 'Headphones',
+      syncToKobo: false,
+      isPublic: true,
+      coverAspectRatio: '1/1',
+    })
+    expect(JSON.parse(String(omitted.body))).toEqual({ name: 'Listening', icon: 'Headphones' })
   })
 })

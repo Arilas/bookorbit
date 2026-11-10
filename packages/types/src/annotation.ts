@@ -64,6 +64,24 @@ export const KOREADER_EXACT_HIGHLIGHT_COLORS = [
 
 export const ANNOTATION_COLOR_FILTER_OPTIONS = [...ANNOTATION_HIGHLIGHT_COLORS, ...KOREADER_EXACT_HIGHLIGHT_COLORS] as const;
 
+export interface AnnotationRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * A PDF highlight's geometry, in unscaled PDF page coordinate space (points,
+ * top-left origin). `page` is the zero-based page index. `rect` is the bounding
+ * box and `rects` are the per-line segment quads used to render the markup.
+ */
+export interface AnnotationPdfPosition {
+  page: number;
+  rect: AnnotationRect;
+  rects: AnnotationRect[];
+}
+
 export interface AnnotationItem {
   id: number;
   bookId: number;
@@ -78,7 +96,32 @@ export interface AnnotationItem {
   origin: "web" | "koreader" | "kobo";
   positionStatus: AnnotationPositionStatus | null;
   chapterIndex: number | null;
+  highlightedAt: string;
   createdAt: string;
+  updatedAt?: string | null;
+  /** Present for PDF highlights; null/absent for EPUB and device-synced formats. */
+  pdf?: AnnotationPdfPosition | null;
+  /** When the reader starred it; null when not starred. Absent from servers older than stars. */
+  starredAt?: string | null;
+}
+
+/**
+ * One chapter's worth of highlights, aggregated server-side. The book detail
+ * Highlights tab draws its chapter index and its position band from this, so it
+ * never has to hold every annotation row in memory to describe the whole book.
+ */
+export interface AnnotationChapterStat {
+  /** null for highlights that carry no chapter title. */
+  title: string | null;
+  count: number;
+  /** Composition of the chapter, ordered by count descending. */
+  colors: { color: string; count: number }[];
+  /** Spine index when a position carries one, otherwise null. */
+  chapterIndex: number | null;
+  /** Sort key through the book. Null when no position could be resolved. */
+  order: number | null;
+  /** Oldest highlight in the chapter, the tiebreak when `order` is null. */
+  firstCreatedAt: string;
 }
 
 export interface AnnotationStats {
@@ -87,7 +130,15 @@ export interface AnnotationStats {
   originBreakdown: { origin: AnnotationItem["origin"]; count: number }[];
   chaptersWithHighlights: number;
   highlightsWithNotes: number;
+  /**
+   * Highlights whose canonical position is not `exact`. Counted with the review filter
+   * itself removed, so the chip that toggles it keeps showing the real total while on.
+   */
+  highlightsNeedingReview: number;
   chapters: string[];
+  chapterBreakdown: AnnotationChapterStat[];
+  /** Distinct days that carry at least one highlight, newest first. */
+  activity: { day: string; count: number; origins: { origin: AnnotationItem["origin"]; count: number }[] }[];
 }
 
 export interface AnnotationListResponse {
@@ -111,6 +162,63 @@ export interface AnnotationHubStats {
   originBreakdown: { origin: AnnotationItem["origin"]; count: number }[];
 }
 
+/**
+ * How the hub stream is grouped. The mode drives the server sort as well as the
+ * rules drawn between rows, because grouping a page of an infinite list only
+ * lands on whole groups when the server already ordered by the same key.
+ */
+export const ANNOTATION_HUB_GROUP_MODES = ["month", "book", "color", "source"] as const;
+export type AnnotationHubGroupMode = (typeof ANNOTATION_HUB_GROUP_MODES)[number];
+
+/** One device that has ever exchanged annotations, summarised across the whole library. */
+export interface AnnotationHubDeviceSummary {
+  source: "koreader" | "kobo";
+  deviceId: string;
+  deviceName: string | null;
+  /** Annotations this device has a sync row for. */
+  annotations: number;
+  /** How many of those are behind the canonical version. */
+  behind: number;
+  lastSyncedAt: string;
+}
+
+/** One week of marking activity, for the hub's twelve-month sparkline. */
+export interface AnnotationHubActivityWeek {
+  /** Monday of the week, as `yyyy-mm-dd` in UTC. */
+  weekStart: string;
+  count: number;
+  origins: { origin: AnnotationItem["origin"]; count: number }[];
+}
+
+/**
+ * The library-wide facets behind the hub's side rail. Split out from the paginated
+ * list because the list is an infinite stream: recomputing six aggregates over every
+ * annotation a user owns on each page of scrolling is the one thing this page cannot
+ * afford. It reloads when the filters change, not when more rows arrive.
+ */
+export interface AnnotationHubOverview {
+  total: number;
+  books: number;
+  withNotes: number;
+  /** Highlights whose canonical position is not `exact`, so they cannot open at the right page. */
+  needsReview: number;
+  /** Always the whole trash, independent of the current status filter. */
+  trashed: number;
+  originBreakdown: { origin: AnnotationItem["origin"]; count: number }[];
+  colorBreakdown: { color: string; count: number }[];
+  /** Books ranked by mark count, not by recency the way the filter combobox is. */
+  shelf: AnnotationHubBookFacet[];
+  weeks: AnnotationHubActivityWeek[];
+  busiestWeek: AnnotationHubActivityWeek | null;
+  /**
+   * Longest run of consecutive empty weeks inside the covered window. Counted in weeks
+   * rather than days because the activity is bucketed weekly: reporting days here would
+   * claim a precision the aggregate does not have.
+   */
+  longestQuietWeeks: number;
+  devices: AnnotationHubDeviceSummary[];
+}
+
 export interface AnnotationHubResponse {
   items: AnnotationHubItem[];
   total: number;
@@ -125,6 +233,26 @@ export interface AnnotationHubBookFacet {
   author: string | null;
   count: number;
 }
+
+/** Bulk actions on `POST /annotations/bulk`. `star` and `unstar` touch only active rows. */
+export const ANNOTATION_BULK_ACTIONS = ["trash", "restore", "restyle", "star", "unstar"] as const;
+export type AnnotationBulkAction = (typeof ANNOTATION_BULK_ACTIONS)[number];
+
+/** `errorCode` on the 409 from `DELETE /annotations/:id` while a synced device has not acknowledged the deletion. */
+export const ANNOTATION_PURGE_PENDING_DEVICE_SYNC = "ANNOTATION_PURGE_PENDING_DEVICE_SYNC";
+
+export const ANNOTATION_COLOR_NAME_MAX_ENTRIES = 32;
+export const ANNOTATION_COLOR_NAME_MAX_LENGTH = 40;
+
+/**
+ * A reader's own labels for highlight colours, keyed by uppercase `#RRGGBB`. Stored per user
+ * under the `annotation-colors` preference category.
+ */
+export interface AnnotationColorNamePreferences {
+  names: Record<string, string>;
+}
+
+export const ANNOTATION_COLOR_NAME_PREFERENCES_DEFAULTS: AnnotationColorNamePreferences = { names: {} };
 
 export type AnnotationPositionFormat = "cfi" | "xpointer" | "pdf" | "kobo_span";
 

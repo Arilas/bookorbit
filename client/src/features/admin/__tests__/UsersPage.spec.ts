@@ -2,18 +2,49 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed } from 'vue'
 import { flushPromises, mount, shallowMount } from '@vue/test-utils'
 import UsersPage from '../UsersPage.vue'
+import UserRosterTable from '../components/UserRosterTable.vue'
 
-const { apiMock, permState } = vi.hoisted(() => ({
+const { apiMock, authState, permState, policyState } = vi.hoisted(() => ({
   apiMock: vi.fn<(input: string, init?: RequestInit) => Promise<unknown>>(),
+  authState: { userId: 1 },
   permState: { isSuperuser: true, denied: [] as string[] },
+  policyState: { passwordLoginEnabled: true },
 }))
 
 vi.mock('@/lib/api', () => ({ api: apiMock }))
+
+vi.mock('@/components/ui/sheet', () => ({
+  Sheet: { template: '<div><slot /></div>' },
+  SheetContent: { template: '<div><slot /></div>' },
+  SheetTitle: { template: '<h2><slot /></h2>' },
+  SheetDescription: { template: '<p><slot /></p>' },
+}))
 
 vi.mock('@/features/auth/composables/usePermissions', () => ({
   usePermissions: () => ({
     isSuperuser: computed(() => permState.isSuperuser),
     hasPermission: vi.fn<(name: string) => boolean>((name) => !permState.denied.includes(name)),
+  }),
+}))
+
+vi.mock('@/features/auth/composables/useAuth', () => ({
+  useAuth: () => ({
+    user: computed(() => ({ id: authState.userId })),
+  }),
+}))
+
+vi.mock('@/features/auth/composables/useLoginOptions', () => ({
+  useLoginOptions: () => ({
+    loginOptions: computed(() => ({
+      passwordLoginEnabled: policyState.passwordLoginEnabled,
+      allowRegistration: false,
+      oidcProviders: [],
+    })),
+    fetchLoginOptions: vi.fn<() => Promise<{ passwordLoginEnabled: boolean; allowRegistration: boolean; oidcProviders: never[] }>>(async () => ({
+      passwordLoginEnabled: policyState.passwordLoginEnabled,
+      allowRegistration: false,
+      oidcProviders: [],
+    })),
   }),
 }))
 
@@ -71,6 +102,7 @@ function stubApi(overrides: StubOptions = {}) {
     if (input === '/api/v1/app-settings/allow_registration') return jsonResponse({ key: 'allow_registration', value: 'true' })
     if (/\/api\/v1\/users\/\d+\/unlock$/.test(input)) return jsonResponse({})
     if (/\/api\/v1\/users\/\d+\/reset-password$/.test(input)) return jsonResponse({ resetUrl: 'https://example.test/reset' })
+    if (/\/api\/v1\/users\/\d+\/superuser$/.test(input)) return jsonResponse({})
     return { ok: false, json: async () => ({}) }
   })
 }
@@ -91,11 +123,22 @@ function stateButton(wrapper: ReturnType<typeof mount>, label: string) {
   return wrapper.findAll('[role="group"] button').find((button) => button.text().startsWith(label))
 }
 
+async function openUserAccess(wrapper: ReturnType<typeof mount>) {
+  const roster = wrapper.findComponent(UserRosterTable)
+  roster.vm.$emit('edit', roster.props('users')[0])
+  await flushPromises()
+  const access = wrapper.findAll('button').find((button) => button.text().trim().startsWith('Permissions'))
+  await access?.trigger('click')
+  await flushPromises()
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   vi.useRealTimers()
   permState.isSuperuser = true
   permState.denied = []
+  authState.userId = 1
+  policyState.passwordLoginEnabled = true
   stubApi()
 })
 
@@ -427,6 +470,96 @@ describe('UsersPage roster', () => {
     await flushPromises()
 
     expect(wrapper.find('[role="alert"]').exists()).toBe(true)
+  })
+})
+
+describe('UsersPage superuser access', () => {
+  it('promotes an eligible account through an explicit confirmation', async () => {
+    const wrapper = mount(UsersPage, { attachTo: document.body })
+    await flushPromises()
+    await openUserAccess(wrapper)
+
+    const promote = wrapper.findAll('button').find((button) => button.text().trim() === 'Promote to superuser')
+    expect(promote).toBeDefined()
+    await promote?.trigger('click')
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('Grant Ada Lovelace unrestricted server access.')
+    const dialog = document.body.querySelector('[role="dialog"]')
+    expect(dialog?.className).toContain('z-[70]')
+    const confirm = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Promote to superuser')
+      .at(-1)
+    confirm?.click()
+    await flushPromises()
+
+    expect(apiMock).toHaveBeenCalledWith('/api/v1/users/4/superuser', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isSuperuser: true }),
+    })
+    expect(wrapper.find('section[aria-labelledby="superuser-access-heading"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('offers demotion and preserves the distinction from the Admin permission preset', async () => {
+    stubApi({ users: [{ ...USER, isSuperuser: true, permissions: ['manage_users'] }], summary: { admins: 1 } })
+    const wrapper = mount(UsersPage)
+    await flushPromises()
+    await openUserAccess(wrapper)
+
+    const panel = wrapper.find('section[aria-labelledby="superuser-access-heading"]')
+    expect(panel.text()).toContain('Superuser access')
+    expect(panel.text()).toContain('Its saved permissions, libraries, and restrictions will apply again after demotion.')
+    expect(panel.findAll('button').some((button) => button.text().trim() === 'Remove superuser access')).toBe(true)
+  })
+
+  it('does not expose the privilege action to a permission-based administrator', async () => {
+    permState.isSuperuser = false
+    const wrapper = mount(UsersPage)
+    await flushPromises()
+    await openUserAccess(wrapper)
+
+    expect(wrapper.find('section[aria-labelledby="superuser-access-heading"]').exists()).toBe(false)
+  })
+
+  it('explains why self and shared targets cannot be promoted', async () => {
+    authState.userId = USER.id
+    const selfWrapper = mount(UsersPage)
+    await flushPromises()
+    await openUserAccess(selfWrapper)
+    expect(selfWrapper.text()).toContain('You cannot change your own superuser access.')
+    expect(selfWrapper.findAll('button').some((button) => button.text().trim() === 'Promote to superuser')).toBe(false)
+
+    authState.userId = 1
+    stubApi({ users: [{ ...USER, provisioningMethod: 'shared' }] })
+    const sharedWrapper = mount(UsersPage)
+    await flushPromises()
+    await openUserAccess(sharedWrapper)
+    expect(sharedWrapper.text()).toContain('Shared accounts cannot be promoted to superuser.')
+    expect(sharedWrapper.findAll('button').some((button) => button.text().trim() === 'Promote to superuser')).toBe(false)
+  })
+
+  it('keeps the confirmation open and shows localized copy when the transition fails', async () => {
+    const wrapper = mount(UsersPage, { attachTo: document.body })
+    await flushPromises()
+    await openUserAccess(wrapper)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text().trim() === 'Promote to superuser')
+      ?.trigger('click')
+    await flushPromises()
+
+    apiMock.mockResolvedValueOnce({ ok: false, json: async () => ({ message: 'internal server wording' }) })
+    const confirm = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Promote to superuser')
+      .at(-1)
+    confirm?.click()
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('Failed to update superuser access. Reload the account and try again.')
+    expect(document.body.textContent).not.toContain('internal server wording')
+    wrapper.unmount()
   })
 })
 

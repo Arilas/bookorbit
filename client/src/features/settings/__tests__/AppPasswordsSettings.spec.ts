@@ -209,6 +209,18 @@ describe('AppPasswordsSettings', () => {
     expect(wrapper.findAll('button').some((button) => button.text().includes('Renew'))).toBe(true)
   })
 
+  it('disables competing mutations while a rotation is running', async () => {
+    mocks.appPasswords.value = [appPassword({ id: 7 })]
+    mocks.rotatingId.value = 7
+    const wrapper = mountPage()
+    await flushPromises()
+
+    for (const label of ['Create app password', 'Rotate', 'Revoke']) {
+      const button = wrapper.findAll('button').find((candidate) => candidate.text().includes(label))
+      expect(button?.attributes('disabled')).toBeDefined()
+    }
+  })
+
   it('shows a useful empty state', async () => {
     const wrapper = mountPage()
     await flushPromises()

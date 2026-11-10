@@ -1,19 +1,58 @@
-import { describe, expect, it } from 'vitest'
-import type { BrowseCounts } from '@bookorbit/types'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { Permission, type BrowseCounts } from '@bookorbit/types'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
-import { SIDEBAR_NAV_REGISTRY, isNavEntryAllowed, resolveNavEntry } from '../useSidebarNav'
+import { SIDEBAR_NAV_REGISTRY, isNavEntryAllowed, resolveNavEntry, useSidebarNav } from '../useSidebarNav'
 
-function makeContext(overrides: Partial<{ permissions: string[]; bookDockTotal: number; browseCounts: BrowseCounts | null }> = {}) {
+const mocks = vi.hoisted(() => ({ permissions: new Set<string>() }))
+
+vi.mock('vue-i18n', () => ({
+  useI18n: () => ({
+    t: (key: string, params?: { count?: number }) => {
+      const count = params?.count ?? 0
+      if (key === 'components.sidebar.requestBadge.allActive') return `${count} active requests across all users`
+      if (key === 'components.sidebar.requestBadge.mineActive') return `${count} active requests of yours`
+      return key
+    },
+  }),
+}))
+
+vi.mock('vue-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('vue-router')>()
+  return {
+    ...actual,
+    useRoute: () => ({ name: 'dashboard', params: {}, query: {} }),
+  }
+})
+
+vi.mock('@/features/auth/composables/usePermissions', () => ({
+  usePermissions: () => ({ hasPermission: (name: string) => mocks.permissions.has(name) }),
+}))
+
+function makeContext(
+  overrides: Partial<{
+    permissions: string[]
+    showBookRequests: boolean
+    achievementsEnabled: boolean
+    bookDockTotal: number
+    outstandingRequestTotal: number
+    outstandingRequestLabel: string
+    browseCounts: BrowseCounts | null
+  }> = {},
+) {
   const permissions = overrides.permissions ?? []
   return {
     hasPermission: (name: string) => permissions.includes(name),
+    showBookRequests: overrides.showBookRequests,
+    achievementsEnabled: overrides.achievementsEnabled,
     bookDockTotal: overrides.bookDockTotal ?? 0,
+    outstandingRequestTotal: overrides.outstandingRequestTotal ?? 0,
+    outstandingRequestLabel: overrides.outstandingRequestLabel ?? '',
     browseCounts: overrides.browseCounts ?? null,
   }
 }
 
-function makeRoute(name: string, params: Record<string, string> = {}): RouteLocationNormalizedLoaded {
-  return { name, params, query: {} } as unknown as RouteLocationNormalizedLoaded
+function makeRoute(name: string, params: Record<string, string> = {}, query: Record<string, string> = {}): RouteLocationNormalizedLoaded {
+  return { name, params, query } as unknown as RouteLocationNormalizedLoaded
 }
 
 function entry(id: string) {
@@ -27,30 +66,66 @@ function allowedIds(context: ReturnType<typeof makeContext>) {
 }
 
 describe('sidebar nav registry', () => {
-  it('shows only ungated destinations to a user with no permissions', () => {
-    expect(allowedIds(makeContext())).toEqual(['dashboard', 'authors', 'series', 'annotations'])
+  beforeEach(() => {
+    mocks.permissions.clear()
   })
 
-  it('places Dashboard, Book Dock and Tools in the primary zone, above the entity sections', () => {
+  it('shows only ungated destinations to a user with no permissions', () => {
+    expect(allowedIds(makeContext())).toEqual(['dashboard', 'statistics', 'reading-history', 'achievements', 'authors', 'series', 'annotations'])
+  })
+
+  it('places Dashboard, Book Dock, Requests and Tools in the primary zone, above the entity sections', () => {
     const primary = SIDEBAR_NAV_REGISTRY.filter((candidate) => candidate.zone === 'primary').map((candidate) => candidate.id)
 
-    expect(primary).toEqual(['dashboard', 'book-dock', 'tools'])
+    expect(primary).toEqual(['dashboard', 'book-dock', 'book-requests', 'tools'])
   })
 
-  it('leaves Statistics and Achievements to the header', () => {
-    const ids = SIDEBAR_NAV_REGISTRY.map((candidate) => candidate.id)
+  it('groups Statistics, History, Achievements and Annotations in the Reading zone', () => {
+    const reading = SIDEBAR_NAV_REGISTRY.filter((candidate) => candidate.zone === 'reading').map((candidate) => candidate.id)
 
-    expect(ids).not.toContain('statistics')
-    expect(ids).not.toContain('achievements')
+    expect(reading).toEqual(['statistics', 'reading-history', 'achievements', 'annotations'])
+  })
+
+  it('hides Achievements when the user has turned achievements off', () => {
+    expect(allowedIds(makeContext({ achievementsEnabled: false }))).not.toContain('achievements')
+    expect(allowedIds(makeContext({ achievementsEnabled: true }))).toContain('achievements')
+  })
+
+  it('marks Statistics active on the statistics route and anchors the tour step there', () => {
+    expect(entry('statistics').isActive(makeRoute('statistics'))).toBe(true)
+    expect(entry('statistics').tourId).toBe('statistics-btn')
   })
 
   it('shows Book Dock once the user holds book_dock_access', () => {
     expect(allowedIds(makeContext({ permissions: ['book_dock_access'] }))).toContain('book-dock')
   })
 
-  it.each(['manage_libraries', 'library_delete_books'])('shows Tools for the any-of permission %s', (permission) => {
-    expect(allowedIds(makeContext({ permissions: [permission] }))).toContain('tools')
+  it('shows Requests once the user holds book_request_access', () => {
+    expect(allowedIds(makeContext({ permissions: ['book_request_access'] }))).toContain('book-requests')
   })
+
+  it('hides Requests from a user without book_request_access', () => {
+    expect(allowedIds(makeContext())).not.toContain('book-requests')
+  })
+
+  it('hides Requests without changing permission when the user turns visibility off', () => {
+    const context = makeContext({ permissions: ['book_request_access'], showBookRequests: false })
+    expect(allowedIds(context)).not.toContain('book-requests')
+    expect(context.hasPermission('book_request_access')).toBe(true)
+  })
+
+  it.each(['book-requests', 'book-request-detail', 'book-request-releases'])('keeps Requests active on %s', (routeName) => {
+    const resolved = resolveNavEntry(entry('book-requests'), makeContext({ permissions: ['book_request_access'] }), makeRoute(routeName), 'Requests')
+
+    expect(resolved.isActive).toBe(true)
+  })
+
+  it.each(['manage_libraries', 'library_delete_books', 'library_merge_books', 'library_edit_metadata'])(
+    'shows Tools for the any-of permission %s',
+    (permission) => {
+      expect(allowedIds(makeContext({ permissions: [permission] }))).toContain('tools')
+    },
+  )
 
   it('resolves Tools to the entity manager when the user can manage libraries', () => {
     const context = makeContext({ permissions: ['manage_libraries'] })
@@ -68,8 +143,33 @@ describe('sidebar nav registry', () => {
     expect(resolved.to).toEqual({ name: 'tools-duplicate-books' })
   })
 
+  it('resolves Tools to duplicate books when the user can only merge books', () => {
+    const context = makeContext({ permissions: ['library_merge_books', 'library_edit_metadata'] })
+
+    const resolved = resolveNavEntry(entry('tools'), context, makeRoute('dashboard'), 'Tools')
+
+    expect(resolved.to).toEqual({ name: 'tools-duplicate-books' })
+  })
+
+  it('resolves Tools to chapter health when the user can only edit metadata', () => {
+    const context = makeContext({ permissions: ['library_edit_metadata'] })
+
+    const resolved = resolveNavEntry(entry('tools'), context, makeRoute('dashboard'), 'Tools')
+
+    expect(resolved.to).toEqual({ name: 'tools-chapter-health' })
+  })
+
+  it('prefers duplicate books over chapter health when the user can delete books too', () => {
+    const context = makeContext({ permissions: ['library_delete_books', 'library_edit_metadata'] })
+
+    const resolved = resolveNavEntry(entry('tools'), context, makeRoute('dashboard'), 'Tools')
+
+    expect(resolved.to).toEqual({ name: 'tools-duplicate-books' })
+  })
+
   it('marks Tools active on any tools- route', () => {
     expect(entry('tools').isActive(makeRoute('tools-bulk-rename'))).toBe(true)
+    expect(entry('tools').isActive(makeRoute('tools-chapter-health'))).toBe(true)
     expect(entry('tools').isActive(makeRoute('dashboard'))).toBe(false)
   })
 
@@ -80,8 +180,45 @@ describe('sidebar nav registry', () => {
   it('exposes the Book Dock badge only when items are queued', () => {
     const context = makeContext({ permissions: ['book_dock_access'], bookDockTotal: 3 })
 
-    expect(resolveNavEntry(entry('book-dock'), context, makeRoute('dashboard'), 'Book Dock').badge).toBe(3)
+    expect(resolveNavEntry(entry('book-dock'), context, makeRoute('dashboard'), 'Book Dock').badge).toEqual({ value: 3, tone: 'accent' })
     expect(resolveNavEntry(entry('book-dock'), makeContext(), makeRoute('dashboard'), 'Book Dock').badge).toBeNull()
+  })
+
+  it('marks only the rows that count work waiting on the user as returning when hidden', () => {
+    expect(SIDEBAR_NAV_REGISTRY.filter((candidate) => candidate.returnsWithWork).map((candidate) => candidate.id)).toEqual([
+      'book-dock',
+      'book-requests',
+    ])
+    expect(resolveNavEntry(entry('book-dock'), makeContext(), makeRoute('dashboard'), 'Book Dock').returnsWithWork).toBe(true)
+    expect(resolveNavEntry(entry('series'), makeContext(), makeRoute('dashboard'), 'Series').returnsWithWork).toBe(false)
+  })
+
+  it('exposes the Requests badge only when requests are outstanding', () => {
+    const context = makeContext({
+      permissions: ['book_request_access'],
+      outstandingRequestTotal: 6,
+      outstandingRequestLabel: '6 active requests of yours',
+    })
+
+    expect(resolveNavEntry(entry('book-requests'), context, makeRoute('dashboard'), 'Requests').badge).toEqual({
+      value: 6,
+      label: '6 active requests of yours',
+      tone: 'accent',
+    })
+    expect(resolveNavEntry(entry('book-requests'), makeContext(), makeRoute('dashboard'), 'Requests').badge).toBeNull()
+  })
+
+  it.each([
+    ['a requester', [], '2 active requests of yours'],
+    ['a request manager', [Permission.ManageBookRequests], '2 active requests across all users'],
+  ])('describes the Requests badge scope for %s', (_role, permissions, expectedLabel) => {
+    mocks.permissions.add(Permission.BookRequestAccess)
+    for (const permission of permissions) mocks.permissions.add(permission)
+
+    const { zones } = useSidebarNav(() => 2)
+    const requests = zones.value.flatMap((zone) => zone.entries).find((candidate) => candidate.id === 'book-requests')
+
+    expect(requests?.badge).toEqual({ value: 2, label: expectedLabel, tone: 'accent' })
   })
 
   it.each([
@@ -91,7 +228,7 @@ describe('sidebar nav registry', () => {
   ])('badges %s with its browse count', (id, expected) => {
     const context = makeContext({ browseCounts: { authors: 1234, series: 312, annotations: 18000 } })
 
-    expect(resolveNavEntry(entry(id), context, makeRoute('dashboard'), id).badge).toBe(expected)
+    expect(resolveNavEntry(entry(id), context, makeRoute('dashboard'), id).badge).toEqual({ value: expected })
   })
 
   it('leaves the browse rows unbadged before the counts load and while they are zero', () => {
@@ -108,7 +245,7 @@ describe('sidebar nav registry', () => {
 
     expect(new Set(ids).size).toBe(ids.length)
     for (const candidate of SIDEBAR_NAV_REGISTRY) {
-      expect(['primary', 'browse']).toContain(candidate.zone)
+      expect(['primary', 'browse', 'reading']).toContain(candidate.zone)
     }
   })
 })

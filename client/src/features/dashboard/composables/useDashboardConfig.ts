@@ -1,6 +1,9 @@
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
-import { SCROLLER_TYPES, type ScrollerConfig, type ScrollerType } from '@bookorbit/types'
+import { SCROLLER_TYPES, type DashboardShelfConfig, type DashboardShelfLayout, type ScrollerConfig, type ScrollerType } from '@bookorbit/types'
+import { useAuth } from '@/features/auth/composables/useAuth'
+import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { api } from '@/lib/api'
 import { normalizeShelfRows } from '../lib/shelf-rows'
 
 const STORAGE_KEY = 'bookorbit:dashboard:config'
@@ -11,7 +14,7 @@ export const SHELF_LAYOUT = {
   TWO_COLUMNS: 'two-columns',
 } as const
 
-export type DashboardShelfLayout = (typeof SHELF_LAYOUT)[keyof typeof SHELF_LAYOUT]
+export type { DashboardShelfLayout } from '@bookorbit/types'
 
 interface StoredDashboardConfig {
   scrollers: ScrollerConfig[]
@@ -39,6 +42,7 @@ export const SCROLLER_LABELS: Record<ScrollerType, string> = {
   'smart-scope': 'Smart Scope',
 }
 
+/** Stored configs can name shelves this client no longer has; those are dropped on read and never written back. */
 const VALID_SCROLLER_TYPES = new Set<ScrollerType>(SCROLLER_TYPES)
 
 function cloneDefaultScrollers(): ScrollerConfig[] {
@@ -162,11 +166,35 @@ function areScrollersEqual(left: ScrollerConfig[], right: ScrollerConfig[]): boo
 const initialConfig = loadConfig()
 const scrollers = ref<ScrollerConfig[]>(initialConfig.scrollers)
 const shelfLayout = ref<DashboardShelfLayout>(initialConfig.shelfLayout)
+let hydratedUserId: number | undefined
+let hydratedFromServer = false
 
 export function useDashboardConfig() {
+  const { user } = useAuth()
+  const { isDemoRestrictedAccount } = usePermissions()
+  const syncAcrossSessions = computed(() => !isDemoRestrictedAccount.value && user.value?.settings?.dashboardShelfConfig?.syncAcrossSessions === true)
+
+  watch(
+    () => [user.value?.id, user.value?.settings?.dashboardShelfConfig, isDemoRestrictedAccount.value] as const,
+    ([userId, config, demoRestricted]) => {
+      if (!demoRestricted && config?.syncAcrossSessions === true) {
+        scrollers.value = normalizeScrollers(config.scrollers)
+        shelfLayout.value = normalizeShelfLayout(config.shelfLayout)
+      } else if (hydratedUserId !== userId || hydratedFromServer) {
+        const local = loadConfig()
+        scrollers.value = local.scrollers
+        shelfLayout.value = local.shelfLayout
+      }
+      hydratedUserId = userId
+      hydratedFromServer = !demoRestricted && config?.syncAcrossSessions === true
+    },
+    { immediate: true, flush: 'sync' },
+  )
+
   function save() {
     scrollers.value = normalizeScrollers(scrollers.value)
     shelfLayout.value = normalizeShelfLayout(shelfLayout.value)
+    if (syncAcrossSessions.value) return
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -181,9 +209,25 @@ export function useDashboardConfig() {
     save()
   }
 
-  function saveShelfSettings(newScrollers: ScrollerConfig[], newShelfLayout: DashboardShelfLayout) {
-    scrollers.value = normalizeScrollers(newScrollers)
-    shelfLayout.value = normalizeShelfLayout(newShelfLayout)
+  async function saveShelfSettings(newScrollers: ScrollerConfig[], newShelfLayout: DashboardShelfLayout, sync = syncAcrossSessions.value) {
+    sync = sync && !isDemoRestrictedAccount.value
+    const nextScrollers = normalizeScrollers(newScrollers)
+    const nextLayout = normalizeShelfLayout(newShelfLayout)
+    if (sync || syncAcrossSessions.value) {
+      const currentUser = user.value
+      if (!currentUser) throw new Error('Sign in to sync dashboard shelves')
+      const config: DashboardShelfConfig = { syncAcrossSessions: sync, scrollers: nextScrollers, shelfLayout: nextLayout }
+      const response = await api('/api/v1/users/me/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: { dashboardShelfConfig: config } }),
+      })
+      if (!response.ok) throw new Error(`Failed to save dashboard shelves: ${response.status}`)
+      if (user.value?.id !== currentUser.id) return
+      user.value = { ...user.value, settings: { ...user.value.settings, dashboardShelfConfig: config } }
+    }
+    scrollers.value = nextScrollers
+    shelfLayout.value = nextLayout
     save()
   }
 
@@ -224,5 +268,15 @@ export function useDashboardConfig() {
     localStorage.removeItem(STORAGE_KEY)
   }
 
-  return { scrollers, shelfLayout, saveScrollers, saveShelfSettings, addScroller, pruneDeletedSmartScopeScrollers, reset, MAX_SCROLLERS }
+  return {
+    scrollers,
+    shelfLayout,
+    syncAcrossSessions,
+    saveScrollers,
+    saveShelfSettings,
+    addScroller,
+    pruneDeletedSmartScopeScrollers,
+    reset,
+    MAX_SCROLLERS,
+  }
 }

@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import type { Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ArrowUpDown, Plus, Search, X } from '@lucide/vue'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import AppIcon from '@/components/AppIcon.vue'
+import PageTitleRow from '@/components/page-header/PageTitleRow.vue'
 import { formatNumber } from '@/i18n/formatters'
+import { entityCount } from '@/lib/entity-count'
 
 export interface EntityIndexItem {
   id: number
@@ -20,10 +23,10 @@ type SortDirection = 'asc' | 'desc'
 const props = withDefaults(
   defineProps<{
     title: string
-    titleIcon: string
+    titleIcon: Component
     items: EntityIndexItem[]
     routeName: string
-    fallbackIcon: string
+    fallbackIcon: Component
     searchPlaceholder: string
     emptyTitle: string
     emptyHint: string
@@ -65,7 +68,7 @@ const sortedItems = computed(() => {
   const field = sort.value
   return [...matchedItems.value].sort((a, b) => {
     if (field === 'name') return a.name.localeCompare(b.name) * direction
-    if (field === 'bookCount') return ((a.bookCount ?? 0) - (b.bookCount ?? 0)) * direction
+    if (field === 'bookCount') return ((entityCount(a) ?? 0) - (entityCount(b) ?? 0)) * direction
     return (a.displayOrder - b.displayOrder) * direction
   })
 })
@@ -101,18 +104,19 @@ function handleAdd() {
 function itemRoute(id: number) {
   return { name: props.routeName, params: { id } }
 }
+
+function itemCountText(item: EntityIndexItem): string {
+  return t('components.entityIndex.bookCount', { count: entityCount(item) ?? 0 })
+}
 </script>
 
 <template>
   <div class="flex h-full flex-col">
-    <div class="mb-3 flex flex-wrap items-center gap-2">
-      <div class="flex min-w-0 flex-1 items-center gap-2">
-        <AppIcon :icon="titleIcon" :fallback="fallbackIcon" :size="18" class="shrink-0 text-primary" />
-        <h1 class="min-w-0 truncate text-lg font-semibold text-foreground">{{ title }}</h1>
-        <span class="shrink-0 text-sm text-muted-foreground tabular-nums">{{ resultSummary }}</span>
-      </div>
-
-      <div class="flex items-center gap-2">
+    <PageTitleRow class="mt-2 mb-3" :eyebrow="t('components.sidebar.zones.browse')" :title="title" :icon="titleIcon" :fallback-icon="fallbackIcon">
+      <template #facts>
+        <span class="tabular-nums">{{ resultSummary }}</span>
+      </template>
+      <template #actions>
         <div class="flex h-8 w-48 items-center gap-1.5 rounded-md border border-input bg-background px-2.5 sm:w-64">
           <Search :size="13" aria-hidden="true" class="shrink-0 text-muted-foreground" />
           <label class="sr-only" :for="`entity-index-search-${routeName}`">{{ searchPlaceholder }}</label>
@@ -187,8 +191,8 @@ function itemRoute(id: number) {
           <Plus :size="13" aria-hidden="true" />
           <span>{{ addLabel }}</span>
         </button>
-      </div>
-    </div>
+      </template>
+    </PageTitleRow>
 
     <main class="min-h-0 flex-1 overflow-y-auto pr-2">
       <div v-if="loading && items.length === 0" class="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
@@ -208,12 +212,12 @@ function itemRoute(id: number) {
           class="flex items-center gap-3 rounded-lg border border-border bg-card p-3 transition-colors hover:border-primary hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <AppIcon :icon="item.icon || fallbackIcon" :fallback="fallbackIcon" :size="18" />
+            <AppIcon :icon="item.icon" :fallback="fallbackIcon" :size="18" />
           </span>
           <span class="flex min-w-0 flex-col gap-0.5">
             <span class="truncate text-sm font-medium text-foreground">{{ item.name }}</span>
-            <span v-if="typeof item.bookCount === 'number'" class="text-xs text-muted-foreground tabular-nums">
-              {{ t('components.entityIndex.bookCount', { count: item.bookCount }) }}
+            <span v-if="entityCount(item) !== null" class="text-xs text-muted-foreground tabular-nums">
+              {{ itemCountText(item) }}
             </span>
           </span>
         </RouterLink>

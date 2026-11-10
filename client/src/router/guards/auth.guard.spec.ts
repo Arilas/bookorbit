@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ref, type Ref } from 'vue'
-import { AuthMethod, Permission, ProvisioningMethod } from '@bookorbit/types'
+import { AuthenticationMethod, Permission, ProvisioningMethod } from '@bookorbit/types'
 
 import { registerAuthGuard } from './auth.guard'
 
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
     isSuperuser: boolean
     permissions: string[]
     provisioningMethod: string
-    authMethod: 'primary' | 'app_password'
+    authenticationMethod: 'password' | 'app_password'
     settings: { achievementPreferences: { enabled: boolean } }
   }>,
 }))
@@ -47,7 +47,7 @@ describe('registerAuthGuard', () => {
       isSuperuser: false,
       permissions: [],
       provisioningMethod: 'local',
-      authMethod: 'primary',
+      authenticationMethod: 'password',
       settings: { achievementPreferences: { enabled: false } },
     })
     registerAuthGuard({
@@ -127,7 +127,7 @@ describe('registerAuthGuard', () => {
 
   it('redirects app-password-authenticated sessions away from app-password management', async () => {
     if (!guard) throw new Error('Expected guard to be registered')
-    mocks.user.value.authMethod = 'app_password'
+    mocks.user.value.authenticationMethod = 'app_password'
 
     await expect(
       guard({
@@ -135,7 +135,7 @@ describe('registerAuthGuard', () => {
         path: '/settings/account/app-passwords',
         fullPath: '/settings/account/app-passwords',
         meta: {
-          forbiddenAuthMethod: AuthMethod.AppPassword,
+          forbiddenAuthenticationMethod: AuthenticationMethod.AppPassword,
           permissionFallback: 'settings-account-profile',
         },
       }),

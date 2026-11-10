@@ -1,20 +1,25 @@
 import { sql } from 'drizzle-orm';
 import {
+  type AnyPgColumn,
   bigint,
   boolean,
   check,
+  doublePrecision,
   foreignKey,
   index,
   integer,
+  jsonb,
   numeric,
   pgTable,
   serial,
   timestamp,
   unique,
   uniqueIndex,
+  uuid,
   varchar,
 } from 'drizzle-orm/pg-core';
 
+import { timestamptz } from './columns';
 import { libraryFolders, libraries } from './libraries';
 
 export const books = pgTable(
@@ -27,11 +32,15 @@ export const books = pgTable(
     libraryFolderId: integer('library_folder_id')
       .notNull()
       .references(() => libraryFolders.id, { onDelete: 'cascade' }),
-    primaryFileId: integer('primary_file_id').references(() => bookFiles.id, { onDelete: 'set null' }),
+    // Annotated because book_files references books back: an inferred return makes the two
+    // table types circular, and depending on check order one of them silently becomes any.
+    primaryFileId: integer('primary_file_id').references((): AnyPgColumn => bookFiles.id, { onDelete: 'set null' }),
     primaryAuthorSortName: varchar('primary_author_sort_name', { length: 500 }),
     folderPath: varchar('folder_path', { length: 4096 }).notNull(),
     status: varchar('status', { length: 20 }).notNull().default('present'),
-    addedAt: timestamp('added_at', { withTimezone: true }).defaultNow().notNull(),
+    addedAt: timestamptz('added_at')
+      .default(sql`now()`)
+      .notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()
       .notNull()
@@ -65,6 +74,7 @@ export const bookFiles = pgTable(
   'book_files',
   {
     id: serial('id').primaryKey(),
+    publicId: uuid('public_id').notNull().defaultRandom(),
     bookId: integer('book_id')
       .notNull()
       .references(() => books.id, { onDelete: 'cascade' }),
@@ -81,8 +91,18 @@ export const bookFiles = pgTable(
     role: varchar('role', { length: 20 }).notNull().default('content'),
     sortOrder: integer('sort_order'),
     durationSeconds: integer('duration_seconds'),
+    chapterWriteProvenance: jsonb('chapter_write_provenance').$type<{
+      mtimeMs: number;
+      sizeBytes: number;
+      chapters: { title: string; startMs: number }[];
+      startsMs: number[];
+      continuation: boolean;
+    }>(),
     // null means "not determined yet"; rows predating this column are backfilled lazily on Kobo sync.
     isFixedLayout: boolean('is_fixed_layout'),
+    mediaOverlayAvailable: boolean('media_overlay_available').notNull().default(false),
+    mediaOverlayDurationSeconds: doublePrecision('media_overlay_duration_seconds'),
+    mediaOverlayCheckedAt: timestamp('media_overlay_checked_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()
@@ -90,12 +110,17 @@ export const bookFiles = pgTable(
       .$onUpdateFn(() => new Date()),
   },
   (t) => [
+    uniqueIndex('book_files_public_id_uidx').on(t.publicId),
     uniqueIndex('book_files_absolute_path_uidx').on(t.absolutePath),
     index('book_files_book_id_idx').on(t.bookId),
+    index('book_files_change_timestamp_idx').on(sql`greatest(${t.createdAt}, ${t.updatedAt}) desc`),
     index('book_files_library_folder_id_idx').on(t.libraryFolderId),
     index('book_files_file_hash_idx').on(t.fileHash),
     index('book_files_ino_idx').on(t.ino),
     index('book_files_format_idx').on(t.format),
+    index('book_files_media_overlay_available_idx')
+      .on(t.mediaOverlayAvailable)
+      .where(sql`${t.mediaOverlayAvailable} = true`),
     index('book_files_library_folder_file_hash_idx').on(t.libraryFolderId, t.fileHash),
     index('book_files_library_folder_ino_idx').on(t.libraryFolderId, t.ino),
     foreignKey({
@@ -108,6 +133,10 @@ export const bookFiles = pgTable(
     check('book_files_role_chk', sql`${t.role} in ('content', 'cover', 'metadata', 'supplement')`),
     check('book_files_size_bytes_nonnegative_chk', sql`${t.sizeBytes} is null or ${t.sizeBytes} >= 0`),
     check('book_files_duration_seconds_nonnegative_chk', sql`${t.durationSeconds} is null or ${t.durationSeconds} >= 0`),
+    check(
+      'book_files_media_overlay_duration_seconds_nonnegative_chk',
+      sql`${t.mediaOverlayDurationSeconds} is null or ${t.mediaOverlayDurationSeconds} >= 0`,
+    ),
   ],
 );
 

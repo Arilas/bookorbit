@@ -9,11 +9,8 @@ vi.mock('bcryptjs', () => ({
 }));
 
 import { AuthService } from './auth.service';
-import { AUDIT_EVENT } from '../audit/audit-events.service';
 
 function makeDb(overrides?: Record<string, unknown>) {
-  const returning = vi.fn().mockResolvedValue([]);
-  const where = vi.fn().mockImplementation(() => Object.assign(Promise.resolve({ rowCount: 1 }), { returning }));
   const db: Record<string, unknown> = {
     query: {
       appSettings: { findFirst: vi.fn() },
@@ -26,14 +23,13 @@ function makeDb(overrides?: Record<string, unknown>) {
     insert: vi.fn().mockReturnThis(),
     values: vi.fn().mockReturnThis(),
     onConflictDoNothing: vi.fn().mockReturnThis(),
-    returning,
+    returning: vi.fn().mockResolvedValue([]),
     select: vi.fn().mockReturnThis(),
     from: vi.fn().mockResolvedValue([{ total: 0 }]),
     update: vi.fn().mockReturnThis(),
     set: vi.fn().mockReturnThis(),
-    where,
+    where: vi.fn().mockResolvedValue({ rowCount: 1 }),
     delete: vi.fn().mockReturnThis(),
-    execute: vi.fn().mockResolvedValue({ rows: [{ id: 17 }], rowCount: 1 }),
     transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
   };
   return { ...db, ...overrides } as never;
@@ -42,11 +38,8 @@ function makeDb(overrides?: Record<string, unknown>) {
 function makeReply() {
   return {
     setCookie: vi.fn(),
+    header: vi.fn(),
   } as never;
-}
-
-function makeRequest(cookies: Record<string, string> = {}, headers: Record<string, string | string[]> = {}) {
-  return { cookies, headers, raw: { socket: {} } } as never;
 }
 
 function makeFullUser(overrides?: Partial<Record<string, unknown>>) {
@@ -77,9 +70,6 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     incrementTokenVersion: vi.fn().mockResolvedValue(undefined),
     generatePasswordResetToken: vi.fn().mockResolvedValue('raw-reset-token'),
   };
-  const jwtService = {
-    sign: vi.fn().mockReturnValue('signed-jwt'),
-  };
   const config = {
     get: vi.fn().mockImplementation((key: string) => {
       if (key === 'auth.jwtRefreshExpiresIn') return '7d';
@@ -100,40 +90,54 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     getDefaultLibraryAccessLibraryIds: vi.fn().mockResolvedValue([]),
     getValue: vi.fn().mockResolvedValue(null),
   };
-  const oidcSessionRepo = {
-    findActiveByUserId: vi.fn().mockResolvedValue(null),
-    revokeByUserId: vi.fn().mockResolvedValue(undefined),
-    touchActiveByUserId: vi.fn().mockResolvedValue(undefined),
+  const credentials = {
+    accessToken: 'signed-jwt',
+    accessTokenExpiresAt: new Date(Date.now() + 900_000).toISOString(),
+    refreshToken: 'a'.repeat(64),
+    refreshTokenExpiresAt: new Date(Date.now() + 604_800_000).toISOString(),
+    sessionId: 1,
   };
-  const oidcDiscovery = {
-    getDiscoveryDoc: vi.fn(),
+  const sessions = { issue: vi.fn().mockResolvedValue(credentials), refresh: vi.fn().mockResolvedValue(credentials) };
+  const sessionRepo = {
+    list: vi.fn(),
+    findRefresh: vi.fn(),
+    findSession: vi.fn(),
+    findActive: vi.fn(),
+    revoke: vi.fn(),
+    isActive: vi.fn(),
   };
 
   const magicLinkRepo = {
     hasActiveByUserId: vi.fn().mockResolvedValue(true),
     countActiveByUserId: vi.fn().mockResolvedValue(0),
   };
-
+  const oidcProviderService = { findEnabled: vi.fn().mockResolvedValue([]) };
+  const authenticationPolicy = {
+    assertPasswordLoginEnabled: vi.fn(),
+    isPasswordLoginEnabled: vi.fn().mockReturnValue(true),
+  };
   const appPasswordService = {
     verify: vi.fn().mockResolvedValue(null),
     findUsableById: vi.fn().mockResolvedValue(null),
-    markUsed: vi.fn().mockResolvedValue(undefined),
+    findUsableGenerationById: vi.fn().mockResolvedValue(null),
+    markUsed: vi.fn().mockResolvedValue(true),
     revokeForRefreshReplay: vi.fn().mockResolvedValue(undefined),
     revokeAllForUser: vi.fn().mockResolvedValue(undefined),
   };
-  const auditEvents = { emit: vi.fn() };
 
+  const auditEvents = { emit: vi.fn() };
   const service = new AuthService(
     userService as never,
-    jwtService as never,
     config as never,
     systemMailService as never,
-    oidcSessionRepo as never,
-    oidcDiscovery as never,
     auditEvents as never,
     magicLinkRepo as never,
     appSettings as never,
+    oidcProviderService as never,
+    authenticationPolicy as never,
     appPasswordService as never,
+    sessions as never,
+    sessionRepo as never,
     db,
   );
 
@@ -141,15 +145,16 @@ function makeService(dbOverrides?: Record<string, unknown>) {
     service,
     db,
     userService,
-    jwtService,
     config,
     systemMailService,
     appSettings,
-    oidcSessionRepo,
-    oidcDiscovery,
     magicLinkRepo,
+    oidcProviderService,
+    authenticationPolicy,
     appPasswordService,
     auditEvents,
+    sessions,
+    sessionRepo,
   };
 }
 
@@ -210,6 +215,30 @@ describe('AuthService', () => {
         appSettings.getValue.mockResolvedValue(value);
         await expect(service.setupStatus()).resolves.toEqual({ needsSetup: false, allowRegistration: false });
       }
+    });
+  });
+
+  describe('loginOptions', () => {
+    it('returns password and registration policy with the enabled OIDC providers atomically', async () => {
+      const { service, appSettings, oidcProviderService } = makeService();
+      appSettings.getValue.mockResolvedValue('true');
+      oidcProviderService.findEnabled.mockResolvedValue([
+        { slug: 'sso', displayName: 'SSO', enabled: true, iconUrl: null, clientId: 'client', scopes: 'openid', issuerUri: 'secret' },
+      ]);
+
+      await expect(service.loginOptions()).resolves.toEqual({
+        passwordLoginEnabled: true,
+        allowRegistration: true,
+        oidcProviders: [{ slug: 'sso', displayName: 'SSO', enabled: true, iconUrl: null, clientId: 'client', scopes: 'openid' }],
+      });
+    });
+
+    it('never advertises registration when password authentication is disabled', async () => {
+      const { service, appSettings, authenticationPolicy } = makeService();
+      appSettings.getValue.mockResolvedValue('true');
+      authenticationPolicy.isPasswordLoginEnabled.mockReturnValue(false);
+
+      await expect(service.loginOptions()).resolves.toMatchObject({ passwordLoginEnabled: false, allowRegistration: false });
     });
   });
 
@@ -420,6 +449,17 @@ describe('AuthService', () => {
   });
 
   describe('login', () => {
+    it('rejects a disabled password login before lookup or lockout mutation', async () => {
+      const { service, db, userService, authenticationPolicy } = makeService();
+      authenticationPolicy.assertPasswordLoginEnabled.mockImplementation(() => {
+        throw new ForbiddenException({ message: 'Password authentication is disabled', errorCode: LoginErrorCode.PASSWORD_AUTH_DISABLED });
+      });
+
+      await expect(service.login({ username: 'jdoe', password: 'wrong' }, makeReply())).rejects.toThrow(ForbiddenException);
+      expect(userService.findByUsername).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
     it('throws UnauthorizedException when user not found', async () => {
       const { service, userService } = makeService();
       userService.findByUsername.mockResolvedValue(null);
@@ -449,7 +489,7 @@ describe('AuthService', () => {
       await expect(service.login({ username: 'jdoe', password: 'wrongpass' }, makeReply())).rejects.toThrow(UnauthorizedException);
     });
 
-    it('does not apply primary-password lockout counters to invalid app-password attempts', async () => {
+    it('does not apply primary-password lockout counters to an invalid app password', async () => {
       const { service, db, userService, appPasswordService } = makeService();
       userService.findByUsername.mockResolvedValue({
         id: 1,
@@ -463,14 +503,14 @@ describe('AuthService', () => {
 
       await expect(service.login({ username: 'jdoe', password: 'boap_invalid' }, makeReply(), '127.0.0.1')).rejects.toThrow(UnauthorizedException);
 
-      expect(appPasswordService.verify).toHaveBeenCalledWith(1, 'boap_invalid', '127.0.0.1');
+      expect(appPasswordService.verify).toHaveBeenCalledWith(1, 'boap_invalid');
       expect(db.update).not.toHaveBeenCalled();
     });
 
-    it('issues an app-bound access token and longer refresh session for a valid app password', async () => {
-      const { service, db, userService, jwtService, appPasswordService, auditEvents } = makeService();
-      const reply = makeReply();
-      const credentialExpiresAt = new Date(Date.now() + 300 * 24 * 60 * 60 * 1000);
+    it('issues an app-password auth session without clearing primary-password lockout state', async () => {
+      const { service, db, userService, appPasswordService, authenticationPolicy, sessions, auditEvents } = makeService();
+      const dto = { username: 'jdoe', password: 'boap_selector_secret', clientKind: 'native' as const, deviceLabel: 'KOReader' };
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
       userService.findByUsername.mockResolvedValue({
         id: 1,
         username: 'jdoe',
@@ -481,61 +521,25 @@ describe('AuthService', () => {
         lockedUntil: new Date(Date.now() + 60_000),
       });
       userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
-      appPasswordService.verify.mockResolvedValue({ id: 17, label: 'KOReader', selector: 'old-selector', expiresAt: credentialExpiresAt });
+      appPasswordService.verify.mockResolvedValue({ id: 17, label: 'KOReader', selector: 'verified-selector', expiresAt });
 
-      const result = await service.login({ username: 'jdoe', password: 'boap_selector_secret' }, reply, '127.0.0.1');
+      const result = await service.login(dto, makeReply(), '127.0.0.1');
 
-      expect(result.user.authMethod).toBe('app_password');
-      expect(jwtService.sign).toHaveBeenCalledWith(expect.objectContaining({ sub: 1, ver: 4, am: 'app_password', aid: 17, sid: expect.any(String) }));
-      expect((db as unknown as { values: vi.Mock }).values).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userId: 1,
-          appPasswordId: 17,
-          tokenHash: expect.any(String),
-          expiresAt: expect.any(Date),
-        }),
-      );
-      const refreshCookie = (reply as unknown as { setCookie: vi.Mock }).setCookie.mock.calls.find(([name]) => name === 'refresh_token');
-      expect(refreshCookie?.[2].maxAge).toBeGreaterThan(89 * 24 * 60 * 60);
-      expect(refreshCookie?.[2].maxAge).toBeLessThanOrEqual(90 * 24 * 60 * 60);
-      expect((db as unknown as Record<string, vi.Mock>).set).not.toHaveBeenCalledWith({ failedLoginAttempts: 0, lockedUntil: null });
-      expect(auditEvents.emit).toHaveBeenCalledWith(
-        AUDIT_EVENT,
-        expect.objectContaining({
-          actorAuth: {
-            authMethod: 'app_password',
-            appPasswordId: 17,
-            appPasswordLabel: 'KOReader',
-          },
-        }),
-      );
-    });
-
-    it('rejects an app login when the credential rotates during session issuance', async () => {
-      const { service, db, userService, appPasswordService } = makeService();
-      userService.findByUsername.mockResolvedValue({
-        id: 1,
-        username: 'jdoe',
-        active: true,
-        passwordHash: 'mock-hash:primary-password',
-        tokenVersion: 4,
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-      });
-      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
-      appPasswordService.verify.mockResolvedValue({
+      expect(authenticationPolicy.assertPasswordLoginEnabled).not.toHaveBeenCalled();
+      expect(sessions.issue).toHaveBeenCalledWith(1, 4, 'app_password', dto, undefined, {
         id: 17,
-        label: 'KOReader',
-        selector: 'old-selector',
-        expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+        selector: 'verified-selector',
+        expiresAt,
+        lastUsedIp: '127.0.0.1',
       });
-      (db as unknown as { execute: vi.Mock }).execute.mockResolvedValue({ rows: [], rowCount: 0 });
-      const reply = makeReply();
-
-      await expect(service.login({ username: 'jdoe', password: 'boap_selector_secret' }, reply, '127.0.0.1')).rejects.toThrow(UnauthorizedException);
-
-      expect((db as unknown as { values: vi.Mock }).values).not.toHaveBeenCalled();
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).not.toHaveBeenCalled();
+      expect(auditEvents.emit).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          actorAuth: { authenticationMethod: 'app_password', appPasswordId: 17, appName: 'KOReader' },
+        }),
+      );
+      expect(result.user.authenticationMethod).toBe('app_password');
+      expect((db as unknown as Record<string, vi.Mock>).set).not.toHaveBeenCalledWith({ failedLoginAttempts: 0, lockedUntil: null });
     });
 
     it('rejects login attempts while account is locked', async () => {
@@ -681,28 +685,70 @@ describe('AuthService', () => {
         expect.objectContaining({ path: '/api/v1/auth', secure: 'auto' }),
       );
     });
+  });
 
-    it('records successful primary authentication timestamps', async () => {
-      const { service, db, userService } = makeService();
-      userService.findByUsername.mockResolvedValue({
-        id: 1,
-        active: true,
-        passwordHash: 'mock-hash:pass',
-        tokenVersion: 1,
-        username: 'jdoe',
-        failedLoginAttempts: 0,
-        lockedUntil: null,
+  describe('refresh', () => {
+    it('preserves app-password binding and expiry when rotating a native refresh token', async () => {
+      const { service, userService, sessionRepo, appPasswordService, sessions } = makeService();
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      sessionRepo.findRefresh.mockResolvedValue({
+        sessionId: 31,
+        userId: 1,
+        authenticationMethod: 'app_password',
       });
-      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser());
+      sessionRepo.findSession.mockResolvedValue({
+        id: 31,
+        userId: 1,
+        clientKind: 'native',
+        authenticationMethod: 'app_password',
+        appPasswordId: 17,
+      });
+      appPasswordService.findUsableGenerationById.mockResolvedValue({ id: 17, selector: 'verified-selector', expiresAt });
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
 
-      await service.login({ username: 'jdoe', password: 'pass' }, makeReply());
+      await service.refresh({ cookies: {}, ip: '127.0.0.1' } as never, makeReply(), { refreshToken: 'raw-refresh' });
 
-      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith(
-        expect.objectContaining({
-          lastLoginAt: expect.any(Date),
-          lastAuthenticatedAt: expect.any(Date),
-        }),
-      );
+      expect(sessions.refresh).toHaveBeenCalledWith('raw-refresh', 1, 4, 31, 'app_password', expiresAt);
+      expect(appPasswordService.markUsed).toHaveBeenCalledWith(1, 17, 'verified-selector', '127.0.0.1');
+    });
+
+    it('binds post-refresh usage to the generation seen before a concurrent rotation', async () => {
+      const { service, userService, sessionRepo, appPasswordService, sessions } = makeService();
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      let storedSelector = 'pre-rotation-selector';
+      let replacementLastUsedIp: string | null = null;
+      sessionRepo.findRefresh.mockResolvedValue({ sessionId: 31, userId: 1, authenticationMethod: 'app_password' });
+      sessionRepo.findSession.mockResolvedValue({
+        id: 31,
+        userId: 1,
+        clientKind: 'native',
+        authenticationMethod: 'app_password',
+        appPasswordId: 17,
+      });
+      appPasswordService.findUsableGenerationById.mockResolvedValue({ id: 17, selector: 'pre-rotation-selector', expiresAt });
+      appPasswordService.markUsed.mockImplementation((_userId: number, _id: number, selector: string, ip?: string) => {
+        if (selector !== storedSelector) return Promise.resolve(false);
+        replacementLastUsedIp = ip ?? null;
+        return Promise.resolve(true);
+      });
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 4 }));
+      sessions.refresh.mockImplementation(() => {
+        storedSelector = 'replacement-selector';
+        appPasswordService.findUsableGenerationById.mockResolvedValue({ id: 17, selector: 'replacement-selector', expiresAt });
+        return Promise.resolve({
+          accessToken: 'rotated-access',
+          accessTokenExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          refreshToken: 'rotated-refresh',
+          refreshTokenExpiresAt: expiresAt.toISOString(),
+          sessionId: 31,
+        });
+      });
+
+      await service.refresh({ cookies: {}, ip: '127.0.0.1' } as never, makeReply(), { refreshToken: 'raw-refresh' });
+
+      expect(appPasswordService.markUsed).toHaveBeenCalledWith(1, 17, 'pre-rotation-selector', '127.0.0.1');
+      expect(appPasswordService.markUsed).not.toHaveBeenCalledWith(1, 17, 'replacement-selector', expect.anything());
+      expect(replacementLastUsedIp).toBeNull();
     });
   });
 
@@ -743,568 +789,25 @@ describe('AuthService', () => {
     });
   });
 
-  describe('refresh', () => {
-    it('throws UnauthorizedException when no cookie present', async () => {
-      const { service } = makeService();
-      await expect(service.refresh(makeRequest(), makeReply())).rejects.toThrow(UnauthorizedException);
-    });
-
-    it('throws UnauthorizedException when token not found in db', async () => {
-      const { service, db } = makeService();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue(null);
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'unknown-token' }), makeReply())).rejects.toThrow(UnauthorizedException);
-    });
-
-    it('returns access-only success for a recently rotated token reuse', async () => {
-      const { service, db, jwtService } = makeService();
-      const reply = makeReply();
-      const rotatedAt = new Date();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: rotatedAt,
-          rotatedAt,
-          replacedByTokenHash: 'replacement-hash',
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        .mockResolvedValueOnce({
-          id: 2,
-          userId: 5,
-          revokedAt: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 7,
-        active: true,
-        provisioningMethod: 'local',
-      });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'recently-rotated-token' }), reply)).resolves.toEqual({ accessToken: 'signed-jwt' });
-
-      expect(jwtService.sign).toHaveBeenCalledWith({ sub: 5, ver: 7 });
-      expect(db.transaction).not.toHaveBeenCalled();
-      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith(expect.objectContaining({ lastAuthenticatedAt: expect.any(Date) }));
-      expect(db.delete).not.toHaveBeenCalled();
-
-      const setCookieCalls = (reply as unknown as { setCookie: vi.Mock }).setCookie.mock.calls;
-      expect(setCookieCalls.map(([name]) => name)).toEqual(['access_token']);
-      expect(setCookieCalls[0]).toEqual(['access_token', 'signed-jwt', expect.objectContaining({ path: '/api', maxAge: 900 })]);
-    });
-
-    it('does not resurrect a recently rotated token after its replacement session is revoked', async () => {
-      const { service, db } = makeService();
-      const reply = makeReply();
-      const rotatedAt = new Date();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: rotatedAt,
-          rotatedAt,
-          replacedByTokenHash: 'replacement-hash',
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        .mockResolvedValueOnce({
-          id: 2,
-          userId: 5,
-          revokedAt: new Date(),
-          expiresAt: new Date(Date.now() + 100_000),
-        });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'recently-rotated-token' }), reply)).rejects.toThrow(UnauthorizedException);
-      expect(db.transaction).toHaveBeenCalled();
-      expect(db.delete).toHaveBeenCalled();
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'refresh_token',
-        '',
-        expect.objectContaining({ path: '/api/v1/auth', maxAge: 0 }),
-      );
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'access_token',
-        '',
-        expect.objectContaining({ path: '/api', maxAge: 0 }),
-      );
-    });
-
-    it('does not accept a recently revoked token unless it was revoked by refresh rotation', async () => {
-      const { service, db } = makeService();
-      const reply = makeReply();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
-        id: 1,
-        userId: 5,
-        revokedAt: new Date(),
-        expiresAt: new Date(Date.now() + 100000),
-      });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'revoked-token' }), reply)).rejects.toThrow(UnauthorizedException);
-      expect(db.update).toHaveBeenCalled();
-      expect(db.delete).toHaveBeenCalled();
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'refresh_token',
-        '',
-        expect.objectContaining({ path: '/api/v1/auth', maxAge: 0 }),
-      );
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'access_token',
-        '',
-        expect.objectContaining({ path: '/api', maxAge: 0 }),
-      );
-    });
-
-    it('revokes all sessions when a rotated token is reused after the grace window', async () => {
-      const { service, db } = makeService();
-      const reply = makeReply();
-      const rotatedAt = new Date(Date.now() - 31_000);
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
-        id: 1,
-        userId: 5,
-        revokedAt: rotatedAt,
-        rotatedAt,
-        replacedByTokenHash: 'replacement-hash',
-        expiresAt: new Date(Date.now() + 100_000),
-      });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'old-rotated-token' }), reply)).rejects.toThrow(UnauthorizedException);
-      expect(db.transaction).toHaveBeenCalled();
-      expect(db.delete).toHaveBeenCalled();
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'refresh_token',
-        '',
-        expect.objectContaining({ path: '/api/v1/auth', maxAge: 0 }),
-      );
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'access_token',
-        '',
-        expect.objectContaining({ path: '/api', maxAge: 0 }),
-      );
-    });
-
-    it('rejects a recently rotated token reuse for disabled users and clears cookies', async () => {
-      const { service, db } = makeService();
-      const reply = makeReply();
-      const rotatedAt = new Date();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: rotatedAt,
-          rotatedAt,
-          replacedByTokenHash: 'replacement-hash',
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        .mockResolvedValueOnce({
-          id: 2,
-          userId: 5,
-          revokedAt: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 7,
-        active: false,
-        provisioningMethod: 'local',
-      });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'recently-rotated-token' }), reply)).rejects.toThrow(UnauthorizedException);
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'refresh_token',
-        '',
-        expect.objectContaining({ path: '/api/v1/auth', maxAge: 0 }),
-      );
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'access_token',
-        '',
-        expect.objectContaining({ path: '/api', maxAge: 0 }),
-      );
-    });
-
-    it('rejects a recently rotated shared-user token reuse when all magic links are revoked', async () => {
-      const { service, db, magicLinkRepo } = makeService();
-      const reply = makeReply();
-      const rotatedAt = new Date();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: rotatedAt,
-          rotatedAt,
-          replacedByTokenHash: 'replacement-hash',
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        .mockResolvedValueOnce({
-          id: 2,
-          userId: 5,
-          revokedAt: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 7,
-        active: true,
-        provisioningMethod: 'shared',
-      });
-      magicLinkRepo.hasActiveByUserId.mockResolvedValue(false);
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'recently-rotated-token' }), reply)).rejects.toThrow(UnauthorizedException);
-      expect(db.transaction).toHaveBeenCalled();
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'refresh_token',
-        '',
-        expect.objectContaining({ path: '/api/v1/auth', maxAge: 0 }),
-      );
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
-        'access_token',
-        '',
-        expect.objectContaining({ path: '/api', maxAge: 0 }),
-      );
-    });
-
-    it('returns access-only success across a chained rotation (N -> N+1 -> live N+2) within grace', async () => {
-      const { service, db, jwtService } = makeService();
-      const reply = makeReply();
-      const rotatedAt = new Date(Date.now() - 5_000);
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst
-        // 1st findFirst: the presented (oldest) token, already rotated to hash-1
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: rotatedAt,
-          rotatedAt,
-          replacedByTokenHash: 'hash-1',
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        // 2nd findFirst: intermediate link, itself rotated to hash-2 (revoked-but-rotated => keep walking)
-        .mockResolvedValueOnce({
-          id: 2,
-          userId: 5,
-          revokedAt: new Date(Date.now() - 1_000),
-          rotatedAt: new Date(Date.now() - 1_000),
-          replacedByTokenHash: 'hash-2',
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        // 3rd findFirst: final live row
-        .mockResolvedValueOnce({
-          id: 3,
-          userId: 5,
-          revokedAt: null,
-          rotatedAt: null,
-          replacedByTokenHash: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 9,
-        active: true,
-        provisioningMethod: 'local',
-      });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'oldest-token' }), reply)).resolves.toEqual({ accessToken: 'signed-jwt' });
-      expect(jwtService.sign).toHaveBeenCalledWith({ sub: 5, ver: 9 });
-      expect(db.transaction).not.toHaveBeenCalled();
-      const setCookieCalls = (reply as unknown as { setCookie: vi.Mock }).setCookie.mock.calls;
-      expect(setCookieCalls.map(([name]) => name)).toEqual(['access_token']);
-    });
-
-    it('treats a chain that ends in a logout-revoked link (no rotatedAt) as theft', async () => {
-      const { service, db } = makeService();
-      const reply = makeReply();
-      const rotatedAt = new Date(Date.now() - 5_000);
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: rotatedAt,
-          rotatedAt,
-          replacedByTokenHash: 'hash-1',
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        .mockResolvedValueOnce({
-          id: 2,
-          userId: 5,
-          revokedAt: new Date(),
-          rotatedAt: null, // <- explicitly logged out, not rotated
-          replacedByTokenHash: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'oldest-token' }), reply)).rejects.toThrow(UnauthorizedException);
-      expect(db.transaction).toHaveBeenCalled();
-      expect(db.delete).toHaveBeenCalled();
-    });
-
-    it('falls back to access-only when the rotation UPDATE matches zero rows AND re-fetch confirms rotation', async () => {
-      const { service, db, jwtService } = makeService();
-      const reply = makeReply();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst
-        // 1st: refresh() initial lookup - presented token still looks live in our snapshot.
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: null,
-          rotatedAt: null,
-          replacedByTokenHash: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        // 2nd: re-fetch after rowCount=0 — concurrent rotation winner already flipped the row.
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: new Date(),
-          rotatedAt: new Date(),
-          replacedByTokenHash: 'replacement-hash',
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        // 3rd: chain walk inside isRecentRefreshRotationReuse — replacement is live.
-        .mockResolvedValueOnce({
-          id: 2,
-          userId: 5,
-          revokedAt: null,
-          rotatedAt: null,
-          replacedByTokenHash: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 3,
-        active: true,
-        provisioningMethod: 'local',
-      });
-      // Simulate the racing competitor: our UPDATE matches 0 rows.
-      (db.where as vi.Mock).mockResolvedValueOnce({ rowCount: 0 });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'racing-token' }), reply)).resolves.toEqual({ accessToken: 'signed-jwt' });
-      expect(jwtService.sign).toHaveBeenCalledWith({ sub: 5, ver: 3 });
-      // No refresh cookie was set on the race-loser path
-      const setCookieCalls = (reply as unknown as { setCookie: vi.Mock }).setCookie.mock.calls;
-      expect(setCookieCalls.map(([name]) => name)).toEqual(['access_token']);
-    });
-
-    it('rejects (and does NOT issue an access token) when the concurrent revoke was a logout, not a rotation', async () => {
-      const { service, db, jwtService } = makeService();
-      const reply = makeReply();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst
-        // 1st: initial lookup - token still appears live to us.
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: null,
-          rotatedAt: null,
-          replacedByTokenHash: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        // 2nd: re-fetch after rowCount=0 — concurrent LOGOUT revoked the row (rotatedAt is null).
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: new Date(),
-          rotatedAt: null,
-          replacedByTokenHash: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 3,
-        active: true,
-        provisioningMethod: 'local',
-      });
-      (db.where as vi.Mock).mockResolvedValueOnce({ rowCount: 0 });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'racing-token' }), reply)).rejects.toThrow(UnauthorizedException);
-      // CRITICAL: no access token cookie set, both cookies cleared (maxAge: 0).
-      // (jwtService.sign may have been called speculatively before the transaction lost the race,
-      //  but the resulting token must NEVER be sent to the client.)
-      const setCookieCalls = (reply as unknown as { setCookie: vi.Mock }).setCookie.mock.calls;
-      expect(setCookieCalls.map(([name]) => name)).toEqual(['refresh_token', 'access_token']);
-      expect(setCookieCalls[0]).toEqual(['refresh_token', '', expect.objectContaining({ path: '/api/v1/auth', maxAge: 0 })]);
-      expect(setCookieCalls[1]).toEqual(['access_token', '', expect.objectContaining({ path: '/api', maxAge: 0 })]);
-      // No setCookie call ever emitted a non-empty access token value.
-      const accessTokenSetCalls = setCookieCalls.filter(([name, value]) => name === 'access_token' && value !== '');
-      expect(accessTokenSetCalls).toHaveLength(0);
-      void jwtService;
-    });
-
-    it('honours refreshRotationGraceMs from config when widened', async () => {
-      const { service, db, config, jwtService } = makeService();
-      (config.get as vi.Mock).mockImplementation((key: string) => {
-        if (key === 'auth.jwtRefreshExpiresIn') return '7d';
-        if (key === 'auth.jwtExpiresIn') return '15m';
-        if (key === 'auth.refreshRotationGraceMs') return 120_000; // widen to 2m
-        if (key === 'app.nodeEnv') return 'test';
-        return undefined;
-      });
-      const reply = makeReply();
-      const rotatedAt = new Date(Date.now() - 90_000); // outside default 30s window, inside widened 120s
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst
-        .mockResolvedValueOnce({
-          id: 1,
-          userId: 5,
-          revokedAt: rotatedAt,
-          rotatedAt,
-          replacedByTokenHash: 'replacement-hash',
-          expiresAt: new Date(Date.now() + 100_000),
-        })
-        .mockResolvedValueOnce({
-          id: 2,
-          userId: 5,
-          revokedAt: null,
-          rotatedAt: null,
-          replacedByTokenHash: null,
-          expiresAt: new Date(Date.now() + 100_000),
-        });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 4,
-        active: true,
-        provisioningMethod: 'local',
-      });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'widened-grace-token' }), reply)).resolves.toEqual({ accessToken: 'signed-jwt' });
-      expect(jwtService.sign).toHaveBeenCalledWith({ sub: 5, ver: 4 });
-    });
-
-    it('throws UnauthorizedException when token is expired', async () => {
-      const { service, db } = makeService();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
-        id: 1,
-        userId: 5,
-        revokedAt: null,
-        expiresAt: new Date(Date.now() - 1000),
-      });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'expired-token' }), makeReply())).rejects.toThrow(UnauthorizedException);
-    });
-
-    it('rotates token and sets cookies when refresh succeeds', async () => {
-      const { service, db, oidcSessionRepo } = makeService();
-      const reply = makeReply();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
-        id: 11,
-        userId: 5,
-        revokedAt: null,
-        expiresAt: new Date(Date.now() + 60_000),
-      });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 2,
-        active: true,
-      });
-
-      const result = await service.refresh(makeRequest({ refresh_token: 'ok-token' }), reply);
-      expect(result).toEqual({ accessToken: 'signed-jwt' });
-      expect(db.transaction).toHaveBeenCalled();
-      const rotationSetArg = (db as unknown as Record<string, vi.Mock>).set.mock.calls[0]?.[0] as { revokedAt?: Date; rotatedAt?: Date };
-      expect(rotationSetArg.revokedAt).toBeInstanceOf(Date);
-      expect(rotationSetArg.rotatedAt).toBe(rotationSetArg.revokedAt);
-      expect(rotationSetArg).toEqual(expect.objectContaining({ replacedByTokenHash: expect.any(String) }));
-      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith(expect.objectContaining({ lastAuthenticatedAt: expect.any(Date) }));
-      expect(oidcSessionRepo.touchActiveByUserId).toHaveBeenCalledWith(5, expect.any(Date));
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalled();
-    });
-
-    it('preserves the app-password binding and longer window across refresh rotation', async () => {
-      const { service, db, jwtService, oidcSessionRepo, appPasswordService } = makeService();
-      const reply = makeReply();
-      const appPasswordExpiresAt = new Date(Date.now() + 300 * 24 * 60 * 60 * 1000);
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
-        id: 11,
-        userId: 5,
-        appPasswordId: 17,
-        sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
-        revokedAt: null,
-        expiresAt: new Date(Date.now() + 60_000),
-      });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 2,
-        active: true,
-        provisioningMethod: 'local',
-      });
-      appPasswordService.findUsableById.mockResolvedValue({ id: 17, selector: 'old-selector', expiresAt: appPasswordExpiresAt });
-      const request = makeRequest({ refresh_token: 'app-token' }) as unknown as { ip: string };
-      request.ip = '127.0.0.1';
-
-      await expect(service.refresh(request as never, reply)).resolves.toEqual({ accessToken: 'signed-jwt' });
-
-      expect(jwtService.sign).toHaveBeenCalledWith({
-        sub: 5,
-        ver: 2,
-        am: 'app_password',
-        aid: 17,
-        sid: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
-      });
-      expect((db as unknown as { values: vi.Mock }).values).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userId: 5,
-          appPasswordId: 17,
-          sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
-          expiresAt: expect.any(Date),
-        }),
-      );
-      expect(appPasswordService.markUsed).toHaveBeenCalledWith(17, '127.0.0.1');
-      expect(oidcSessionRepo.touchActiveByUserId).not.toHaveBeenCalled();
-      const refreshCookie = (reply as unknown as { setCookie: vi.Mock }).setCookie.mock.calls.find(([name]) => name === 'refresh_token');
-      expect(refreshCookie?.[2].maxAge).toBeGreaterThan(89 * 24 * 60 * 60);
-      expect(refreshCookie?.[2].maxAge).toBeLessThanOrEqual(90 * 24 * 60 * 60);
-    });
-
-    it('rejects an app refresh when the credential rotates during token rotation', async () => {
-      const { service, db, appPasswordService } = makeService();
-      const reply = makeReply();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
-        id: 11,
-        userId: 5,
-        appPasswordId: 17,
-        sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
-        revokedAt: null,
-        expiresAt: new Date(Date.now() + 60_000),
-      });
-      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
-        id: 5,
-        tokenVersion: 2,
-        active: true,
-        provisioningMethod: 'local',
-      });
-      appPasswordService.findUsableById.mockResolvedValue({
-        id: 17,
-        selector: 'old-selector',
-        expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
-      });
-      (db as unknown as { execute: vi.Mock }).execute.mockResolvedValue({ rows: [], rowCount: 0 });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'app-token' }), reply)).rejects.toThrow(UnauthorizedException);
-
-      expect((db as unknown as { values: vi.Mock }).values).not.toHaveBeenCalled();
-      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).not.toHaveBeenCalled();
-    });
-
-    it('isolates refresh replay response to the affected app password', async () => {
-      const { service, db, appPasswordService, userService } = makeService();
-      const reply = makeReply();
-      const row = {
-        id: 11,
-        userId: 5,
-        appPasswordId: 17,
-        revokedAt: new Date(Date.now() - 60_000),
-        rotatedAt: new Date(Date.now() - 60_000),
-        replacedByTokenHash: 'replacement-hash',
-        expiresAt: new Date(Date.now() + 60_000),
-      };
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue(row);
-      appPasswordService.findUsableById.mockResolvedValue({ id: 17, expiresAt: new Date(Date.now() + 60_000) });
-
-      await expect(service.refresh(makeRequest({ refresh_token: 'replayed-app-token' }), reply)).rejects.toThrow(UnauthorizedException);
-
-      expect(appPasswordService.revokeForRefreshReplay).toHaveBeenCalledWith(17);
-      expect(appPasswordService.revokeAllForUser).not.toHaveBeenCalled();
-      expect(userService.incrementTokenVersion).not.toHaveBeenCalled();
-      expect(db.delete).not.toHaveBeenCalled();
-    });
-  });
-
   describe('validateUser', () => {
+    it('rejects password and legacy access tokens in SSO-only mode before loading the user', async () => {
+      const { service, userService, authenticationPolicy } = makeService();
+      authenticationPolicy.isPasswordLoginEnabled.mockReturnValue(false);
+
+      await expect(service.validateUser(1, 1, 'password')).rejects.toThrow(UnauthorizedException);
+      await expect(service.validateUser(1, 1, 'legacy')).rejects.toThrow(UnauthorizedException);
+      expect(userService.findByIdWithPermissions).not.toHaveBeenCalled();
+    });
+
+    it.each(['oidc', 'magic_link', 'app_password'] as const)('accepts an active %s session in SSO-only mode', async (authenticationMethod) => {
+      const { service, userService, authenticationPolicy } = makeService();
+      authenticationPolicy.isPasswordLoginEnabled.mockReturnValue(false);
+      const user = makeFullUser({ tokenVersion: 2 });
+      userService.findByIdWithPermissions.mockResolvedValue(user);
+
+      await expect(service.validateUser(1, 2, authenticationMethod)).resolves.toEqual({ ...user, authenticationMethod });
+    });
+
     it('throws UnauthorizedException when user not found', async () => {
       const { service, userService } = makeService();
       userService.findByIdWithPermissions.mockResolvedValue(null);
@@ -1332,22 +835,7 @@ describe('AuthService', () => {
       userService.findByIdWithPermissions.mockResolvedValue(user);
 
       const result = await service.validateUser(1, 2);
-      expect(result).toEqual({ ...user, authMethod: 'primary' });
-    });
-
-    it('requires a live refresh-token family for session-bound access tokens', async () => {
-      const { service, db, userService } = makeService();
-      const user = makeFullUser({ tokenVersion: 2 });
-      userService.findByIdWithPermissions.mockResolvedValue(user);
-      const findSession = (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst;
-      findSession.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 44 });
-
-      await expect(service.validateUser(1, 2, undefined, '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10')).rejects.toThrow(UnauthorizedException);
-      await expect(service.validateUser(1, 2, undefined, '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10')).resolves.toEqual({
-        ...user,
-        authMethod: 'primary',
-        sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10',
-      });
+      expect(result).toEqual(user);
     });
 
     it('throws UnauthorizedException for shared user with no active magic links', async () => {
@@ -1365,29 +853,89 @@ describe('AuthService', () => {
       magicLinkRepo.hasActiveByUserId.mockResolvedValue(true);
 
       const result = await service.validateUser(1, 2);
-      expect(result).toEqual({ ...user, authMethod: 'primary' });
+      expect(result).toEqual(user);
     });
+  });
 
-    it('returns app-password authentication context for a usable credential', async () => {
-      const { service, userService, appPasswordService } = makeService();
+  describe('validateSessionUser', () => {
+    it('derives the app-password attribution only from the active auth session', async () => {
+      const { service, userService, sessionRepo, appPasswordService } = makeService();
       const user = makeFullUser({ tokenVersion: 2 });
       userService.findByIdWithPermissions.mockResolvedValue(user);
-      appPasswordService.findUsableById.mockResolvedValue({ id: 17, label: 'iPhone app', expiresAt: new Date(Date.now() + 60_000) });
+      sessionRepo.findActive.mockResolvedValue({ id: 31, userId: 1, appPasswordId: 17 });
+      appPasswordService.findUsableById.mockResolvedValue({ id: 17, label: 'KOReader', expiresAt: new Date(Date.now() + 60_000) });
 
-      await expect(service.validateUser(1, 2, 17)).resolves.toEqual({
+      await expect(service.validateSessionUser(1, 2, 'app_password', 31)).resolves.toEqual({
         ...user,
-        authMethod: 'app_password',
+        authenticationMethod: 'app_password',
+        sessionId: 31,
         appPasswordId: 17,
-        appPasswordLabel: 'iPhone app',
+        appPasswordName: 'KOReader',
       });
+      expect(sessionRepo.findActive).toHaveBeenCalledWith(31, 1, 2, 'app_password');
+      expect(appPasswordService.findUsableById).toHaveBeenCalledWith(1, 17);
     });
 
-    it('rejects an access token after its app password is revoked or expired', async () => {
-      const { service, userService, appPasswordService } = makeService();
-      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ tokenVersion: 2 }));
+    it('rejects an app-password claim when the active session has no usable credential', async () => {
+      const { service, sessionRepo, appPasswordService } = makeService();
+      sessionRepo.findActive.mockResolvedValue({ id: 31, userId: 1, appPasswordId: 17 });
       appPasswordService.findUsableById.mockResolvedValue(null);
 
-      await expect(service.validateUser(1, 2, 17)).rejects.toThrow(UnauthorizedException);
+      await expect(service.validateSessionUser(1, 2, 'app_password', 31)).rejects.toThrow(UnauthorizedException);
+    });
+  });
+
+  /**
+   * The resolution a caller acting on somebody's behalf gets. Every rule `validateUser` applies
+   * except the token version, which belongs to a token the caller does not hold; the point of the
+   * shared helper is that a way in that is closed to a login stays closed to a delegated call.
+   */
+  describe('findActingUser', () => {
+    it('returns null when the user does not exist', async () => {
+      const { service, userService } = makeService();
+      userService.findByIdWithPermissions.mockResolvedValue(null);
+
+      await expect(service.findActingUser(1)).resolves.toBeNull();
+    });
+
+    it('returns null when the user is deactivated', async () => {
+      const { service, userService } = makeService();
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ active: false }));
+
+      await expect(service.findActingUser(1)).resolves.toBeNull();
+    });
+
+    it('returns null for a shared user whose magic links were all revoked', async () => {
+      const { service, userService, magicLinkRepo } = makeService();
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ provisioningMethod: 'shared' }));
+      magicLinkRepo.hasActiveByUserId.mockResolvedValue(false);
+
+      await expect(service.findActingUser(1)).resolves.toBeNull();
+    });
+
+    it('returns a shared user who still has a live magic link', async () => {
+      const { service, userService, magicLinkRepo } = makeService();
+      const user = makeFullUser({ provisioningMethod: 'shared' });
+      userService.findByIdWithPermissions.mockResolvedValue(user);
+      magicLinkRepo.hasActiveByUserId.mockResolvedValue(true);
+
+      await expect(service.findActingUser(1)).resolves.toEqual(user);
+    });
+
+    it('never asks about magic links for an ordinary account', async () => {
+      const { service, userService, magicLinkRepo } = makeService();
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ provisioningMethod: 'local' }));
+
+      await service.findActingUser(1);
+      expect(magicLinkRepo.hasActiveByUserId).not.toHaveBeenCalled();
+    });
+
+    it('ignores the token version, which belongs to a token this caller does not hold', async () => {
+      const { service, userService } = makeService();
+      const user = makeFullUser({ tokenVersion: 9 });
+      userService.findByIdWithPermissions.mockResolvedValue(user);
+
+      await expect(service.findActingUser(1)).resolves.toEqual(user);
     });
   });
 
@@ -1588,11 +1136,9 @@ describe('AuthService', () => {
 
   describe('getSessions', () => {
     it('returns active sessions', async () => {
-      const { service, db } = makeService();
+      const { service, sessionRepo } = makeService();
       const now = new Date();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findMany.mockResolvedValue([
-        { id: 1, createdAt: new Date(now.getTime() - 1000), expiresAt: new Date(now.getTime() + 60000) },
-      ]);
+      sessionRepo.list.mockResolvedValue([{ id: 1, createdAt: new Date(now.getTime() - 1000), expiresAt: new Date(now.getTime() + 60000) }]);
 
       const sessions = await service.getSessions(1);
       expect(sessions).toHaveLength(1);
@@ -1602,8 +1148,8 @@ describe('AuthService', () => {
 
   describe('revokeSession', () => {
     it('throws ForbiddenException when session belongs to another user', async () => {
-      const { service, db } = makeService();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
+      const { service, sessionRepo } = makeService();
+      sessionRepo.findSession.mockResolvedValue({
         id: 9,
         userId: 999,
       });
@@ -1730,119 +1276,6 @@ describe('AuthService', () => {
       expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith(
         expect.objectContaining({ failedLoginAttempts: 0, lockedUntil: null }),
       );
-    });
-  });
-
-  describe('logout', () => {
-    it('returns empty object when no refresh cookie', async () => {
-      const { service } = makeService();
-      const result = await service.logout(makeRequest(), makeReply());
-      expect(result).toEqual({});
-    });
-
-    it('revokes OIDC session and returns empty object when OIDC is disabled', async () => {
-      const { service, db, userService, appSettings, oidcSessionRepo } = makeService();
-      (db as unknown as { returning: vi.Mock }).returning.mockResolvedValue([
-        { id: 1, userId: 5, appPasswordId: null, sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10' },
-      ]);
-      userService.incrementTokenVersion.mockResolvedValue(undefined);
-      appSettings.getOidcConfig.mockResolvedValue({ enabled: false });
-      oidcSessionRepo.findActiveByUserId.mockResolvedValue({
-        idTokenHint: 'id-token-hint',
-      });
-
-      const result = await service.logout(makeRequest({ refresh_token: 'some-token' }), makeReply());
-      expect(result).toEqual({});
-      expect(oidcSessionRepo.revokeByUserId).toHaveBeenCalledWith(5);
-    });
-
-    it('revokes OIDC session even when there is no id token hint', async () => {
-      const { service, db, userService, oidcSessionRepo } = makeService();
-      (db as unknown as { returning: vi.Mock }).returning.mockResolvedValue([
-        { id: 1, userId: 6, appPasswordId: null, sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10' },
-      ]);
-      userService.incrementTokenVersion.mockResolvedValue(undefined);
-      oidcSessionRepo.findActiveByUserId.mockResolvedValue({
-        idTokenHint: null,
-      });
-
-      const result = await service.logout(makeRequest({ refresh_token: 'some-token' }), makeReply());
-      expect(result).toEqual({});
-      expect(oidcSessionRepo.revokeByUserId).toHaveBeenCalledWith(6);
-    });
-
-    it('returns logout URL when OIDC end-session endpoint is available', async () => {
-      const { service, db, userService, oidcSessionRepo, oidcDiscovery } = makeService();
-      (db as unknown as { returning: vi.Mock }).returning.mockResolvedValue([
-        { id: 1, userId: 7, appPasswordId: null, sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10' },
-      ]);
-      userService.incrementTokenVersion.mockResolvedValue(undefined);
-      (db.query as never as Record<string, Record<string, vi.Mock>>).oidcProviders.findFirst.mockResolvedValue({
-        id: 1,
-        enabled: true,
-        issuerUri: 'https://issuer.example',
-      });
-      oidcSessionRepo.findActiveByUserId.mockResolvedValue({
-        providerId: 1,
-        idTokenHint: 'id-token-hint',
-      });
-      oidcDiscovery.getDiscoveryDoc.mockResolvedValue({
-        authorizationEndpoint: 'https://issuer.example/auth',
-        tokenEndpoint: 'https://issuer.example/token',
-        userinfoEndpoint: 'https://issuer.example/userinfo',
-        jwksUri: 'https://issuer.example/jwks',
-        issuer: 'https://issuer.example',
-        endSessionEndpoint: 'https://issuer.example/logout',
-      });
-
-      const request = makeRequest({ refresh_token: 'some-token' });
-      request.headers.origin = 'http://localhost:5173';
-
-      const result = await service.logout(request, makeReply());
-      expect(result).toEqual({
-        logoutUrl: 'https://issuer.example/logout?id_token_hint=id-token-hint&post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A5173%2Flogin',
-      });
-      expect(oidcSessionRepo.revokeByUserId).toHaveBeenCalledWith(7);
-    });
-
-    it('revokes OIDC session and returns empty object when end-session endpoint is missing', async () => {
-      const { service, db, userService, oidcSessionRepo, oidcDiscovery } = makeService();
-      (db as unknown as { returning: vi.Mock }).returning.mockResolvedValue([
-        { id: 1, userId: 8, appPasswordId: null, sessionFamilyId: '418f15f2-a7d9-4c31-8a94-0c1b4b6c2d10' },
-      ]);
-      userService.incrementTokenVersion.mockResolvedValue(undefined);
-      (db.query as never as Record<string, Record<string, vi.Mock>>).oidcProviders.findFirst.mockResolvedValue({
-        id: 1,
-        enabled: true,
-        issuerUri: 'https://issuer.example',
-      });
-      oidcSessionRepo.findActiveByUserId.mockResolvedValue({
-        providerId: 1,
-        idTokenHint: 'id-token-hint',
-      });
-      oidcDiscovery.getDiscoveryDoc.mockResolvedValue({
-        authorizationEndpoint: 'https://issuer.example/auth',
-        tokenEndpoint: 'https://issuer.example/token',
-        userinfoEndpoint: 'https://issuer.example/userinfo',
-        jwksUri: 'https://issuer.example/jwks',
-        issuer: 'https://issuer.example',
-      });
-
-      const result = await service.logout(makeRequest({ refresh_token: 'some-token' }), makeReply());
-      expect(result).toEqual({});
-      expect(oidcSessionRepo.revokeByUserId).toHaveBeenCalledWith(8);
-    });
-  });
-
-  describe('revokeAllUserSessions', () => {
-    it('bumps tokenVersion and revokes all refresh tokens in a transaction', async () => {
-      const { service, db } = makeService();
-
-      await service.revokeAllUserSessions(5);
-
-      expect(db.transaction).toHaveBeenCalled();
-      expect(db.update).toHaveBeenCalled();
-      expect(db.set).toHaveBeenCalled();
     });
   });
 });

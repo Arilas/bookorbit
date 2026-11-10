@@ -32,7 +32,7 @@ describe('toReadingSessionSourceDescriptor', () => {
 
   it('uses the App Password identity for native BookOrbit sessions', () => {
     expect(toReadingSessionSourceDescriptor('web', 42, 'iPhone app')).toEqual({
-      key: 'app-password:42',
+      key: 'app-password:42:bookorbit',
       label: 'iPhone app',
       bucket: 'bookorbit',
       kind: 'app_password',
@@ -63,12 +63,15 @@ describe('toReadingSessionSourceDescriptor', () => {
 
 describe('reading session source bucket constants', () => {
   it('defines and labels every bucket', () => {
-    expect(READING_SESSION_SOURCE_BUCKETS).toEqual(['bookorbit', 'koreader', 'kobo']);
+    expect(READING_SESSION_SOURCE_BUCKETS).toEqual(['bookorbit', 'ios', 'watchos', 'android', 'koreader', 'kobo']);
     expect(READING_SESSION_SOURCE_BUCKET_LABELS).toEqual({
       bookorbit: 'BookOrbit',
+      ios: 'iOS app',
+      watchos: 'Apple Watch',
+      android: 'Android app',
       koreader: 'KOReader',
       kobo: 'Kobo',
     });
-    expect(emptySourceBucketRecord()).toEqual({ bookorbit: 0, koreader: 0, kobo: 0 });
+    expect(emptySourceBucketRecord()).toEqual({ bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 0 });
   });
 });

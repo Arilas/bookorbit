@@ -12,18 +12,24 @@ import fastifyMultipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import fastifyHelmet from '@fastify/helmet';
 import fastifyCompress from '@fastify/compress';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { appConfig } from './config/config';
+import { DEV_CLIENT_ORIGIN } from './config/dev-client-origin';
 import { setupSwaggerDocs } from './swagger';
 import {
   parseBooleanEnv,
   parseTrustProxy,
   buildHelmetOptions,
   buildEmptyJsonBodyStream,
+  markEmptyBodyInjected,
   registerConditionalHsts,
+  registerDeclaredBodyLimits,
+  registerDeclaredCompressionOptOuts,
   registerEmptyBodyContentTypeParser,
   shouldInjectEmptyJsonBody,
   shouldServeSpaFallback,
 } from './common/utils/bootstrap.utils';
+import { applyStaticCacheHeaders } from './common/utils/static-cache.utils';
 
 const MAX_COVER_BYTES = 20 * 1024 * 1024;
 
@@ -31,21 +37,28 @@ async function bootstrap() {
   const allowCloudflareInsights = parseBooleanEnv(process.env.CSP_ALLOW_CLOUDFLARE_INSIGHTS, false);
 
   const adapter = new FastifyAdapter({ logger: false, trustProxy: parseTrustProxy(process.env.TRUST_PROXY), maxParamLength: 1000 });
-  const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, { bufferLogs: true });
+  // Raw JSON bytes are what App Attest assertions hash for routes that take a body.
+  const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, { bufferLogs: true, rawBody: true });
   app.useLogger(app.get(Logger));
 
   const fastify = adapter.getInstance();
+  // Nest adds originalUrl to the raw request, but these helpers only use standard Fastify APIs.
+  const standardFastify = fastify as unknown as FastifyInstance;
+
+  registerDeclaredBodyLimits(fastify);
+  registerDeclaredCompressionOptOuts(fastify);
 
   // Fastify's default JSON parser rejects empty bodies, so we inject '{}' before parsing.
   fastify.addHook('preParsing', (request, _reply, payload, done) => {
     if (shouldInjectEmptyJsonBody(request.method, request.headers)) {
+      markEmptyBodyInjected(request);
       done(null, buildEmptyJsonBodyStream(request.headers));
       return;
     }
     done(null, payload);
   });
   // Reverse proxies can forward empty mutating requests with chunked transfer or an unsupported content type.
-  registerEmptyBodyContentTypeParser(fastify);
+  registerEmptyBodyContentTypeParser(standardFastify);
 
   // Echo pino-http's request ID so clients can correlate errors with server logs.
   fastify.addHook('onSend', (_request, reply, _payload, done) => {
@@ -78,7 +91,7 @@ async function bootstrap() {
   }
 
   await app.register(fastifyHelmet as never, buildHelmetOptions({ allowCloudflareInsights }));
-  registerConditionalHsts(fastify);
+  registerConditionalHsts(standardFastify);
 
   await app.register(fastifyCompress as never, { encodings: ['gzip', 'br'] });
 
@@ -87,7 +100,7 @@ async function bootstrap() {
 
   if (process.env.NODE_ENV !== 'production') {
     app.enableCors({
-      origin: process.env.CLIENT_URL ?? 'http://localhost:5173',
+      origin: process.env.CLIENT_URL ?? DEV_CLIENT_ORIGIN,
       credentials: true,
     });
   }
@@ -104,18 +117,23 @@ async function bootstrap() {
         if (!shouldServeSpaFallback(request.url)) {
           return reply.status(404).send({ statusCode: 404, message: 'Not Found', path: request.url });
         }
-        return reply.sendFile('index.html');
+        // Nest's SWC type checker does not retain @fastify/static's reply augmentation
+        // through the adapter callback, even though the plugin decorates this reply at runtime.
+        const staticReply = reply as typeof reply & { sendFile(filename: string): typeof reply };
+        return staticReply.sendFile('index.html');
       });
     };
 
+    const publicRoot = join(__dirname, '..', 'public');
     await app.register(fastifyStatic as never, {
-      root: join(__dirname, '..', 'public'),
+      root: publicRoot,
       prefix: '/',
+      setHeaders: (reply: FastifyReply, filePath: string) => applyStaticCacheHeaders(reply, publicRoot, filePath),
     });
   }
 
   app.enableShutdownHooks();
-  await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
+  await app.listen(process.env.PORT ?? 3000, appConfiguration.host);
 }
 
 bootstrap().catch((err: unknown) => {

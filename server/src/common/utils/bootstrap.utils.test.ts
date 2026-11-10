@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyHelmet from '@fastify/helmet';
+import fastifyCompress from '@fastify/compress';
 import { request } from 'http';
 import type { AddressInfo } from 'net';
 import {
@@ -10,6 +11,9 @@ import {
   buildHelmetOptions,
   buildEmptyJsonBodyStream,
   registerEmptyBodyContentTypeParser,
+  applyDeclaredBodyLimit,
+  applyDeclaredCompressionOptOut,
+  registerDeclaredCompressionOptOuts,
   shouldInjectEmptyJsonBody,
   isSecureProtocol,
   applyConditionalHsts,
@@ -98,19 +102,12 @@ describe('parseTrustProxy', () => {
     expect(parseTrustProxy('   ')).toBe('loopback,linklocal,uniquelocal');
   });
 
-  it.each(['false', '0', 'no', 'off'])('returns false for falsy string %s', (val) => {
+  it.each(['false', 'no', 'off'])('returns false for falsy string %s', (val) => {
     expect(parseTrustProxy(val)).toBe(false);
   });
 
-  it.each(['true', '1', 'yes', 'on'])('returns true for truthy string %s', (val) => {
+  it.each(['true', 'yes', 'on'])('returns true for truthy string %s', (val) => {
     expect(parseTrustProxy(val)).toBe(true);
-  });
-
-  it('parses non-negative integer hop counts', () => {
-    expect(parseTrustProxy('0')).toBe(false); // '0' is a falsy string, handled before hop-count check
-    expect(parseTrustProxy('1')).toBe(true); // '1' is a truthy string
-    expect(parseTrustProxy('2')).toBe(2);
-    expect(parseTrustProxy('10')).toBe(10);
   });
 
   it('returns the raw string for arbitrary proxy values', () => {
@@ -119,14 +116,8 @@ describe('parseTrustProxy', () => {
     expect(parseTrustProxy('loopback')).toBe('loopback');
   });
 
-  it('returns the raw string for decimal numbers (not valid integers)', () => {
-    expect(parseTrustProxy('1.5')).toBe('1.5');
-    expect(parseTrustProxy('2.9')).toBe('2.9');
-  });
-
-  it('returns the raw string for negative integers', () => {
-    expect(parseTrustProxy('-1')).toBe('-1');
-    expect(parseTrustProxy('-5')).toBe('-5');
+  it.each(['0', '1', '2', '10', '1.5', '2.9', '-1', '-5', '1e2'])('rejects numeric hop-count value %s', (value) => {
+    expect(() => parseTrustProxy(value)).toThrow('Numeric TRUST_PROXY hop counts are not supported; configure trusted proxy IP or CIDR ranges');
   });
 
   it('trims surrounding whitespace before evaluating', () => {
@@ -594,3 +585,95 @@ async function requestApp(
     req.end();
   });
 }
+
+describe('applyDeclaredBodyLimit', () => {
+  it('copies a declared limit onto the route option Fastify actually reads', () => {
+    const route: { config?: unknown; bodyLimit?: number } = { config: { bodyLimit: 6 * 1024 * 1024 } };
+    applyDeclaredBodyLimit(route);
+    expect(route.bodyLimit).toBe(6 * 1024 * 1024);
+  });
+
+  it('leaves a route without a declared limit on the Fastify default', () => {
+    const routes: Array<{ config?: unknown; bodyLimit?: number }> = [
+      {},
+      { config: {} },
+      { config: { bodyLimit: 0 } },
+      { config: { bodyLimit: -1 } },
+      { config: { bodyLimit: '6mb' } },
+      { config: { bodyLimit: 1.5 } },
+    ];
+    for (const route of routes) {
+      applyDeclaredBodyLimit(route);
+      expect(route.bodyLimit).toBeUndefined();
+    }
+  });
+
+  it('does not overwrite a limit already set on the route options', () => {
+    const route: { config?: unknown; bodyLimit?: number } = { config: {}, bodyLimit: 1024 };
+    applyDeclaredBodyLimit(route);
+    expect(route.bodyLimit).toBe(1024);
+  });
+});
+
+describe('applyDeclaredCompressionOptOut', () => {
+  it('copies a declared opt-out onto the route option @fastify/compress reads', () => {
+    const route: { config?: unknown; compress?: unknown } = { config: { compress: false } };
+    applyDeclaredCompressionOptOut(route);
+    expect(route.compress).toBe(false);
+  });
+
+  it('leaves routes without an explicit opt-out on the global compression setting', () => {
+    const routes: Array<{ config?: unknown; compress?: unknown }> = [
+      {},
+      { config: {} },
+      { config: { compress: true } },
+      { config: { compress: 'no' } },
+    ];
+    for (const route of routes) {
+      applyDeclaredCompressionOptOut(route);
+      expect(route.compress).toBeUndefined();
+    }
+  });
+});
+
+describe('registerDeclaredCompressionOptOuts (integration)', () => {
+  const fb2Body = `<?xml version="1.0"?><FictionBook>${'<p>text</p>'.repeat(500)}</FictionBook>`;
+
+  async function withCompressApp(run: (app: FastifyInstance) => Promise<void>): Promise<void> {
+    const app = Fastify({ logger: false });
+    registerDeclaredCompressionOptOuts(app);
+    await app.register(fastifyCompress, { encodings: ['gzip', 'br'] });
+    app.route({
+      method: 'GET',
+      url: '/raw',
+      config: { compress: false },
+      handler: (_request, reply) => reply.type('application/x-fictionbook+xml').send(fb2Body),
+    });
+    app.route({ method: 'GET', url: '/default', handler: (_request, reply) => reply.type('application/x-fictionbook+xml').send(fb2Body) });
+
+    try {
+      await app.ready();
+      await run(app);
+    } finally {
+      await app.close();
+    }
+  }
+
+  it('serves a route that opted out byte for byte with its Content-Length', async () => {
+    await withCompressApp(async (app) => {
+      const response = await app.inject({ method: 'GET', url: '/raw', headers: { 'accept-encoding': 'gzip, br' } });
+
+      expect(response.headers['content-encoding']).toBeUndefined();
+      expect(response.headers['content-length']).toBe(String(Buffer.byteLength(fb2Body)));
+      expect(response.body).toBe(fb2Body);
+    });
+  });
+
+  it('keeps compressing routes that did not opt out', async () => {
+    await withCompressApp(async (app) => {
+      const response = await app.inject({ method: 'GET', url: '/default', headers: { 'accept-encoding': 'gzip' } });
+
+      expect(response.headers['content-encoding']).toBe('gzip');
+    });
+  });
+});

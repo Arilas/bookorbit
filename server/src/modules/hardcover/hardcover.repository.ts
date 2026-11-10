@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Permission } from '@bookorbit/types';
+import { isAudioFormat, Permission } from '@bookorbit/types';
 import type { ContentFilterRules, ReadStatus } from '@bookorbit/types';
 import { and, asc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -46,6 +46,7 @@ export interface BookSyncData {
   title: string | null;
   authorName: string | null;
   hardcoverMetadataId: string | null;
+  hardcoverEditionId?: string | null;
   pageCount: number | null;
   format: string | null;
   status: string;
@@ -130,7 +131,7 @@ export class HardcoverRepository {
   async findBookStatesByBookIds(userId: number, bookIds: number[]): Promise<HardcoverBookState[]> {
     if (bookIds.length === 0) return [];
     return this.db.query.hardcoverBookState.findMany({
-      where: and(eq(schema.hardcoverBookState.userId, userId), inArray(schema.hardcoverBookState.bookId, bookIds)),
+      where: and(eq(schema.hardcoverBookState.userId, userId), sql`${schema.hardcoverBookState.bookId} = any(${sql.param(bookIds)}::integer[])`),
     });
   }
 
@@ -155,6 +156,53 @@ export class HardcoverRepository {
       .where(and(eq(schema.hardcoverBookState.userId, userId), eq(schema.hardcoverBookState.bookId, bookId)))
       .returning({ id: schema.hardcoverBookState.id });
     return row != null;
+  }
+
+  /**
+   * Moves a user's link to a different Hardcover book. The user book, read and every live attempt's
+   * read link all point into the old book's Hardcover entry, so they are released with it; reusing
+   * them would keep writing progress to the old book. Soft-deleted attempts keep their ids as
+   * import tombstones. The new book counts as never synced, so a failed first sync is retried.
+   * Returns how many attempts were released.
+   */
+  async relinkBook(input: {
+    userId: number;
+    bookId: number;
+    hardcoverBookId: number;
+    hardcoverEditionId: number | null;
+    matchMethod: string;
+    matchBasis: string;
+  }): Promise<number> {
+    return this.db.transaction(async (tx) => {
+      await tx
+        .update(schema.hardcoverBookState)
+        .set({
+          hardcoverBookId: input.hardcoverBookId,
+          hardcoverEditionId: input.hardcoverEditionId,
+          hardcoverUserBookId: null,
+          hardcoverReadId: null,
+          matchMethod: input.matchMethod,
+          matchBasis: input.matchBasis,
+          matchError: null,
+          lastSyncedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(schema.hardcoverBookState.userId, input.userId), eq(schema.hardcoverBookState.bookId, input.bookId)));
+
+      const released = await tx
+        .update(schema.readingAttempts)
+        .set({ externalProvider: null, externalId: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.readingAttempts.userId, input.userId),
+            eq(schema.readingAttempts.bookId, input.bookId),
+            eq(schema.readingAttempts.externalProvider, HARDCOVER_EXTERNAL_PROVIDER),
+            isNull(schema.readingAttempts.deletedAt),
+          ),
+        )
+        .returning({ id: schema.readingAttempts.id });
+      return released.length;
+    });
   }
 
   async setBookSyncOverride(userId: number, bookId: number, syncOverride: 'included' | 'excluded' | null): Promise<HardcoverBookState> {
@@ -253,13 +301,15 @@ export class HardcoverRepository {
         title: schema.bookMetadata.title,
         authorName: firstAuthorSq.authorName,
         hardcoverMetadataId: schema.bookMetadata.hardcoverId,
+        hardcoverEditionId: schema.bookMetadata.hardcoverEditionId,
         pageCount: schema.bookMetadata.pageCount,
         format: schema.bookFiles.format,
         status: includeUnread ? sql<string>`coalesce(${schema.userBookStatus.status}, 'unread')` : schema.userBookStatus.status,
         startedAt: schema.userBookStatus.startedAt,
         finishedAt: schema.userBookStatus.finishedAt,
         rating: schema.userBookRatings.rating,
-        progress: maxProgressSq.maxProgress,
+        readingProgress: maxProgressSq.maxProgress,
+        audioProgress: schema.audiobookProgress.percentage,
         attemptsUpdatedAt: attemptsSq.updatedAt,
       })
       .from(schema.books)
@@ -267,6 +317,7 @@ export class HardcoverRepository {
       .leftJoin(schema.bookMetadata, eq(schema.bookMetadata.bookId, schema.books.id))
       .leftJoin(schema.userBookRatings, and(eq(schema.userBookRatings.bookId, schema.books.id), eq(schema.userBookRatings.userId, userId)))
       .leftJoin(maxProgressSq, eq(maxProgressSq.bookId, schema.books.id))
+      .leftJoin(schema.audiobookProgress, and(eq(schema.audiobookProgress.bookId, schema.books.id), eq(schema.audiobookProgress.userId, userId)))
       .leftJoin(firstAuthorSq, eq(firstAuthorSq.bookId, schema.books.id))
       .leftJoin(attemptsSq, eq(attemptsSq.bookId, schema.books.id))
       .leftJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.books.primaryFileId));
@@ -280,7 +331,11 @@ export class HardcoverRepository {
         ? await filtered
         : await filtered.orderBy(asc(schema.bookMetadata.title), asc(schema.books.id)).limit(options.limit);
 
-    return rows as BookSyncData[];
+    return rows.map(({ readingProgress, audioProgress, ...row }) => ({
+      ...row,
+      status: row.status as string,
+      progress: row.format && isAudioFormat(row.format) ? audioProgress : readingProgress,
+    }));
   }
 
   async findReadingAttempts(userId: number, bookId: number) {
@@ -310,7 +365,11 @@ export class HardcoverRepository {
             eq(schema.readingAttempts.id, attemptId),
             isNull(schema.readingAttempts.deletedAt),
             or(
-              and(isNull(schema.readingAttempts.externalProvider), isNull(schema.readingAttempts.externalId)),
+              // A Hardcover provider without an id owns nothing; hand-cleared links are left in this shape.
+              and(
+                or(isNull(schema.readingAttempts.externalProvider), eq(schema.readingAttempts.externalProvider, HARDCOVER_EXTERNAL_PROVIDER)),
+                isNull(schema.readingAttempts.externalId),
+              ),
               and(eq(schema.readingAttempts.externalProvider, HARDCOVER_EXTERNAL_PROVIDER), eq(schema.readingAttempts.externalId, externalId)),
             ),
           ),
@@ -321,6 +380,23 @@ export class HardcoverRepository {
       if (isExternalIdConflict(err)) return 'conflict';
       throw err;
     }
+  }
+
+  /** Releases one attempt's link, but only while it still points at the read the caller rejected. */
+  async unlinkReadingAttempt(userId: number, attemptId: number, hardcoverReadId: number): Promise<boolean> {
+    const rows = await this.db
+      .update(schema.readingAttempts)
+      .set({ externalProvider: null, externalId: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.readingAttempts.userId, userId),
+          eq(schema.readingAttempts.id, attemptId),
+          eq(schema.readingAttempts.externalProvider, HARDCOVER_EXTERNAL_PROVIDER),
+          eq(schema.readingAttempts.externalId, String(hardcoverReadId)),
+        ),
+      )
+      .returning({ id: schema.readingAttempts.id });
+    return rows.length > 0;
   }
 
   /**

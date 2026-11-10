@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { Permission } from '@bookorbit/types';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 import * as schema from '../../db/schema';
 import { HardcoverRepository } from './hardcover.repository';
@@ -126,6 +127,17 @@ describe('HardcoverRepository', () => {
     expect(bookStateQuery.findMany).toHaveBeenCalledTimes(1);
   });
 
+  it('findBookStatesByBookIds binds large ID lists as one PostgreSQL array parameter', async () => {
+    const { repo, bookStateQuery } = makeRepository();
+    const bookIds = Array.from({ length: 65_535 }, (_, index) => index + 1);
+
+    await repo.findBookStatesByBookIds(7, bookIds);
+
+    const config = bookStateQuery.findMany.mock.calls[0]![0] as { where: Parameters<PgDialect['sqlToQuery']>[0] };
+    const query = new PgDialect().sqlToQuery(config.where);
+    expect(query.params).toEqual([7, bookIds]);
+  });
+
   it('upsertBookState inserts or updates per-book state', async () => {
     const { repo, db, bookStateInsert, bookStateRow } = makeRepository();
     db.insert.mockReset();
@@ -182,6 +194,19 @@ describe('HardcoverRepository', () => {
     expect(mainSelect).toBeDefined();
     expect(mainSelect).toHaveProperty('pageCount');
     expect(mainSelect).toHaveProperty('format');
+  });
+
+  it('uses audiobook progress for an audiobook sync snapshot', async () => {
+    const { repo, db } = makeRepository();
+    const chain: Record<string, unknown> = {};
+    for (const method of ['from', 'innerJoin', 'leftJoin', 'where', 'groupBy', 'as']) {
+      chain[method] = vi.fn().mockReturnValue(chain);
+    }
+    chain.then = (resolve: (rows: unknown[]) => void) => resolve([{ bookId: 42, format: 'm4b', readingProgress: null, audioProgress: 37.5 }]);
+    db.select.mockImplementation(() => chain);
+
+    await expect(repo.findSyncableBooks(7)).resolves.toEqual([{ bookId: 42, format: 'm4b', progress: 37.5 }]);
+    expect(chain.leftJoin).toHaveBeenCalledWith(schema.audiobookProgress, expect.anything());
   });
 
   it('findSyncableBook returns a book from findSyncableBooks', async () => {
@@ -461,6 +486,16 @@ describe('HardcoverRepository', () => {
       expect(updateChain.set).toHaveBeenCalledWith(expect.objectContaining({ externalProvider: 'hardcover', externalId: '555' }));
     });
 
+    it('accepts an attempt whose Hardcover link was cleared down to the provider', async () => {
+      const { repo, updateWhere } = makeRepository();
+
+      await repo.linkReadingAttempt(7, 3, 555);
+
+      const where = new PgDialect().sqlToQuery(updateWhere.mock.calls[0]![0]);
+      expect(where.sql).toContain('("reading_attempts"."external_provider" is null or "reading_attempts"."external_provider" = $');
+      expect(where.params).toEqual([7, 3, 'hardcover', 'hardcover', '555']);
+    });
+
     it('reports a conflict when another attempt already owns the read', async () => {
       const { repo, updateChain } = makeRepository();
       rejectUpdateWith(updateChain, pgError({ code: '23505', constraint: 'reading_attempts_external_uidx' }));
@@ -513,6 +548,78 @@ describe('HardcoverRepository', () => {
       rejectUpdateWith(updateChain, error);
 
       await expect(repo.linkReadingAttempt(7, 3, 555)).rejects.toThrow('boom');
+    });
+  });
+
+  describe('relinkBook', () => {
+    function makeTransactionalRepository(releasedIds: number[]) {
+      const stateSet = vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) });
+      const attemptWhere = vi.fn().mockReturnValue({ returning: vi.fn().mockResolvedValue(releasedIds.map((id) => ({ id }))) });
+      const attemptSet = vi.fn().mockReturnValue({ where: attemptWhere });
+      const tx = { update: vi.fn().mockReturnValueOnce({ set: stateSet }).mockReturnValueOnce({ set: attemptSet }) };
+      const db = { transaction: vi.fn((run: (handle: typeof tx) => Promise<unknown>) => run(tx)) };
+      return { repo: new HardcoverRepository(db as never), db, tx, stateSet, attemptSet, attemptWhere };
+    }
+
+    const input = {
+      userId: 7,
+      bookId: 42,
+      hardcoverBookId: 2973670,
+      hardcoverEditionId: 33314466,
+      matchMethod: 'metadata_id',
+      matchBasis: '["ok-amen","9789146223856",null]',
+    };
+
+    it("moves the link and drops the old book's user book and read ids", async () => {
+      const { repo, db, tx, stateSet } = makeTransactionalRepository([]);
+
+      await repo.relinkBook(input);
+
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(tx.update).toHaveBeenNthCalledWith(1, schema.hardcoverBookState);
+      expect(stateSet).toHaveBeenCalledWith(
+        expect.objectContaining({
+          hardcoverBookId: 2973670,
+          hardcoverEditionId: 33314466,
+          hardcoverUserBookId: null,
+          hardcoverReadId: null,
+          matchMethod: 'metadata_id',
+          matchBasis: input.matchBasis,
+          matchError: null,
+          lastSyncedAt: null,
+        }),
+      );
+      expect(stateSet.mock.calls[0]![0]).not.toHaveProperty('syncOverride');
+    });
+
+    it('releases only live Hardcover links on that user and book, and counts them', async () => {
+      const { repo, tx, attemptSet, attemptWhere } = makeTransactionalRepository([3, 4]);
+
+      await expect(repo.relinkBook(input)).resolves.toBe(2);
+
+      expect(tx.update).toHaveBeenNthCalledWith(2, schema.readingAttempts);
+      expect(attemptSet).toHaveBeenCalledWith(expect.objectContaining({ externalProvider: null, externalId: null }));
+      const where = new PgDialect().sqlToQuery(attemptWhere.mock.calls[0]![0]);
+      expect(where.sql).toContain('"reading_attempts"."deleted_at" is null');
+      expect(where.params).toEqual([7, 42, 'hardcover']);
+    });
+  });
+
+  describe('unlinkReadingAttempt', () => {
+    it('releases the attempt only while it still points at the rejected read', async () => {
+      const { repo, updateChain, updateWhere } = makeRepository();
+
+      await expect(repo.unlinkReadingAttempt(7, 3, 555)).resolves.toBe(true);
+
+      expect(updateChain.set).toHaveBeenCalledWith(expect.objectContaining({ externalProvider: null, externalId: null }));
+      expect(new PgDialect().sqlToQuery(updateWhere.mock.calls[0]![0]).params).toEqual([7, 3, 'hardcover', '555']);
+    });
+
+    it('reports nothing released when the link already moved on', async () => {
+      const { repo, updateReturning } = makeRepository();
+      updateReturning.mockResolvedValue([]);
+
+      await expect(repo.unlinkReadingAttempt(7, 3, 555)).resolves.toBe(false);
     });
   });
 

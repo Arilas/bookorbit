@@ -6,6 +6,7 @@ import ReadingLogExportMenu from '../ReadingLogExportMenu.vue'
 function makeSession(appPasswordLabel: string, overrides: Partial<BookReadingSession> = {}): BookReadingSession {
   return {
     id: 1,
+    bookFileId: 3,
     startedAt: '2026-08-25T10:00:00.000Z',
     endedAt: '2026-08-25T10:30:00.000Z',
     durationSeconds: 1800,
@@ -14,12 +15,14 @@ function makeSession(appPasswordLabel: string, overrides: Partial<BookReadingSes
     format: 'epub',
     source: 'web',
     sourceAttribution: {
-      key: 'app-password:7',
+      key: 'app-password:7:bookorbit',
       label: appPasswordLabel,
       bucket: 'bookorbit',
       kind: 'app_password',
       appPasswordId: 7,
     },
+    attemptId: null,
+    sessionType: 'read',
     ...overrides,
   }
 }
@@ -67,26 +70,26 @@ describe('ReadingLogExportMenu', () => {
   ])('neutralizes an App Password label beginning with formula syntax: %j', async (label, escapedLabel) => {
     const csv = await exportCsv(label)
 
-    expect(csv).toContain(`,app-password:7,${escapedLabel}`)
+    expect(csv).toContain(`,app-password:7:bookorbit,${escapedLabel}`)
   })
 
   it('escapes quotes, commas, and CRLF after neutralizing an adversarial App Password label', async () => {
     const csv = await exportCsv(' \r\n=HYPERLINK("https://attacker.example/a,b","Open")')
 
-    expect(csv).toContain(',app-password:7,"\' \r\n=HYPERLINK(""https://attacker.example/a,b"",""Open"")"')
+    expect(csv).toContain(',app-password:7:bookorbit,"\' \r\n=HYPERLINK(""https://attacker.example/a,b"",""Open"")"')
   })
 
   it('leaves a safe App Password label unchanged', async () => {
     const csv = await exportCsv('iPhone + KOReader')
 
-    expect(csv).toContain(',app-password:7,iPhone + KOReader')
+    expect(csv).toContain(',app-password:7:bookorbit,iPhone + KOReader')
     expect(csv).not.toContain("'iPhone + KOReader")
   })
 
   it('keeps negative progress and pace values numeric', async () => {
     const csv = await exportCsv('iPhone app', { progressDelta: -5, endProgress: 35 })
 
-    expect(csv).toContain(',1800,-5,35,-10.00,epub,web,app-password:7,iPhone app')
+    expect(csv).toContain(',1800,-5,35,-10.00,epub,web,app-password:7:bookorbit,iPhone app')
     expect(csv).not.toContain("'-5")
     expect(csv).not.toContain("'-10.00")
   })

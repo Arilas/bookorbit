@@ -1,6 +1,14 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { NotificationType, ACHIEVEMENT_CATEGORY_LABELS } from '@bookorbit/types';
-import type { AchievementCatalogueResponse, AchievementCategoryGroup, AchievementItem, AchievementCategory } from '@bookorbit/types';
+import { randomUUID } from 'node:crypto';
+import { Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { DEFAULT_LOCALE, NotificationType, ACHIEVEMENT_CATEGORY_LABELS, type Locale } from '@bookorbit/types';
+import type {
+  AchievementCatalogueResponse,
+  AchievementCategoryGroup,
+  AchievementItem,
+  AchievementCategory,
+  AchievementCelebrationClaim,
+} from '@bookorbit/types';
+import { serverText } from '../../common/i18n/server-text';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { getYearInTimeZone, resolveTimeZone, toDateKeyInTimeZone } from '../../common/utils/timezone.utils';
 import type { RequestUser } from '../../common/types/request-user';
@@ -40,6 +48,7 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
+    await this.repo.backfillExistingCelebrations();
     await this.ensureCatalogueSeeded();
     this.registerEventListeners();
   }
@@ -53,7 +62,7 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
     return this.seedPromise;
   }
 
-  async getCatalogue(user: RequestUser): Promise<AchievementCatalogueResponse> {
+  async getCatalogue(user: RequestUser, locale: Locale = DEFAULT_LOCALE): Promise<AchievementCatalogueResponse> {
     const userId = user.id;
     const [allAchievements, userAchievements] = await Promise.all([this.repo.findAllAchievements(), this.repo.findUserAchievements(userId)]);
 
@@ -64,6 +73,7 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
 
     const timeZone = resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
     const progressMap = await this.computeProgress(userId, user.isSuperuser, timeZone, allAchievements, earnedMap);
+    const accessibleBookIds = await this.getAccessibleContextBookIds(user, userAchievements);
 
     const categoryOrder: AchievementCategory[] = ['reading', 'library', 'exploration', 'dedication', 'devices'];
     const grouped = new Map<AchievementCategory, AchievementItem[]>();
@@ -78,23 +88,7 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
       const items = grouped.get(category);
       if (!items) continue;
 
-      items.push({
-        key: achievement.key,
-        groupKey: achievement.groupKey,
-        tier: achievement.tier,
-        category,
-        name: achievement.hidden && !earned ? '???' : achievement.name,
-        description: achievement.hidden && !earned ? 'Secret Achievement' : achievement.description,
-        iconName: achievement.hidden && !earned ? 'help-circle' : achievement.iconName,
-        rarity: achievement.rarity as AchievementItem['rarity'],
-        threshold: achievement.threshold,
-        hidden: achievement.hidden,
-        sortOrder: achievement.sortOrder,
-        earned: !!earned,
-        awardedAt: earned?.awardedAt?.toISOString() ?? null,
-        context: (earned?.contextJson as Record<string, unknown>) ?? null,
-        currentProgress: progressMap.get(achievement.key) ?? null,
-      });
+      items.push(this.toItem(achievement, earned, progressMap.get(achievement.key) ?? null, accessibleBookIds, locale));
     }
 
     let totalEarned = 0;
@@ -109,7 +103,7 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
 
       categories.push({
         key: cat,
-        label: ACHIEVEMENT_CATEGORY_LABELS[cat],
+        label: serverText(locale, `achievementCategories.${cat}`, ACHIEVEMENT_CATEGORY_LABELS[cat]),
         earnedCount,
         totalCount: items.length,
         achievements: items,
@@ -117,6 +111,28 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
     }
 
     return { categories, totalEarned, totalAvailable };
+  }
+
+  async claimCelebration(user: RequestUser, locale: Locale = DEFAULT_LOCALE): Promise<AchievementCelebrationClaim | null> {
+    if (!(await this.userService.isAchievementEnabled(user.id))) return null;
+
+    const claimedAt = new Date();
+    const expiresAt = new Date(claimedAt.getTime() + 15 * 60 * 1000);
+    const claimId = randomUUID();
+    const claimed = await this.repo.claimNextCelebration(user.id, claimId, claimedAt, new Date(claimedAt.getTime() - 15 * 60 * 1000));
+    if (!claimed) return null;
+
+    const accessibleBookIds = await this.getAccessibleContextBookIds(user, [claimed.award]);
+    return {
+      claimId,
+      expiresAt: expiresAt.toISOString(),
+      achievement: this.toItem(claimed.achievement, claimed.award, null, accessibleBookIds, locale),
+    };
+  }
+
+  async acknowledgeCelebration(user: RequestUser, claimId: string): Promise<void> {
+    const result = await this.repo.acknowledgeCelebration(user.id, claimId, new Date());
+    if (result === 'foreign') throw new NotFoundException('Achievement celebration claim not found');
   }
 
   async handleEvent(eventName: string, payload: Record<string, unknown>): Promise<void> {
@@ -175,6 +191,55 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
       const errorMessage = sanitizeLogValue(error instanceof Error ? error.message : String(error));
       this.logger.error(`[achievement.seed] [fail] error="${errorMessage}" - failed to seed achievement catalogue`);
     }
+  }
+
+  private async getAccessibleContextBookIds(user: RequestUser, awards: UserAchievementRow[]): Promise<Set<number>> {
+    const ids = awards.map((award) => this.contextBookId(award.contextJson)).filter((id): id is number => id !== null);
+    return this.repo.findAccessibleBookIds(user.id, user.isSuperuser, ids);
+  }
+
+  private toItem(
+    achievement: AchievementRow,
+    earned: UserAchievementRow | undefined,
+    currentProgress: number | null,
+    accessibleBookIds: Set<number>,
+    locale: Locale,
+  ): AchievementItem {
+    const lockedSecret = achievement.hidden && !earned;
+    const context = earned?.contextJson && typeof earned.contextJson === 'object' ? (earned.contextJson as Record<string, unknown>) : null;
+    const rawBookId = this.contextBookId(context);
+    const contextBookId = rawBookId !== null && accessibleBookIds.has(rawBookId) ? rawBookId : null;
+    const contextBookTitle = typeof context?.bookTitle === 'string' && context.bookTitle.trim().length > 0 ? context.bookTitle : null;
+
+    return {
+      key: achievement.key,
+      groupKey: lockedSecret ? null : achievement.groupKey,
+      tier: lockedSecret ? null : achievement.tier,
+      category: achievement.category as AchievementCategory,
+      name: lockedSecret
+        ? serverText(locale, 'achievementSecret.name', 'Secret Achievement')
+        : serverText(locale, `achievements.${achievement.key}.name`, achievement.name),
+      description: lockedSecret
+        ? serverText(locale, 'achievementSecret.description', 'Keep reading to reveal this achievement.')
+        : serverText(locale, `achievements.${achievement.key}.description`, achievement.description),
+      iconName: lockedSecret ? 'lock' : achievement.iconName,
+      rarity: lockedSecret ? 'common' : (achievement.rarity as AchievementItem['rarity']),
+      threshold: lockedSecret ? null : achievement.threshold,
+      hidden: achievement.hidden,
+      sortOrder: achievement.sortOrder,
+      earned: !!earned,
+      awardedAt: earned?.awardedAt?.toISOString() ?? null,
+      context: lockedSecret ? null : context,
+      contextBookId: lockedSecret ? null : contextBookId,
+      contextBookTitle: lockedSecret ? null : contextBookTitle,
+      currentProgress: lockedSecret ? null : currentProgress,
+    };
+  }
+
+  private contextBookId(context: unknown): number | null {
+    if (!context || typeof context !== 'object') return null;
+    const value = (context as Record<string, unknown>).bookId;
+    return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
   }
 
   onModuleDestroy(): void {
@@ -356,6 +421,8 @@ export class AchievementService implements OnModuleInit, OnModuleDestroy {
         return this.repo.countBooksFinishedInYear(userId, getYearInTimeZone(new Date(), timeZone));
       case 'category_sweeper':
         return this.repo.countDistinctEarnedCategories(userId);
+      case 'year_round_reader':
+        return this.repo.countDistinctMonthsWithReading(userId, getYearInTimeZone(new Date(), timeZone));
       case 'consistent_reader':
         return null;
       case 'weekend_rhythm':

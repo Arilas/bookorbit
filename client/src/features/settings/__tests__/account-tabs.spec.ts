@@ -7,7 +7,7 @@ describe('account-tabs', () => {
       expect(ACCOUNT_TABS).toEqual(['profile', 'app-passwords', 'privacy', 'notifications', 'restrictions'])
     })
 
-    it('has length 4', () => {
+    it('has length 5', () => {
       expect(ACCOUNT_TABS.length).toBe(5)
     })
   })

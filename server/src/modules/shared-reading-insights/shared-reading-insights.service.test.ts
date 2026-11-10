@@ -52,11 +52,11 @@ describe('SharedReadingInsightsService', () => {
     const audit = { record: vi.fn().mockResolvedValue(undefined) };
     const service = new SharedReadingInsightsService(repository as never, audit as never);
 
-    await service.updateMySettings(makeUser({ authMethod: 'app_password', appPasswordId: 12, appPasswordLabel: 'iPhone app' }), 'summary');
+    await service.updateMySettings(makeUser({ authenticationMethod: 'app_password', appPasswordId: 12, appPasswordName: 'iPhone app' }), 'summary');
 
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
-        actorAuth: { authMethod: 'app_password', appPasswordId: 12, appPasswordLabel: 'iPhone app' },
+        actorAuth: { authenticationMethod: 'app_password', appPasswordId: 12, appName: 'iPhone app' },
       }),
     );
   });
@@ -101,6 +101,23 @@ describe('SharedReadingInsightsService', () => {
     expect(JSON.stringify(payload.meta)).not.toContain('book');
   });
 
+  it('attributes a direct view-session audit record to the requesting app password', async () => {
+    const repository = {
+      getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'summary' }),
+      createViewSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const audit = { record: vi.fn().mockResolvedValue(undefined) };
+    const service = new SharedReadingInsightsService(repository as never, audit as never);
+
+    await service.createViewSession(makeUser({ authenticationMethod: 'app_password', appPasswordId: 17, appPasswordName: 'Tablet app' }), 9);
+
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorAuth: { authenticationMethod: 'app_password', appPasswordId: 17, appName: 'Tablet app' },
+      }),
+    );
+  });
+
   it('returns summary-only data without title-level fields', async () => {
     const repository = {
       getViewSession: vi.fn().mockResolvedValue({ id: 'session' }),
@@ -114,6 +131,31 @@ describe('SharedReadingInsightsService', () => {
     expect(result).toMatchObject({ sharingLevel: 'summary', readingSeconds: 3600, activeDays: 1 });
     expect(result).not.toHaveProperty('topBooks');
     expect(JSON.stringify(result)).not.toContain('bookTitle');
+  });
+
+  it('does not expose private App Password attribution in shared source coverage', async () => {
+    const data = summaryData();
+    data.sources = [
+      {
+        source: 'ios',
+        readingSeconds: 3600,
+        sessionsCount: 2,
+        appPasswordId: 17,
+        appPasswordLabel: 'Personal iPhone',
+      } as (typeof data.sources)[number],
+    ];
+    const repository = {
+      getViewSession: vi.fn().mockResolvedValue({ id: 'session', sharingLevel: 'summary' }),
+      getSharingSettings: vi.fn().mockResolvedValue({ readingInsightsSharingLevel: 'summary' }),
+      getSummary: vi.fn().mockResolvedValue(data),
+    };
+    const service = new SharedReadingInsightsService(repository as never, {} as never);
+
+    const result = await service.getSharedSummary(makeUser(), 9, 'session', 90);
+
+    expect(result.sourceCoverage).toEqual([{ source: 'ios', readingSeconds: 3600, sessionsCount: 2 }]);
+    expect(JSON.stringify(result)).not.toContain('Personal iPhone');
+    expect(JSON.stringify(result)).not.toContain('appPassword');
   });
 
   it('blocks detailed data after consent is downgraded', async () => {

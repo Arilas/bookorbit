@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, provide, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, defineAsyncComponent, onMounted, provide, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import type { BookDetail, BookMetadataLockField } from '@bookorbit/types'
+import { toast } from 'vue-sonner'
+import type { BookDetail, BookLinksChangedEvent, BookMergedEvent, BookMetadataLockField } from '@bookorbit/types'
 import BookDetailLayout from '@/features/book/components/detail/BookDetailLayout.vue'
 import DetailsTab from '@/features/book/components/detail/tabs/DetailsTab.vue'
 import FilesTab from '@/features/book/components/detail/tabs/FilesTab.vue'
@@ -11,8 +12,8 @@ import { useBookDetail } from '@/features/book/composables/useBookDetail'
 import { useBookEvents } from '@/features/book/composables/useBookEvents'
 import { useScanProgress } from '@/features/scanner/composables/useScanProgress'
 import { usePageTitle } from '@/composables/usePageTitle'
-import { normalizeBookDetailTab } from '@/features/book/lib/book-detail-tabs'
-import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { hasChaptersTab, normalizeBookDetailTab } from '@/features/book/lib/book-detail-tabs'
+import { useLibraryPermissions } from '@/features/library/composables/useLibraryPermissions'
 import { useLibraries } from '@/features/library/composables/useLibraries'
 import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '@/features/book/lib/cover-aspect-ratio'
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
@@ -20,17 +21,25 @@ import { useCoverTint } from '@/features/book/composables/useCoverTint'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import EntityNotFound from '@/components/EntityNotFound.vue'
 
-const ReadingLogTab = defineAsyncComponent(() => import('@/features/book/components/detail/tabs/ReadingLogTab.vue'))
-const HighlightsTab = defineAsyncComponent(() => import('@/features/book/components/detail/tabs/HighlightsTab.vue'))
+const loadReadingLogTab = () => import('@/features/book/components/detail/tabs/ReadingLogTab.vue')
+const loadHighlightsTab = () => import('@/features/book/components/detail/tabs/HighlightsTab.vue')
+const loadChaptersTab = () => import('@/features/book/components/detail/tabs/ChaptersTab.vue')
+const ReadingLogTab = defineAsyncComponent(loadReadingLogTab)
+const HighlightsTab = defineAsyncComponent(loadHighlightsTab)
+const ChaptersTab = defineAsyncComponent(loadChaptersTab)
+
+const KEPT_ALIVE_TABS = ['ReadingLogTab', 'HighlightsTab', 'ChaptersTab']
 
 const { t } = useI18n()
 const route = useRoute()
-const { hasPermission } = usePermissions()
+const router = useRouter()
+const { hasLibraryPermission } = useLibraryPermissions()
 const { libraries } = useLibraries()
 
 provide(
   COVER_ASPECT_RATIO_KEY,
   computed(() => {
+    if (detail.value?.coverAspectRatio) return detail.value.coverAspectRatio
     const libraryId = detail.value?.libraryId
     const library = libraryId != null ? libraries.value.find((l) => l.id === libraryId) : null
     return library?.coverAspectRatio ?? DEFAULT_COVER_ASPECT_RATIO
@@ -38,14 +47,30 @@ provide(
 )
 
 const bookId = computed(() => Number(route.params.bookId))
-const tab = computed(() => normalizeBookDetailTab(route.query.tab))
+const tab = computed(() => {
+  const requested = normalizeBookDetailTab(route.query.tab)
+  return requested === 'edit' && detail.value && !canEditMetadata.value ? 'details' : requested
+})
 
-const { detail, loading, notFound, fetch } = useBookDetail()
+const { detail, loading, notFound, mergedInto, fetch } = useBookDetail()
+const canEditMetadata = computed(() => hasLibraryPermission('library_edit_metadata', detail.value?.libraryId, 'editor'))
+const parentLibrary = computed(() =>
+  detail.value?.libraryId != null && detail.value.libraryName ? { id: detail.value.libraryId, name: detail.value.libraryName } : null,
+)
+const hasChapters = computed(() => hasChaptersTab(detail.value))
+
+// A chapters link to a book without audio or read-along narration (or one whose audio was removed) lands on the details.
+watch([tab, detail], ([current, book]) => {
+  if (current === 'chapters' && book && book.id === bookId.value && !hasChapters.value) {
+    void router.replace({ name: 'book-detail', params: { bookId: book.id }, query: { ...route.query, tab: 'details' } })
+  }
+})
 const pageTitle = computed(() => {
   const title = detail.value?.title?.trim()
   const base = title || (Number.isFinite(bookId.value) ? t('views.bookDetail.titleWithId', { id: bookId.value }) : t('views.bookDetail.title'))
   if (tab.value === 'edit') return t('views.bookDetail.pageTitle.editMetadata', { base })
   if (tab.value === 'files') return t('views.bookDetail.pageTitle.files', { base })
+  if (tab.value === 'chapters') return t('views.bookDetail.pageTitle.chapters', { base })
   if (tab.value === 'reading-log') return t('views.bookDetail.pageTitle.readingLog', { base })
   if (tab.value === 'highlights') return t('views.bookDetail.pageTitle.highlights', { base })
   return t('views.bookDetail.pageTitle.book', { base })
@@ -59,7 +84,7 @@ const { bookDetailCoverTint } = useDisplaySettings()
 const tintSource = computed(() => {
   const book = detail.value
   if (bookDetailCoverTint.value === 'off' || tab.value !== 'details' || !book || book.coverSource === null) return null
-  return coverUrl(book.id, 'cover', book.updatedAt ?? book.addedAt)
+  return coverUrl(book.id, 'cover', book.coverVersion)
 })
 const { tint } = useCoverTint(tintSource)
 const coverTint = computed(() => {
@@ -76,7 +101,7 @@ watch(
   },
 )
 
-const { onBookMissing, onBookRestored, onBookMoved, onBookTransferred, onBookProgressChanged } = useBookEvents()
+const { onBookMissing, onBookRestored, onBookMoved, onBookTransferred, onBookProgressChanged, onBookMerged, onBookLinksChanged } = useBookEvents()
 onBookMissing((bookIds) => {
   if (detail.value && bookIds.includes(detail.value.id)) {
     detail.value = { ...detail.value, status: 'missing' }
@@ -95,7 +120,57 @@ onBookProgressChanged((event) => {
   if (event.bookId === bookId.value) fetch(event.bookId)
 })
 
+/** A merged-away id lives on as the kept book: replace the URL so Back does not return to a dead page (E8). */
+let pendingMergeRedirect: number | null = null
+
+function redirectToMergedBook(targetBookId: number) {
+  // The socket event and the sheet's own result can both report one merge.
+  if (targetBookId === bookId.value || targetBookId === pendingMergeRedirect) return
+  pendingMergeRedirect = targetBookId
+  toast.info(t('book.merge.redirected'))
+  void router.replace({ name: 'book-detail', params: { bookId: targetBookId }, query: route.query }).finally(() => {
+    pendingMergeRedirect = null
+  })
+}
+
+function handleBookMerged(event: BookMergedEvent) {
+  if (event.sourceBookIds.includes(bookId.value)) redirectToMergedBook(event.targetBookId)
+  else if (event.targetBookId === bookId.value) void fetch(bookId.value)
+}
+
+onBookMerged(handleBookMerged)
+
+function refreshLinks() {
+  void fetch(bookId.value)
+}
+
+/** A link made or removed anywhere changes this page's "Also available as" row and its menu. */
+function handleLinksChanged(event: BookLinksChangedEvent) {
+  const current = detail.value
+  if (!current) return
+  const touched = event.bookIds.includes(current.id) || (current.linkedBooks ?? []).some((book) => event.bookIds.includes(book.bookId))
+  if (touched) refreshLinks()
+}
+
+onBookLinksChanged(handleLinksChanged)
+
+watch(mergedInto, (targetBookId) => {
+  if (targetBookId !== null) redirectToMergedBook(targetBookId)
+})
+
 watch(bookId, (id) => fetch(id), { immediate: true })
+
+// The two lazy tabs render nothing at all while their chunk arrives, so a cold click on either
+// blanks the pane. Warm both once the page is idle and the first click has a component to mount.
+onMounted(() => {
+  const warm = () => {
+    void loadReadingLogTab()
+    void loadHighlightsTab()
+    if (hasChapters.value) void loadChaptersTab()
+  }
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(warm, { timeout: 2000 })
+  else setTimeout(warm, 500)
+})
 
 function onMetadataSaved(updated: BookDetail) {
   detail.value = updated
@@ -111,26 +186,56 @@ function onLocksChanged(lockedFields: BookMetadataLockField[]) {
   if (detail.value) detail.value.lockedFields = lockedFields
 }
 
-function onCoverChanged(source: 'extracted' | 'custom' | null) {
-  if (detail.value) detail.value = { ...detail.value, coverSource: source }
+function handleBookRefetch() {
+  void fetch(bookId.value)
+}
+
+// A cover write can change either slot, the summary and the face version, so take the server's view.
+function onCoverChanged() {
+  void fetch(bookId.value)
+}
+
+function onChaptersChanged() {
+  void fetch(bookId.value)
 }
 </script>
 
 <template>
-  <BookDetailLayout :book-id="bookId" :cover-tint="coverTint">
+  <BookDetailLayout
+    :book-id="bookId"
+    :cover-tint="coverTint"
+    :can-edit-metadata="canEditMetadata"
+    :parent-library="parentLibrary"
+    :has-chapters="hasChapters"
+  >
     <Transition name="content" mode="out-in">
-      <div v-if="detail" key="detail">
-        <DetailsTab v-if="tab === 'details'" :book="detail" @saved="onMetadataSaved" @moved="handleMovedToLibrary" />
-        <EditMetadataTab
-          v-else-if="tab === 'edit' && hasPermission('library_edit_metadata')"
-          :book="detail"
-          @saved="onMetadataSaved"
-          @locks-changed="onLocksChanged"
-          @cover-changed="onCoverChanged"
-        />
-        <FilesTab v-else-if="tab === 'files'" :book="detail" @refetch="fetch(detail.id)" />
-        <ReadingLogTab v-else-if="tab === 'reading-log'" :book="detail" @saved="onMetadataSaved" />
-        <HighlightsTab v-else-if="tab === 'highlights'" :book="detail" />
+      <div v-if="detail" key="detail" class="@container/book-detail h-full">
+        <!--
+          Only the two lazy tabs are cached. Both fetch on mount, so without this every return
+          replays blank -> skeleton -> content in under 120ms, which reads as a flash rather than
+          as loading. They revalidate silently on activation instead.
+        -->
+        <KeepAlive :include="KEPT_ALIVE_TABS">
+          <DetailsTab
+            v-if="tab === 'details'"
+            :book="detail"
+            @saved="onMetadataSaved"
+            @moved="handleMovedToLibrary"
+            @merged="handleBookMerged"
+            @links-changed="refreshLinks"
+          />
+          <EditMetadataTab
+            v-else-if="tab === 'edit' && canEditMetadata"
+            :book="detail"
+            @saved="onMetadataSaved"
+            @locks-changed="onLocksChanged"
+            @cover-changed="onCoverChanged"
+          />
+          <FilesTab v-else-if="tab === 'files'" :book="detail" @refetch="fetch(detail.id)" />
+          <ChaptersTab v-else-if="tab === 'chapters' && hasChapters" :book="detail" @changed="onChaptersChanged" />
+          <ReadingLogTab v-else-if="tab === 'reading-log'" :book="detail" @saved="onMetadataSaved" @refetch="handleBookRefetch" />
+          <HighlightsTab v-else-if="tab === 'highlights'" :book="detail" />
+        </KeepAlive>
       </div>
 
       <div v-else-if="loading" key="loading">
@@ -143,15 +248,15 @@ function onCoverChanged(source: 'extracted' | 'custom' | null) {
             </div>
           </div>
           <div class="flex-1 space-y-3">
-            <div class="h-7 w-3/4 rounded bg-muted animate-shimmer" />
-            <div class="h-4 w-1/2 rounded bg-muted animate-shimmer" />
-            <div class="h-4 w-1/3 rounded bg-muted animate-shimmer" />
+            <div class="h-7 w-3/4 rounded-xs bg-muted animate-shimmer" />
+            <div class="h-4 w-1/2 rounded-xs bg-muted animate-shimmer" />
+            <div class="h-4 w-1/3 rounded-xs bg-muted animate-shimmer" />
             <div class="flex gap-1.5 mt-4">
-              <div class="h-5 w-12 rounded bg-muted animate-shimmer" />
-              <div class="h-5 w-16 rounded bg-muted animate-shimmer" />
-              <div class="h-5 w-10 rounded bg-muted animate-shimmer" />
+              <div class="h-5 w-12 rounded-xs bg-muted animate-shimmer" />
+              <div class="h-5 w-16 rounded-xs bg-muted animate-shimmer" />
+              <div class="h-5 w-10 rounded-xs bg-muted animate-shimmer" />
             </div>
-            <div class="h-32 w-full rounded bg-muted animate-shimmer mt-4" />
+            <div class="h-32 w-full rounded-xs bg-muted animate-shimmer mt-4" />
           </div>
         </div>
         <div v-else-if="tab === 'edit'" class="max-w-2xl space-y-4">
@@ -162,27 +267,23 @@ function onCoverChanged(source: 'extracted' | 'custom' | null) {
         <div v-else-if="tab === 'files'" class="space-y-3">
           <div v-for="i in 3" :key="i" class="h-16 rounded-md bg-muted animate-shimmer" />
         </div>
-        <div v-else-if="tab === 'reading-log'" class="space-y-4">
-          <div class="h-32 rounded-lg bg-muted animate-shimmer" />
-          <div class="flex gap-2">
-            <div v-for="i in 4" :key="i" class="h-8 w-24 rounded-md bg-muted animate-shimmer" />
-          </div>
-          <div class="grid grid-cols-1 gap-4 lg:grid-cols-5">
-            <div class="h-64 rounded-lg bg-muted animate-shimmer lg:col-span-3" />
-            <div class="h-64 rounded-lg bg-muted animate-shimmer lg:col-span-2" />
-          </div>
-          <div class="space-y-2">
-            <div v-for="i in 5" :key="i" class="h-12 rounded-md bg-muted animate-shimmer" />
-          </div>
+        <div v-else-if="tab === 'chapters'" class="flex h-full min-h-0 flex-col gap-3.5">
+          <div class="h-[5.25rem] rounded-xl bg-muted animate-shimmer" />
+          <div class="min-h-80 flex-1 rounded-xl bg-muted animate-shimmer" />
         </div>
-        <div v-else-if="tab === 'highlights'" class="space-y-4">
-          <div class="flex gap-2">
-            <div class="h-9 flex-1 rounded-md bg-muted animate-shimmer" />
-            <div v-for="i in 3" :key="i" class="h-9 w-9 rounded-full bg-muted animate-shimmer" />
-          </div>
-          <div class="space-y-3">
-            <div v-for="i in 3" :key="i" class="h-24 rounded-lg bg-muted animate-shimmer" />
-          </div>
+        <!--
+          These two match the box the tab itself puts up while its own first load runs, so the
+          handover from "book loading" to "tab loading" changes the fill and never the layout.
+        -->
+        <div
+          v-else-if="tab === 'reading-log'"
+          class="flex h-full min-h-0 flex-col gap-4 xl:grid xl:grid-cols-[17rem_minmax(0,1fr)_19.25rem] xl:grid-rows-[minmax(0,1fr)_13.5rem] xl:gap-x-5 xl:gap-y-4"
+        >
+          <div class="h-64 rounded-xl bg-muted animate-shimmer xl:col-start-1 xl:row-start-1 xl:row-span-2 xl:h-auto" />
+          <div class="min-h-80 rounded-xl bg-muted animate-shimmer xl:col-start-2 xl:col-span-2 xl:row-start-1 xl:row-span-2 xl:min-h-0" />
+        </div>
+        <div v-else-if="tab === 'highlights'" class="flex h-full min-h-0 flex-col">
+          <div class="min-h-80 flex-1 rounded-xl bg-muted animate-shimmer xl:min-h-0" />
         </div>
       </div>
 

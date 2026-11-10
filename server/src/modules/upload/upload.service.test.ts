@@ -4,6 +4,7 @@ vi.mock('fs/promises', async () => {
 });
 
 vi.mock('../scanner/lib/hash', () => ({ computeFileHash: vi.fn() }));
+vi.mock('../../db/audio-track-order', () => ({ realignAudioTrackOrder: vi.fn() }));
 
 vi.mock('../metadata/lib/epub', () => ({ extractEpubMetadata: vi.fn() }));
 vi.mock('../metadata/lib/cbz-metadata', () => ({ extractCbzMetadata: vi.fn(), extractCbrMetadata: vi.fn(), extractCb7Metadata: vi.fn() }));
@@ -12,16 +13,20 @@ vi.mock('../metadata/lib/pdf-parser', () => ({ parsePdfFile: vi.fn() }));
 
 import { access as fsAccess, lstat, readdir, stat } from 'fs/promises';
 import { BadRequestException, ConflictException, ForbiddenException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { FileLockService, bookOperationLockKey } from '../../common/services/file-lock.service';
+import { DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE } from '@bookorbit/types';
 import { extractEpubMetadata } from '../metadata/lib/epub';
 import { extractCbzMetadata } from '../metadata/lib/cbz-metadata';
 import { parseMobiFile } from '../metadata/lib/mobi-parser';
 import { parsePdfFile } from '../metadata/lib/pdf-parser';
 import { computeFileHash } from '../scanner/lib/hash';
+import { realignAudioTrackOrder } from '../../db/audio-track-order';
 import { books } from '../../db/schema';
 
 import { UploadService } from './upload.service';
 
 const mockFsAccess = fsAccess as MockedFunction<typeof fsAccess>;
+const mockRealignAudioTrackOrder = realignAudioTrackOrder as MockedFunction<typeof realignAudioTrackOrder>;
 const mockLstat = lstat as MockedFunction<typeof lstat>;
 const mockReaddir = readdir as MockedFunction<typeof readdir>;
 const mockStat = stat as MockedFunction<typeof stat>;
@@ -85,10 +90,11 @@ describe('UploadService', () => {
   };
 
   const appSettings = { getUploadPattern: vi.fn(), getUploadPatternBookPerFolder: vi.fn(), isCrossPlatformPathSanitizationEnabled: vi.fn() };
-  const libraryService = { verifyUserAccess: vi.fn() };
+  const libraryService = { verifyUserAccess: vi.fn(), verifyUserAccessLevel: vi.fn() };
   const validator = {
     sanitizeFilename: vi.fn(),
     validateFormat: vi.fn(),
+    validateContent: vi.fn(),
   };
   const storage = {
     streamToTemp: vi.fn(),
@@ -96,15 +102,19 @@ describe('UploadService', () => {
     cleanup: vi.fn(),
   };
   const processor = {
+    withFolderBookLock: vi.fn(),
     createBookRecord: vi.fn(),
     processNewBookImportAsync: vi.fn(),
     extractMetadataAsync: vi.fn(),
     extractAudioDurationAsync: vi.fn(),
+    extractAddedAudioChaptersAsync: vi.fn(),
+    reconcileCoversAsync: vi.fn(),
   };
 
   const user = { id: 7, isSuperuser: false, permissions: [] } as any;
 
   const moduleRef = { get: vi.fn().mockReturnValue(null) };
+  const pathPolicy = { assertWithinRoot: vi.fn() };
 
   let service: UploadService;
 
@@ -122,15 +132,21 @@ describe('UploadService', () => {
       storage as any,
       processor as any,
       moduleRef as any,
+      pathPolicy as any,
+      new FileLockService(),
     );
 
     validator.sanitizeFilename.mockReturnValue('book.epub');
     validator.validateFormat.mockReturnValue('epub');
+    validator.validateContent.mockResolvedValue(undefined);
+    pathPolicy.assertWithinRoot.mockResolvedValue('/library/book.epub');
     storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 456 });
     storage.moveToPath.mockResolvedValue(undefined);
     storage.cleanup.mockResolvedValue(undefined);
     processor.createBookRecord.mockResolvedValue({ bookId: 99, created: true });
+    processor.withFolderBookLock.mockImplementation((_libraryId: number, _folderPath: string, work: () => Promise<unknown>) => work());
     libraryService.verifyUserAccess.mockResolvedValue(undefined);
+    libraryService.verifyUserAccessLevel.mockResolvedValue(undefined);
     appSettings.getUploadPattern.mockResolvedValue(null);
     appSettings.getUploadPatternBookPerFolder.mockResolvedValue(null);
     appSettings.isCrossPlatformPathSanitizationEnabled.mockResolvedValue(false);
@@ -205,6 +221,62 @@ describe('UploadService', () => {
     expect(processor.processNewBookImportAsync).toHaveBeenCalledWith(99, 1, '/library/Frank Herbert/Dune.epub', 'epub');
   });
 
+  it('inspects and marks a read-aloud EPUB when the upload pattern references the token', async () => {
+    db.select
+      .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['epub'], fileNamingPattern: '{title}< ({readaloud})>' }]))
+      .mockReturnValueOnce(selectChain([{ id: 2, libraryId: 1, path: '/library' }]));
+    mockExtractEpubMetadata.mockResolvedValue({
+      title: 'Dune',
+      subtitle: null,
+      publisher: null,
+      publishedYear: null,
+      language: null,
+      seriesName: null,
+      seriesIndex: null,
+      isbn13: null,
+      authors: [{ name: 'Frank Herbert' }],
+      tags: [],
+      description: null,
+      isbn10: null,
+    });
+    const inspect = vi.spyOn(service as any, 'inspectMediaOverlayFields').mockResolvedValue({
+      mediaOverlayAvailable: true,
+      mediaOverlayDurationSeconds: 3600,
+      mediaOverlayCheckedAt: new Date(),
+    });
+
+    const result = await service.upload(1, 2, 'raw.epub', {} as any, user);
+
+    expect(result.filename).toBe('Dune (readaloud).epub');
+    expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Dune (readaloud).epub');
+    expect(inspect).toHaveBeenCalledOnce();
+  });
+
+  it('does not inspect media overlays for naming when the upload pattern omits the token', async () => {
+    db.select
+      .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['epub'], fileNamingPattern: '{title}' }]))
+      .mockReturnValueOnce(selectChain([{ id: 2, libraryId: 1, path: '/library' }]));
+    mockExtractEpubMetadata.mockResolvedValue({
+      title: 'Dune',
+      subtitle: null,
+      publisher: null,
+      publishedYear: null,
+      language: null,
+      seriesName: null,
+      seriesIndex: null,
+      isbn13: null,
+      authors: [{ name: 'Frank Herbert' }],
+      tags: [],
+      description: null,
+      isbn10: null,
+    });
+    const inspect = vi.spyOn(service as any, 'inspectMediaOverlayFields');
+
+    await service.upload(1, 2, 'raw.epub', {} as any, user);
+
+    expect(inspect).not.toHaveBeenCalled();
+  });
+
   it('stores the directory-entry spelling when an upload targets a case-insensitive parent path', async () => {
     db.select
       .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['epub'], fileNamingPattern: '{authors:first}/{title}.{extension}' }]))
@@ -235,7 +307,9 @@ describe('UploadService', () => {
 
     await service.upload(1, 2, 'raw.epub', {} as any, user);
 
-    expect(mockReaddir.mock.calls.map((call) => call[0])).toEqual(['/library', '/library/bell hooks']);
+    // The book folder is spelled once to find the book that owns it, and the file once it has landed.
+    expect(mockReaddir.mock.calls.map((call) => call[0])).toEqual(['/library', '/library', '/library/bell hooks']);
+    expect(processor.withFolderBookLock).toHaveBeenCalledWith(1, '/library/bell hooks', expect.any(Function));
     expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Bell Hooks/Dune.epub');
     expect(processor.createBookRecord).toHaveBeenCalledWith(
       1,
@@ -259,6 +333,26 @@ describe('UploadService', () => {
 
     expect(processor.extractMetadataAsync).toHaveBeenCalledWith(99, '/library/book/book.epub', 'epub');
     expect(processor.processNewBookImportAsync).not.toHaveBeenCalled();
+  });
+
+  it('places the file and records it under the lock of the book that owns its folder', async () => {
+    processor.createBookRecord.mockResolvedValue({ bookId: 99, created: false });
+    db.select
+      .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['epub'], fileNamingPattern: null }]))
+      .mockReturnValueOnce(selectChain([{ id: 2, libraryId: 1, path: '/library' }]));
+    const insideLock: string[] = [];
+    processor.withFolderBookLock.mockImplementation(async (_libraryId: number, _folderPath: string, work: () => Promise<unknown>) => {
+      expect(storage.moveToPath).not.toHaveBeenCalled();
+      const result = await work();
+      if (storage.moveToPath.mock.calls.length > 0) insideLock.push('move');
+      if (processor.createBookRecord.mock.calls.length > 0) insideLock.push('record');
+      return result;
+    });
+
+    await service.upload(1, 2, 'raw.epub', {} as any, user);
+
+    expect(processor.withFolderBookLock).toHaveBeenCalledWith(1, '/library/book', expect.any(Function));
+    expect(insideLock).toEqual(['move', 'record']);
   });
 
   it('sanitizes generated destination path tokens when cross-platform mode is enabled', async () => {
@@ -384,7 +478,7 @@ describe('UploadService', () => {
     expect(storage.streamToTemp).not.toHaveBeenCalled();
   });
 
-  it('book_per_file with pattern uses resolveDownloadFilename for flat layout', async () => {
+  it('book_per_file with a folderless pattern keeps the file at the library root', async () => {
     db.select
       .mockReturnValueOnce(
         selectChain([{ id: 1, allowedFormats: ['epub'], fileNamingPattern: '{title}.{extension}', organizationMode: 'book_per_file' }]),
@@ -411,6 +505,76 @@ describe('UploadService', () => {
     expect(result).toEqual({ bookId: 99, filename: 'Dune.epub', format: 'epub', sizeBytes: 456 });
     expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Dune.epub');
     expect(processor.createBookRecord).toHaveBeenCalledWith(1, 2, '/library/Dune.epub', '/library/Dune.epub', 'Dune.epub', 'epub', 456);
+  });
+
+  it('book_per_file keeps the folder segments its pattern defines', async () => {
+    db.select
+      .mockReturnValueOnce(
+        selectChain([
+          {
+            id: 1,
+            allowedFormats: ['epub'],
+            fileNamingPattern: '{authors:first}/{series}/{title}.{extension}',
+            organizationMode: 'book_per_file',
+          },
+        ]),
+      )
+      .mockReturnValueOnce(selectChain([{ id: 2, libraryId: 1, path: '/library' }]));
+
+    mockExtractEpubMetadata.mockResolvedValue({
+      title: 'Dune',
+      subtitle: null,
+      publisher: null,
+      publishedYear: null,
+      language: null,
+      seriesName: 'Dune',
+      seriesIndex: null,
+      isbn13: null,
+      authors: [{ name: 'Frank Herbert' }],
+      tags: [],
+      description: null,
+      isbn10: null,
+    });
+
+    const result = await service.upload(1, 2, 'raw.epub', {} as any, user);
+
+    expect(result).toEqual({ bookId: 99, filename: 'Dune.epub', format: 'epub', sizeBytes: 456 });
+    expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Frank Herbert/Dune/Dune.epub');
+    expect(processor.createBookRecord).toHaveBeenCalledWith(
+      1,
+      2,
+      '/library/Frank Herbert/Dune/Dune.epub',
+      '/library/Frank Herbert/Dune/Dune.epub',
+      'Frank Herbert/Dune/Dune.epub',
+      'epub',
+      456,
+    );
+  });
+
+  it('book_per_file files under the shipped default pattern rather than at the library root', async () => {
+    db.select
+      .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['epub'], fileNamingPattern: null, organizationMode: 'book_per_file' }]))
+      .mockReturnValueOnce(selectChain([{ id: 2, libraryId: 1, path: '/library' }]));
+    appSettings.getUploadPattern.mockResolvedValue(DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE);
+
+    mockExtractEpubMetadata.mockResolvedValue({
+      title: 'Dune',
+      subtitle: null,
+      publisher: null,
+      publishedYear: 1965,
+      language: null,
+      seriesName: 'Dune',
+      seriesIndex: '1',
+      isbn13: null,
+      authors: [{ name: 'Frank Herbert' }],
+      tags: [],
+      description: null,
+      isbn10: null,
+    });
+
+    await service.upload(1, 2, 'raw.epub', {} as any, user);
+
+    expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Frank Herbert/Dune/01. Dune (1965).epub');
   });
 
   it('book_per_file without pattern uses filename directly', async () => {
@@ -476,6 +640,30 @@ describe('UploadService', () => {
     expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Stephen King/The Stand.mobi');
   });
 
+  it.each(['9780385121682', '097522980X'])('mobi metadata populates the ISBN naming token: %s', async (isbn) => {
+    validator.validateFormat.mockReturnValue('mobi');
+    validator.sanitizeFilename.mockReturnValue('book.mobi');
+    db.select
+      .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['mobi'], fileNamingPattern: '{authors:first}/{title}-{isbn}.{extension}' }]))
+      .mockReturnValueOnce(selectChain([{ id: 2, libraryId: 1, path: '/library' }]));
+    mockParseMobiFile.mockResolvedValue({
+      title: 'The Stand',
+      authors: ['Stephen King'],
+      publisher: 'Doubleday',
+      isbn,
+      publishedDate: '1978-10-03',
+      language: 'en',
+      description: null,
+      tags: [],
+    });
+    storage.streamToTemp.mockResolvedValue({ tempPath: 'upload.bin', sizeBytes: 456 });
+
+    const result = await service.upload(1, 2, 'raw.mobi', {} as any, user);
+
+    expect(result.filename).toBe(`The Stand-${isbn}.mobi`);
+    expect(storage.moveToPath.mock.lastCall?.[1]).toBe(`/library/Stephen King/The Stand-${isbn}.mobi`);
+  });
+
   it('pdf metadata populates tokens', async () => {
     validator.validateFormat.mockReturnValue('pdf');
     validator.sanitizeFilename.mockReturnValue('doc.pdf');
@@ -530,7 +718,7 @@ describe('UploadService', () => {
     mockExtractCbzMetadata.mockResolvedValue({
       title: 'Issue 1',
       seriesName: 'Batman',
-      seriesIndex: 1,
+      seriesIndex: '1',
       authors: [{ name: 'Bob Kane', sortName: null }],
       subtitle: null,
       description: null,
@@ -583,7 +771,7 @@ describe('UploadService', () => {
       publishedYear: null,
       language: null,
       seriesName: 'Trilogy',
-      seriesIndex: 3,
+      seriesIndex: '3',
       isbn13: null,
       authors: [{ name: 'Author' }],
       tags: [],
@@ -609,7 +797,7 @@ describe('UploadService', () => {
       publishedYear: null,
       language: null,
       seriesName: 'Trilogy',
-      seriesIndex: 1.5,
+      seriesIndex: '5.10',
       isbn13: null,
       authors: [{ name: 'Author' }],
       tags: [],
@@ -620,7 +808,7 @@ describe('UploadService', () => {
     const result = await service.upload(1, 2, 'raw.epub', {} as any, user);
 
     expect(result).toEqual({ bookId: 99, filename: 'Book Three.epub', format: 'epub', sizeBytes: 456 });
-    expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Trilogy 01.5/Book Three.epub');
+    expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Trilogy 05.10/Book Three.epub');
   });
 
   it('mobi parser throws - logs warning and returns base tokens', async () => {
@@ -720,6 +908,44 @@ describe('UploadService', () => {
     expect(appSettings.getUploadPatternBookPerFolder).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { mode: 'book_per_folder', pattern: '{title}', global: false },
+    { mode: 'book_per_folder', pattern: '<{title}|{originalFilename}> - <{authors:first}> - <{year}>', global: false },
+    { mode: 'book_per_folder', pattern: '{title}', global: true },
+    { mode: 'book_per_file', pattern: '{title}', global: false },
+  ])('keeps sequential root uploads separate with $mode, pattern=$pattern, global=$global', async ({ mode, pattern, global }) => {
+    for (const title of ['First Book', 'Second Book']) {
+      db.select
+        .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['epub'], fileNamingPattern: global ? null : pattern, organizationMode: mode }]))
+        .mockReturnValueOnce(selectChain([{ id: 2, libraryId: 1, path: '/library' }]));
+      appSettings.getUploadPatternBookPerFolder.mockResolvedValue(pattern);
+      mockExtractEpubMetadata.mockResolvedValue({ title, authors: [{ name: 'Test Author' }], publishedYear: 2024 } as never);
+
+      await service.upload(1, 2, 'raw.epub', {} as any, user);
+    }
+
+    const paths = pattern.includes('authors')
+      ? ['/library/First Book - Test Author - 2024.epub', '/library/Second Book - Test Author - 2024.epub']
+      : ['/library/First Book.epub', '/library/Second Book.epub'];
+    for (const [index, path] of paths.entries()) {
+      expect(storage.moveToPath).toHaveBeenNthCalledWith(index + 1, '/tmp/upload.bin', path);
+      expect(processor.createBookRecord).toHaveBeenNthCalledWith(index + 1, 1, 2, path, path, path.slice('/library/'.length), 'epub', 456);
+    }
+  });
+
+  it('uses the persisted root filename spelling for both file and book identity', async () => {
+    db.select
+      .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['epub'], fileNamingPattern: '{title}', organizationMode: 'book_per_folder' }]))
+      .mockReturnValueOnce(selectChain([{ id: 2, libraryId: 1, path: '/library' }]));
+    mockExtractEpubMetadata.mockResolvedValue({ title: 'Dune', authors: [] } as never);
+    mockLstat.mockResolvedValue({} as never);
+    mockReaddir.mockResolvedValue(['dune.epub'] as never);
+
+    await service.upload(1, 2, 'raw.epub', {} as any, user);
+
+    expect(processor.createBookRecord).toHaveBeenCalledWith(1, 2, '/library/dune.epub', '/library/dune.epub', 'dune.epub', 'epub', 456);
+  });
+
   it('book_per_folder global pattern used when library pattern is null', async () => {
     db.select
       .mockReturnValueOnce(selectChain([{ id: 1, allowedFormats: ['epub'], fileNamingPattern: null, organizationMode: 'book_per_folder' }]))
@@ -765,7 +991,7 @@ describe('UploadService', () => {
       publishedYear: null,
       language: null,
       seriesName: 'Dune Chronicles',
-      seriesIndex: 1,
+      seriesIndex: '1',
       isbn13: null,
       authors: [{ name: 'Frank Herbert' }],
       tags: [],
@@ -825,7 +1051,7 @@ describe('UploadService', () => {
 
     function mockElection(
       lockedBook: { primaryFileId: number | null; status: string; formatPriority: string[] },
-      files: Array<{ id: number; format: string | null; sizeBytes: number | null }>,
+      files: Array<{ id: number; format: string | null; sizeBytes: number | null; mediaOverlayAvailable?: boolean }>,
     ) {
       tx.select
         .mockReset()
@@ -849,8 +1075,43 @@ describe('UploadService', () => {
       ]);
     }
 
+    it('waits for the book lock and writes into the folder the book has by then', async () => {
+      const locks = new FileLockService();
+      service = new UploadService(
+        db as any,
+        appSettings as any,
+        libraryService as any,
+        validator as any,
+        storage as any,
+        processor as any,
+        moduleRef as any,
+        pathPolicy as any,
+        locks,
+      );
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ folderPath: '/library/Merged Folder' })]))
+        .mockReturnValueOnce(noHashConflict());
+
+      let releaseHolder!: () => void;
+      const holder = locks.withLock(bookOperationLockKey(10), () => new Promise<void>((resolve) => (releaseHolder = resolve)));
+      const adding = service.addFileToBook(10, 'book.epub', {} as any, user);
+
+      await vi.waitFor(() => expect(storage.streamToTemp).toHaveBeenCalled());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(storage.moveToPath).not.toHaveBeenCalled();
+
+      releaseHolder();
+      await holder;
+      await adding;
+      expect(storage.moveToPath).toHaveBeenCalledWith('/tmp/upload.bin', '/library/Merged Folder/book.epub');
+    });
+
     it('adds a file successfully to an existing book with a primary file', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
 
       const result = await service.addFileToBook(10, 'book.epub', {} as any, user);
 
@@ -917,7 +1178,10 @@ describe('UploadService', () => {
       },
     ])('$name', async ({ currentFormat, uploadedFormat, formatPriority, expectedPrimaryFileId }) => {
       mockUploadedFormat(uploadedFormat);
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
       mockElection({ primaryFileId: 99, status: 'present', formatPriority }, [
         { id: 55, format: uploadedFormat, sizeBytes: 456 },
         { id: 99, format: currentFormat, sizeBytes: 1000 },
@@ -937,7 +1201,10 @@ describe('UploadService', () => {
 
     it('elects an existing higher-priority file when the book has no primary', async () => {
       mockUploadedFormat('m4b');
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: null })])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: null })]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: null })]))
+        .mockReturnValueOnce(noHashConflict());
       mockElection({ primaryFileId: null, status: 'present', formatPriority: ['epub', 'm4b'] }, [
         { id: 10, format: 'epub', sizeBytes: 1000 },
         { id: 55, format: 'm4b', sizeBytes: 456 },
@@ -949,9 +1216,28 @@ describe('UploadService', () => {
       expect(result.role).toBe('content');
     });
 
+    it('promotes an uploaded read-aloud EPUB over an automatically selected plain EPUB', async () => {
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
+      mockElection({ primaryFileId: 99, status: 'present', formatPriority: ['epub'] }, [
+        { id: 55, format: 'epub', sizeBytes: 456, mediaOverlayAvailable: true },
+        { id: 99, format: 'epub', sizeBytes: 1000, mediaOverlayAvailable: false },
+      ]);
+
+      const result = await service.addFileToBook(10, 'book.epub', {} as any, user);
+
+      expect(updateSet).toHaveBeenCalledWith(expect.objectContaining({ primaryFileId: 55 }));
+      expect(result.role).toBe('primary');
+    });
+
     it('repairs a stale primary reference using the highest-priority eligible file', async () => {
       mockUploadedFormat('m4b');
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: 777 })])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: 777 })]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: 777 })]))
+        .mockReturnValueOnce(noHashConflict());
       mockElection({ primaryFileId: 777, status: 'present', formatPriority: ['pdf', 'm4b'] }, [
         { id: 10, format: 'pdf', sizeBytes: 1000 },
         { id: 55, format: 'm4b', sizeBytes: 456 },
@@ -965,7 +1251,10 @@ describe('UploadService', () => {
 
     it('ignores a zero-byte higher-priority legacy file during election', async () => {
       mockUploadedFormat('pdf');
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
       mockElection({ primaryFileId: 99, status: 'present', formatPriority: ['epub', 'pdf', 'm4b'] }, [
         { id: 10, format: 'epub', sizeBytes: 0 },
         { id: 55, format: 'pdf', sizeBytes: 456 },
@@ -979,7 +1268,10 @@ describe('UploadService', () => {
     });
 
     it('updates status and primary file together when a higher-priority format restores a missing book', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow({ status: 'missing' })])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ status: 'missing' })]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ status: 'missing' })]))
+        .mockReturnValueOnce(noHashConflict());
       mockElection({ primaryFileId: 99, status: 'missing', formatPriority: ['epub', 'm4b'] }, [
         { id: 55, format: 'epub', sizeBytes: 456 },
         { id: 99, format: 'm4b', sizeBytes: 1000 },
@@ -995,15 +1287,65 @@ describe('UploadService', () => {
     it('kicks off per-file audio duration extraction for an added audio file', async () => {
       validator.sanitizeFilename.mockReturnValue('chapter-02.mp3');
       validator.validateFormat.mockReturnValue('mp3');
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
 
       await service.addFileToBook(10, 'chapter-02.mp3', {} as any, user);
 
       expect(processor.extractAudioDurationAsync).toHaveBeenCalledWith(10, '/library/Book Title/chapter-02.mp3', 'mp3');
+      expect(processor.reconcileCoversAsync).toHaveBeenCalledWith([10]);
+    });
+
+    it('places an added track by its name before the transaction commits, instead of after every other track', async () => {
+      validator.sanitizeFilename.mockReturnValue('chapter-02.mp3');
+      validator.validateFormat.mockReturnValue('mp3');
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
+
+      await service.addFileToBook(10, 'chapter-02.mp3', {} as any, user);
+
+      expect(mockRealignAudioTrackOrder).toHaveBeenCalledTimes(1);
+      expect(mockRealignAudioTrackOrder).toHaveBeenCalledWith(tx, 10);
+      expect(mockRealignAudioTrackOrder.mock.invocationCallOrder[0]).toBeGreaterThan(insertValues.mock.invocationCallOrder[0]!);
+    });
+
+    it('leaves track order alone when the added file is not audio', async () => {
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
+
+      await service.addFileToBook(10, 'book.epub', {} as any, user);
+
+      expect(mockRealignAudioTrackOrder).not.toHaveBeenCalled();
+    });
+
+    it('schedules audio chapter extraction when an M4B is added to an EPUB-primary book', async () => {
+      mockUploadedFormat('m4b');
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
+      mockElection({ primaryFileId: 99, status: 'present', formatPriority: ['epub', 'm4b'] }, [
+        { id: 99, format: 'epub', sizeBytes: 1000 },
+        { id: 55, format: 'm4b', sizeBytes: 456 },
+      ]);
+
+      await service.addFileToBook(10, 'book.m4b', {} as any, user);
+
+      expect(processor.extractAudioDurationAsync).toHaveBeenCalledWith(10, expect.stringMatching(/book\.m4b$/), 'm4b');
+      expect(processor.extractAddedAudioChaptersAsync).toHaveBeenCalledWith(10, 'm4b');
     });
 
     it('delegates duration extraction to the processor regardless of format (processor gates on audio)', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
 
       await service.addFileToBook(10, 'book.epub', {} as any, user);
 
@@ -1011,7 +1353,10 @@ describe('UploadService', () => {
     });
 
     it('promotes new file to primary when book has no primary file', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: null })])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: null })]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: null })]))
+        .mockReturnValueOnce(noHashConflict());
       mockElection({ primaryFileId: null, status: 'present', formatPriority: ['epub', 'm4b'] }, [{ id: 55, format: 'epub', sizeBytes: 456 }]);
 
       const result = await service.addFileToBook(10, 'book.epub', {} as any, user);
@@ -1023,7 +1368,10 @@ describe('UploadService', () => {
     });
 
     it('updates book status from missing to present and promotes primary when null', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: null, status: 'missing' })])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: null, status: 'missing' })]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: null, status: 'missing' })]))
+        .mockReturnValueOnce(noHashConflict());
       mockElection({ primaryFileId: null, status: 'missing', formatPriority: ['epub', 'm4b'] }, [{ id: 55, format: 'epub', sizeBytes: 456 }]);
 
       const result = await service.addFileToBook(10, 'book.epub', {} as any, user);
@@ -1035,7 +1383,10 @@ describe('UploadService', () => {
     });
 
     it('updates only status when book is missing but already has a primary file', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: 42, status: 'missing' })])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: 42, status: 'missing' })]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ primaryFileId: 42, status: 'missing' })]))
+        .mockReturnValueOnce(noHashConflict());
       mockElection({ primaryFileId: 42, status: 'missing', formatPriority: ['epub', 'm4b'] }, [
         { id: 42, format: 'epub', sizeBytes: 1000 },
         { id: 55, format: 'epub', sizeBytes: 456 },
@@ -1051,7 +1402,10 @@ describe('UploadService', () => {
     });
 
     it('does not call db.update when book is present and already has a primary', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
 
       await service.addFileToBook(10, 'book.epub', {} as any, user);
 
@@ -1059,14 +1413,17 @@ describe('UploadService', () => {
     });
 
     it('throws NotFoundException when book does not exist', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([]));
+      db.select.mockReturnValueOnce(selectJoinChain([])).mockReturnValueOnce(selectJoinChain([]));
 
       await expect(service.addFileToBook(999, 'book.epub', {} as any, user)).rejects.toBeInstanceOf(NotFoundException);
       expect(storage.streamToTemp).not.toHaveBeenCalled();
     });
 
     it('does not insert when the book is deleted while the file is being uploaded', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
       tx.select.mockReset().mockReturnValueOnce(lockedBookSelectChain([], forUpdate));
 
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toBeInstanceOf(NotFoundException);
@@ -1078,7 +1435,7 @@ describe('UploadService', () => {
     });
 
     it('throws ForbiddenException when user has no library access', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()]));
+      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(selectJoinChain([makeBookRow()]));
       libraryService.verifyUserAccess.mockRejectedValue(new ForbiddenException('No access'));
 
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toBeInstanceOf(ForbiddenException);
@@ -1086,14 +1443,16 @@ describe('UploadService', () => {
     });
 
     it('throws BadRequestException for book_per_file organization mode', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow({ organizationMode: 'book_per_file' })]));
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ organizationMode: 'book_per_file' })]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow({ organizationMode: 'book_per_file' })]));
 
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toBeInstanceOf(BadRequestException);
       expect(storage.streamToTemp).not.toHaveBeenCalled();
     });
 
     it('throws BadRequestException when format validation fails', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()]));
+      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(selectJoinChain([makeBookRow()]));
       validator.validateFormat.mockImplementation(() => {
         throw new BadRequestException('Unsupported format');
       });
@@ -1103,7 +1462,7 @@ describe('UploadService', () => {
     });
 
     it('throws BadRequestException for empty file and cleans up temp', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()]));
+      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(selectJoinChain([makeBookRow()]));
       storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 0 });
 
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toBeInstanceOf(BadRequestException);
@@ -1111,7 +1470,10 @@ describe('UploadService', () => {
     });
 
     it('throws ConflictException for duplicate content hash and cleans up temp', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(selectChain([{ id: 77 }]));
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectChain([{ id: 77 }]));
 
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toBeInstanceOf(ConflictException);
       expect(storage.cleanup).toHaveBeenCalledWith('/tmp/upload.bin');
@@ -1119,7 +1481,10 @@ describe('UploadService', () => {
     });
 
     it('throws ConflictException when destination file already exists and cleans up temp', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
       mockFsAccess.mockResolvedValue(undefined);
 
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toBeInstanceOf(ConflictException);
@@ -1128,7 +1493,10 @@ describe('UploadService', () => {
     });
 
     it('cleans up only temp when DB insert fails after move (file remains for scanner)', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
       insertReturning.mockRejectedValue(new Error('DB error'));
 
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toThrow('DB error');
@@ -1137,7 +1505,10 @@ describe('UploadService', () => {
     });
 
     it('does not dispatch processing when the primary election update fails', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
       mockElection({ primaryFileId: 99, status: 'present', formatPriority: ['epub', 'm4b'] }, [
         { id: 55, format: 'epub', sizeBytes: 456 },
         { id: 99, format: 'm4b', sizeBytes: 1000 },
@@ -1147,12 +1518,16 @@ describe('UploadService', () => {
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toThrow('primary update failed');
 
       expect(processor.extractAudioDurationAsync).not.toHaveBeenCalled();
+      expect(processor.extractAddedAudioChaptersAsync).not.toHaveBeenCalled();
       expect(storage.cleanup).toHaveBeenCalledWith('/tmp/upload.bin');
       expect(storage.cleanup).not.toHaveBeenCalledWith('/library/Book Title/book.epub');
     });
 
     it('cleans up only temp when move fails (destination not yet written)', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
       storage.moveToPath.mockRejectedValue(new Error('disk full'));
 
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toThrow('disk full');
@@ -1160,7 +1535,10 @@ describe('UploadService', () => {
     });
 
     it('propagates access errors other than ENOENT from destinationExists check', async () => {
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
       mockFsAccess.mockRejectedValue(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
 
       await expect(service.addFileToBook(10, 'book.epub', {} as any, user)).rejects.toThrow('permission denied');
@@ -1180,7 +1558,10 @@ describe('UploadService', () => {
           durationSeconds: null,
         },
       ]);
-      db.select.mockReturnValueOnce(selectJoinChain([makeBookRow()])).mockReturnValueOnce(noHashConflict());
+      db.select
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(selectJoinChain([makeBookRow()]))
+        .mockReturnValueOnce(noHashConflict());
 
       const result = await service.addFileToBook(10, 'book.epub', {} as any, user);
 
@@ -1195,7 +1576,42 @@ describe('UploadService', () => {
       db.select.mockReturnValueOnce(selectChain([{ id: 10, libraryId: 1 }]));
 
       await expect(service.renameBookFiles(10, user)).resolves.toBeUndefined();
+      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(user.id, 1, false, 'editor');
       expect(mockRenameService.performRename).toHaveBeenCalledWith(10, user.id, true, false);
+    });
+
+    it('rejects a viewer before resolving or invoking the rename service', async () => {
+      const renameService = { performRename: vi.fn() };
+      moduleRef.get.mockReturnValue(renameService);
+      db.select.mockReturnValueOnce(selectChain([{ id: 10, libraryId: 1 }]));
+      libraryService.verifyUserAccessLevel.mockRejectedValue(new ForbiddenException('Editor access required'));
+
+      await expect(service.renameBookFiles(10, user)).rejects.toThrow(ForbiddenException);
+      expect(moduleRef.get).not.toHaveBeenCalled();
+      expect(renameService.performRename).not.toHaveBeenCalled();
+    });
+
+    it('checks the current role again after a downgrade', async () => {
+      const renameService = { performRename: vi.fn().mockResolvedValue({ status: 'success' }) };
+      moduleRef.get.mockReturnValue(renameService);
+      db.select.mockReturnValue(selectChain([{ id: 10, libraryId: 1 }]));
+      await service.renameBookFiles(10, user);
+      renameService.performRename.mockClear();
+      libraryService.verifyUserAccessLevel.mockRejectedValue(new ForbiddenException('Editor access required'));
+
+      await expect(service.renameBookFiles(10, user)).rejects.toThrow(ForbiddenException);
+      expect(renameService.performRename).not.toHaveBeenCalled();
+    });
+
+    it('passes the superuser bypass through the editor authorization check', async () => {
+      const caller = { ...user, isSuperuser: true };
+      const renameService = { performRename: vi.fn().mockResolvedValue({ status: 'success' }) };
+      moduleRef.get.mockReturnValue(renameService);
+      db.select.mockReturnValueOnce(selectChain([{ id: 10, libraryId: 1 }]));
+
+      await service.renameBookFiles(10, caller);
+      expect(libraryService.verifyUserAccessLevel).toHaveBeenCalledWith(caller.id, 1, true, 'editor');
+      expect(renameService.performRename).toHaveBeenCalledWith(10, caller.id, true, false);
     });
 
     it('throws NotFoundException when book does not exist', async () => {
@@ -1206,7 +1622,7 @@ describe('UploadService', () => {
 
     it('throws ForbiddenException when user has no library access', async () => {
       db.select.mockReturnValueOnce(selectChain([{ id: 10, libraryId: 1 }]));
-      libraryService.verifyUserAccess.mockRejectedValue(new ForbiddenException('No access'));
+      libraryService.verifyUserAccessLevel.mockRejectedValue(new ForbiddenException('No access to this library'));
 
       await expect(service.renameBookFiles(10, user)).rejects.toBeInstanceOf(ForbiddenException);
     });

@@ -10,7 +10,7 @@ vi.mock('vue-echarts', () => ({
 }))
 
 vi.mock('@/stores/theme', () => ({
-  useThemeStore: () => ({ resolvedTheme: 'dark', accent: 'blue' }),
+  useThemeStore: () => ({ resolvedTheme: 'dark', appearanceKey: 'dark:blue' }),
 }))
 
 vi.mock('@/features/statistics/composables/useStatisticsConfig', () => ({
@@ -65,9 +65,9 @@ describe('SourceDistributionChart', () => {
   it('builds a donut series from the source slices', async () => {
     apiMock.mockResolvedValue(
       makeResponse({
-        totalSeconds: 4800,
+        totalSeconds: 6000,
         slices: [
-          { key: 'app-password:7', label: 'iPhone app', bucket: 'bookorbit', kind: 'app_password', appPasswordId: 7, readingSeconds: 3600 },
+          { key: 'app-password:7:ios', label: 'iPhone app', bucket: 'ios', kind: 'app_password', appPasswordId: 7, readingSeconds: 3600 },
           { key: 'kobo', label: 'Kobo', bucket: 'kobo', kind: 'built_in', appPasswordId: null, readingSeconds: 1200 },
         ],
       }),
@@ -83,7 +83,7 @@ describe('SourceDistributionChart', () => {
       tooltip: { formatter: (p: { name: string; value: number; percent: number; color: string }) => string }
     }
     const data = option.series[0]!.data
-    expect(data.map((d) => d.id)).toEqual(['app-password:7', 'kobo'])
+    expect(data.map((d) => d.id)).toEqual(['app-password:7:ios', 'kobo'])
     expect(data.map((d) => d.name)).toEqual(['iPhone app', 'Kobo'])
     expect(data.map((d) => d.value)).toEqual([3600, 1200])
     expect(data[0]!.itemStyle.color).not.toBe(data[1]!.itemStyle.color)

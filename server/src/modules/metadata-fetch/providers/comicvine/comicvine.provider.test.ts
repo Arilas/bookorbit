@@ -20,7 +20,6 @@ const mockConfig: ProviderConfigurations = {
   comicvine: { enabled: true, apiKey: 'test-key' },
   ranobedb: { enabled: false },
   kobo: { enabled: false, country: 'us', language: 'en' },
-  lubimyczytac: { enabled: false },
 };
 
 const mockVolume = {
@@ -28,6 +27,7 @@ const mockVolume = {
   name: 'Batman',
   start_year: '2016',
   count_of_issues: 50,
+  publisher: { id: 10, name: 'DC Comics' },
 };
 
 const mockIssue = {
@@ -59,6 +59,7 @@ describe('ComicVineProvider', () => {
             searchIssuesInVolume: vi.fn().mockResolvedValue([]),
             searchIssues: vi.fn().mockResolvedValue([]),
             getIssueById: vi.fn().mockResolvedValue(null),
+            getVolumeById: vi.fn().mockResolvedValue(null),
             windowResetMs: vi.fn().mockReturnValue(0),
           },
         },
@@ -128,6 +129,129 @@ describe('ComicVineProvider', () => {
   // ---------------------------------------------------------------------------
 
   describe('search - structured path', () => {
+    function sameNamedVolumes(count: number) {
+      return Array.from({ length: count }, (_, index) => ({ ...mockVolume, id: index + 1, start_year: String(2020 - index) }));
+    }
+
+    function mockIssuesForVolumes(volumeIds: number[]) {
+      vi.mocked(client.searchIssuesInVolume).mockImplementation((volumeId) =>
+        Promise.resolve(volumeIds.includes(volumeId) ? [{ ...mockIssue, id: 100 + volumeId, volume: { id: volumeId, name: mockVolume.name } }] : []),
+      );
+    }
+
+    it('offers tied runs across batch boundaries instead of stopping after the first hit', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue(sameNamedVolumes(4));
+      mockIssuesForVolumes([1, 4]);
+
+      const results = await provider.search({ title: 'Batman #01' });
+
+      expect(client.searchIssuesInVolume).toHaveBeenCalledTimes(4);
+      expect(results.map((candidate) => candidate.providerId)).toEqual(['101', '104']);
+    });
+
+    it('does not probe or return lower-ranked collections once matching runs were found', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue([
+        ...sameNamedVolumes(2),
+        { ...mockVolume, id: 3, name: 'Batman Collection', start_year: '2025' },
+      ]);
+      mockIssuesForVolumes([1, 2, 3]);
+
+      const results = await provider.search({ title: 'Batman #1' });
+
+      expect(client.searchIssuesInVolume).toHaveBeenCalledTimes(2);
+      expect(results.map((candidate) => candidate.providerId)).toEqual(['101', '102']);
+    });
+
+    it('continues to lower-ranked volumes when the better-ranked volumes have no issue', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue([
+        ...sameNamedVolumes(2),
+        { ...mockVolume, id: 3, name: 'Batman Collection', start_year: '2025' },
+      ]);
+      mockIssuesForVolumes([3]);
+
+      expect((await provider.search({ title: 'Batman #1' })).map((candidate) => candidate.providerId)).toEqual(['103']);
+      expect(client.searchIssuesInVolume).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not let a one-result limit hide ambiguity during automatic matching', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue(sameNamedVolumes(4));
+      mockIssuesForVolumes([1, 4]);
+
+      expect(await provider.search({ title: 'Batman #1', maxCandidatesPerProvider: 1, requireUnambiguousMatch: true })).toEqual([]);
+      expect(client.searchIssuesInVolume).toHaveBeenCalledTimes(4);
+    });
+
+    it('accepts a unique issue after checking every tied run', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue(sameNamedVolumes(4));
+      mockIssuesForVolumes([4]);
+
+      const results = await provider.search({ title: 'Batman #1', maxCandidatesPerProvider: 1, requireUnambiguousMatch: true });
+
+      expect(results.map((candidate) => candidate.providerId)).toEqual(['104']);
+      expect(client.searchIssuesInVolume).toHaveBeenCalledTimes(4);
+    });
+
+    it('preserves manual result limits after probing tied volumes', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue(sameNamedVolumes(4));
+      mockIssuesForVolumes([1, 4]);
+
+      expect(await provider.search({ title: 'Batman #1', maxCandidatesPerProvider: 1 })).toHaveLength(1);
+      expect(client.searchIssuesInVolume).toHaveBeenCalledTimes(4);
+    });
+
+    it.each([true, false])('bounds probing to eight volumes when automatic matching is %s', async (automatic) => {
+      vi.mocked(client.searchVolumes).mockResolvedValue(sameNamedVolumes(20));
+      mockIssuesForVolumes([1]);
+
+      const results = await provider.search({ title: 'Batman #1', requireUnambiguousMatch: automatic });
+
+      expect(client.searchIssuesInVolume).toHaveBeenCalledTimes(8);
+      expect(results).toHaveLength(automatic ? 0 : 1);
+    });
+
+    it('does not accept an automatic match when a tied probe fails', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue(sameNamedVolumes(2));
+      vi.mocked(client.searchIssuesInVolume).mockResolvedValueOnce([mockIssue]).mockRejectedValueOnce(new Error('upstream unavailable'));
+
+      expect(await provider.search({ title: 'Batman #1', requireUnambiguousMatch: true })).toEqual([]);
+    });
+
+    it('does not accept a lower-ranked automatic match after a higher-ranked probe fails', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue([mockVolume, { ...mockVolume, id: 2, name: 'Batman Collection' }]);
+      vi.mocked(client.searchIssuesInVolume).mockRejectedValueOnce(new Error('upstream unavailable')).mockResolvedValueOnce([mockIssue]);
+
+      expect(await provider.search({ title: 'Batman #1', requireUnambiguousMatch: true })).toEqual([]);
+    });
+
+    it('does not accept an automatic match after a tied probe is throttled', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue(sameNamedVolumes(4));
+      vi.mocked(client.searchIssuesInVolume)
+        .mockResolvedValueOnce([mockIssue])
+        .mockRejectedValueOnce(new ProviderThrottleError())
+        .mockResolvedValueOnce([]);
+
+      expect(await provider.search({ title: 'Batman #1', requireUnambiguousMatch: true })).toEqual([]);
+      expect(client.searchIssuesInVolume).toHaveBeenCalledTimes(3);
+      expect(throttleTracker.record).toHaveBeenCalled();
+    });
+
+    it('deduplicates issue IDs before deciding whether a match is ambiguous', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue([mockVolume]);
+      vi.mocked(client.searchIssuesInVolume).mockResolvedValue([mockIssue, mockIssue]);
+
+      expect(await provider.search({ title: 'Batman #1', requireUnambiguousMatch: true })).toHaveLength(1);
+    });
+
+    it('skips issue detail enrichment when an automatic search is ambiguous', async () => {
+      vi.mocked(client.searchVolumes).mockResolvedValue(sameNamedVolumes(2));
+      vi.mocked(client.searchIssuesInVolume).mockImplementation((volumeId) =>
+        Promise.resolve([{ ...mockIssue, id: 100 + volumeId, volume: { id: volumeId, name: 'Batman' }, person_credits: [] }]),
+      );
+
+      expect(await provider.search({ title: 'Batman #1', requireUnambiguousMatch: true })).toEqual([]);
+      expect(client.getIssueById).not.toHaveBeenCalled();
+    });
+
     it('calls searchVolumes then searchIssuesInVolume for a parsed title', async () => {
       vi.spyOn(client, 'searchVolumes').mockResolvedValue([mockVolume]);
       vi.spyOn(client, 'searchIssuesInVolume').mockResolvedValue([mockIssue]);
@@ -137,6 +261,8 @@ describe('ComicVineProvider', () => {
       expect(client.searchVolumes).toHaveBeenCalledWith('Batman', 'test-key', expect.any(AbortSignal));
       expect(client.searchIssuesInVolume).toHaveBeenCalledWith(mockVolume.id, '1', 'test-key', expect.any(AbortSignal));
       expect(results).toHaveLength(1);
+      expect(results[0]?.publisher).toBe('DC Comics');
+      expect(client.getVolumeById).not.toHaveBeenCalled();
     });
 
     it('falls back to the stored series when the title is a bare issue name', async () => {
@@ -301,6 +427,50 @@ describe('ComicVineProvider', () => {
       expect(client.searchVolumes).not.toHaveBeenCalled();
     });
 
+    it('fetches the linked volume and maps its publisher', async () => {
+      vi.mocked(client.searchIssues).mockResolvedValue([mockIssue]);
+      vi.mocked(client.getVolumeById).mockResolvedValue(mockVolume);
+
+      const results = await provider.search({ title: 'Batman' });
+
+      expect(client.getVolumeById).toHaveBeenCalledWith(mockIssue.volume.id, 'test-key', expect.any(AbortSignal));
+      expect(results[0]?.publisher).toBe('DC Comics');
+    });
+
+    it('looks up a shared volume only once per search', async () => {
+      const secondIssue = { ...mockIssue, id: 101, issue_number: '2' };
+      vi.mocked(client.searchIssues).mockResolvedValue([mockIssue, secondIssue]);
+      vi.mocked(client.getVolumeById).mockResolvedValue(mockVolume);
+
+      const results = await provider.search({ title: 'Batman' });
+
+      expect(client.getVolumeById).toHaveBeenCalledTimes(1);
+      expect(results.map((candidate) => candidate.publisher)).toEqual(['DC Comics', 'DC Comics']);
+    });
+
+    it('keeps the candidate when the linked volume cannot be loaded', async () => {
+      vi.mocked(client.searchIssues).mockResolvedValue([mockIssue]);
+      vi.mocked(client.getVolumeById).mockResolvedValue(null);
+
+      const results = await provider.search({ title: 'Batman' });
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.publisher).toBeUndefined();
+    });
+
+    it('keeps all candidates and stops enriching after a volume lookup is throttled', async () => {
+      const secondIssue = { ...mockIssue, id: 101, volume: { id: 2, name: 'Detective Comics' } };
+      vi.mocked(client.searchIssues).mockResolvedValue([mockIssue, secondIssue]);
+      vi.mocked(client.getVolumeById).mockRejectedValueOnce(new ProviderThrottleError());
+      vi.mocked(client.windowResetMs).mockReturnValue(61_000);
+
+      const results = await provider.search({ title: 'Batman' });
+
+      expect(results).toHaveLength(2);
+      expect(client.getVolumeById).toHaveBeenCalledTimes(1);
+      expect(throttleTracker.record).toHaveBeenCalledWith(MetadataProviderKey.COMICVINE, 61);
+    });
+
     it('returns empty array when searchIssues returns nothing', async () => {
       vi.spyOn(client, 'searchIssues').mockResolvedValue([]);
 
@@ -396,11 +566,13 @@ describe('ComicVineProvider', () => {
 
     it('returns mapped candidate when issue is found', async () => {
       vi.spyOn(client, 'getIssueById').mockResolvedValue(mockIssue);
+      vi.spyOn(client, 'getVolumeById').mockResolvedValue(mockVolume);
 
       const result = await provider.lookupById('100');
 
       expect(client.getIssueById).toHaveBeenCalledWith('100', 'test-key');
-      expect(result).not.toBeNull();
+      expect(client.getVolumeById).toHaveBeenCalledWith(mockIssue.volume.id, 'test-key');
+      expect(result?.publisher).toBe('DC Comics');
     });
 
     it('returns null when issue is not found', async () => {
@@ -417,6 +589,37 @@ describe('ComicVineProvider', () => {
 
       expect(result).toBeNull();
       expect(throttleTracker.record).toHaveBeenCalledWith(MetadataProviderKey.COMICVINE, 3600);
+    });
+
+    it('keeps the issue candidate when volume enrichment is throttled', async () => {
+      vi.mocked(client.getIssueById).mockResolvedValue(mockIssue);
+      vi.mocked(client.getVolumeById).mockRejectedValue(new ProviderThrottleError());
+      vi.mocked(client.windowResetMs).mockReturnValue(62_000);
+
+      const result = await provider.lookupById('100');
+
+      expect(result?.providerId).toBe('100');
+      expect(result?.publisher).toBeUndefined();
+      expect(throttleTracker.record).toHaveBeenCalledWith(MetadataProviderKey.COMICVINE, 62);
+    });
+
+    it('keeps the issue candidate when the volume does not exist', async () => {
+      vi.mocked(client.getIssueById).mockResolvedValue(mockIssue);
+      vi.mocked(client.getVolumeById).mockResolvedValue(null);
+
+      const result = await provider.lookupById('100');
+
+      expect(result?.providerId).toBe('100');
+      expect(result?.publisher).toBeUndefined();
+    });
+
+    it('does not request a malformed volume id from an external payload', async () => {
+      vi.mocked(client.getIssueById).mockResolvedValue({ ...mockIssue, volume: { id: Number.NaN, name: 'Batman' } });
+
+      const result = await provider.lookupById('100');
+
+      expect(result?.providerId).toBe('100');
+      expect(client.getVolumeById).not.toHaveBeenCalled();
     });
 
     it('rethrows non-throttle errors', async () => {

@@ -1,11 +1,13 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 
-import type { BookRecommendation, SeriesBookRecommendation } from '@bookorbit/types';
+import type { BookRecommendation, CoverAspectRatio, SeriesBookRecommendation, UnscopedBookRecommendation, UserBookStatus } from '@bookorbit/types';
 import { normalizeCoverAspectRatio } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
+import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
 import { BookEmbedderService } from '../embedding/book-embedder.service';
 import { BookReadService } from '../book/book-read.service';
 import { LibraryService } from '../library/library.service';
+import { UserBookStatusService } from '../user-book-status/user-book-status.service';
 import { AnnCandidate, CandidateMetadata, RecommendationRepository, TargetBookData } from './recommendation.repository';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
@@ -32,7 +34,19 @@ export class RecommendationService {
     private readonly bookReadService: BookReadService,
     private readonly libraryService: LibraryService,
     private readonly embedder: BookEmbedderService,
+    private readonly userBookStatusService: UserBookStatusService,
+    private readonly coverStore: BookCoverStore,
   ) {}
+
+  /** Adds the viewer's read status and each book's cover face, which replaces the library shape the rows carry. */
+  private async withCoverAndReadStatus<T extends { id: number; coverAspectRatio: CoverAspectRatio }>(
+    rows: T[],
+    userId: number,
+  ): Promise<(T & { coverVersion?: string; readStatus: UserBookStatus | null })[]> {
+    const ids = rows.map((row) => row.id);
+    const [statuses, faces] = await Promise.all([this.userBookStatusService.findByBookIds(userId, ids), this.coverStore.facesFor(ids)]);
+    return rows.map((row) => ({ ...row, ...faces.get(row.id), readStatus: statuses.get(row.id) ?? null }));
+  }
 
   async getRecommendations(bookId: number, user: RequestUser): Promise<BookRecommendation[]> {
     const startedAt = Date.now();
@@ -91,9 +105,10 @@ export class RecommendationService {
       const topIds = rescored.map((row) => row.bookId);
       const rows = await this.bookReadService.findRecommendationTitlesByBookIds(topIds);
       const rowMap = new Map(rows.map((row) => [row.id, row]));
-      const recommendations = rescored
+      const ordered = rescored
         .map((rescoredCandidate) => rowMap.get(rescoredCandidate.bookId))
-        .filter((row): row is BookRecommendation => row != null);
+        .filter((row): row is UnscopedBookRecommendation => row != null);
+      const recommendations = await this.withCoverAndReadStatus(ordered, user.id);
 
       this.logger.log(
         `[${RECOMMENDATION_EVENT}] [end] bookId=${bookId} userId=${user.id} libraryId=${libraryId} durationMs=${Date.now() - startedAt} accessibleLibraryCount=${accessibleLibraryIds.length} candidateCount=${candidates.length} rescoredCount=${rescored.length} resultCount=${recommendations.length} - recommendation lookup completed`,
@@ -133,17 +148,20 @@ export class RecommendationService {
         `[${SERIES_BOOKS_EVENT}] [end] bookId=${bookId} durationMs=${Date.now() - startedAt} seriesId=${series.id} seriesName="${sanitizeLogValue(series.name ?? '')}" resultCount=${rows.length} - series books lookup completed`,
       );
 
-      return rows.map((r) => ({
-        id: r.bookId,
-        title: r.title,
-        coverAspectRatio: normalizeCoverAspectRatio(r.coverAspectRatio),
-        updatedAt: r.updatedAt?.toISOString() ?? null,
-        seriesIndex: r.seriesIndex,
-        hasCover: r.coverSource !== null,
-        authors: r.authorNames,
-        isAudiobook: r.isAudiobook,
-        isComic: r.isComic,
-      }));
+      return this.withCoverAndReadStatus(
+        rows.map((r) => ({
+          id: r.bookId,
+          title: r.title,
+          coverAspectRatio: normalizeCoverAspectRatio(r.coverAspectRatio),
+          updatedAt: r.updatedAt?.toISOString() ?? null,
+          seriesIndex: r.seriesIndex,
+          hasCover: r.coverSource !== null,
+          authors: r.authorNames,
+          isAudiobook: r.isAudiobook,
+          isComic: r.isComic,
+        })),
+        user.id,
+      );
     } catch (err) {
       const { errorClass, errorMessage } = this.parseError(err);
       this.logger.error(
@@ -169,16 +187,19 @@ export class RecommendationService {
         `[${AUTHOR_BOOKS_EVENT}] [end] bookId=${bookId} durationMs=${Date.now() - startedAt} resultCount=${rows.length} - author books lookup completed`,
       );
 
-      return rows.map((r) => ({
-        id: r.bookId,
-        title: r.title,
-        coverAspectRatio: normalizeCoverAspectRatio(r.coverAspectRatio),
-        updatedAt: r.updatedAt?.toISOString() ?? null,
-        hasCover: r.coverSource !== null,
-        authors: r.authorNames,
-        isAudiobook: r.isAudiobook,
-        isComic: r.isComic,
-      }));
+      return this.withCoverAndReadStatus(
+        rows.map((r) => ({
+          id: r.bookId,
+          title: r.title,
+          coverAspectRatio: normalizeCoverAspectRatio(r.coverAspectRatio),
+          updatedAt: r.updatedAt?.toISOString() ?? null,
+          hasCover: r.coverSource !== null,
+          authors: r.authorNames,
+          isAudiobook: r.isAudiobook,
+          isComic: r.isComic,
+        })),
+        user.id,
+      );
     } catch (err) {
       const { errorClass, errorMessage } = this.parseError(err);
       this.logger.error(

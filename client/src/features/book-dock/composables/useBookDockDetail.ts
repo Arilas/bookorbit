@@ -68,14 +68,20 @@ export function useBookDockDetail() {
     return null
   }
 
-  async function discardFile(id: number) {
-    await api(`/api/v1/book-dock/files/${id}`, { method: 'DELETE' })
-    file.value = null
+  /** Whether a docked EPUB carries narration, which only the file's own read says. False on any failure. */
+  async function fetchReadAlong(id: number): Promise<boolean> {
+    try {
+      const res = await api(`/api/v1/book-dock/files/${id}?readAlong=true`)
+      if (!res.ok) return false
+      return ((await res.json()) as BookDockFile).readAlong === true
+    } catch {
+      return false
+    }
   }
 
   function coverUrl(id: number): string {
     return `/api/v1/book-dock/files/${id}/cover`
   }
 
-  return { file, loading, saving, saved, saveError, loadFile, saveMetadata, debouncedSave, setTarget, discardFile, coverUrl }
+  return { file, loading, saving, saved, saveError, loadFile, saveMetadata, debouncedSave, setTarget, coverUrl, fetchReadAlong }
 }

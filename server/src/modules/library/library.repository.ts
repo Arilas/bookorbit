@@ -1,12 +1,16 @@
+import { retainFinishedReads } from '../../db/reading-attempt-retention';
+import { deleteLibraryFoldersWithHashInvalidation } from '../../db/book-file-hash-history';
+import { writeKoboTombstones } from '../../db/kobo-entitlement-tombstones';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, getTableColumns, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, gt, inArray, isNotNull, lte, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import type { AccessLevel, ContentFilterRules, LibraryStats } from '@bookorbit/types';
+import { type AccessLevel, type ContentFilterRules, type LibraryStats } from '@bookorbit/types';
 
 import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
 import { DB } from '../../db';
+import { MIN_VALID_FILE_TIME_MS } from '../../common/utils/file-time.utils';
 import * as schema from '../../db/schema';
-import { bookFiles, books, libraryFolders, libraries } from '../../db/schema';
+import { bookFiles, books, libraries, libraryFolders } from '../../db/schema';
 import { LIBRARY_BOOK_STATUS_PRESENT } from './library.constants';
 
 type Db = NodePgDatabase<typeof schema>;
@@ -19,6 +23,7 @@ export class LibraryRepository {
     return this.db
       .select({
         ...getTableColumns(libraries),
+        accessLevel: sql<AccessLevel | null>`null`,
         bookCount: sql<number>`count(${books.id})::int`,
       })
       .from(libraries)
@@ -34,11 +39,16 @@ export class LibraryRepository {
     return this.db
       .select({
         id: libraries.id,
+        accessLevel: schema.userLibraryAccess.accessLevel,
         name: libraries.name,
         icon: libraries.icon,
         displayOrder: libraries.displayOrder,
         coverAspectRatio: libraries.coverAspectRatio,
+        watch: libraries.watch,
+        autoScanCronExpression: libraries.autoScanCronExpression,
+        organizationMode: libraries.organizationMode,
         scanMode: libraries.scanMode,
+        fileWriteEnabled: libraries.fileWriteEnabled,
         fileRenameEnabled: libraries.fileRenameEnabled,
         createdAt: libraries.createdAt,
         updatedAt: libraries.updatedAt,
@@ -47,7 +57,7 @@ export class LibraryRepository {
       .from(libraries)
       .innerJoin(schema.userLibraryAccess, and(eq(schema.userLibraryAccess.libraryId, libraries.id), eq(schema.userLibraryAccess.userId, userId)))
       .leftJoin(books, bookJoinOn)
-      .groupBy(libraries.id)
+      .groupBy(libraries.id, schema.userLibraryAccess.accessLevel)
       .orderBy(libraries.displayOrder, libraries.name);
   }
 
@@ -63,16 +73,26 @@ export class LibraryRepository {
       .orderBy(libraries.id);
   }
 
-  findAccessibleIdsForUser(userId: number) {
+  findAccessibleIdsForUser(userId: number, accessLevels?: readonly AccessLevel[]) {
+    const accessJoin = and(
+      eq(schema.userLibraryAccess.libraryId, libraries.id),
+      eq(schema.userLibraryAccess.userId, userId),
+      accessLevels ? inArray(schema.userLibraryAccess.accessLevel, [...accessLevels]) : undefined,
+    );
     return this.db
       .select({ id: libraries.id })
       .from(libraries)
-      .innerJoin(schema.userLibraryAccess, and(eq(schema.userLibraryAccess.libraryId, libraries.id), eq(schema.userLibraryAccess.userId, userId)))
+      .innerJoin(schema.userLibraryAccess, accessJoin)
       .orderBy(libraries.displayOrder, libraries.name);
   }
 
   findById(id: number) {
     return this.db.select().from(libraries).where(eq(libraries.id, id)).limit(1);
+  }
+
+  findByIds(ids: number[]) {
+    if (ids.length === 0) return Promise.resolve([]);
+    return this.db.select({ id: libraries.id }).from(libraries).where(inArray(libraries.id, ids));
   }
 
   findByName(name: string, excludeId?: number) {
@@ -88,23 +108,28 @@ export class LibraryRepository {
   }
 
   findFoldersByLibrary(libraryId: number) {
-    return this.db.select().from(libraryFolders).where(eq(libraryFolders.libraryId, libraryId));
+    return this.db.select().from(libraryFolders).where(eq(libraryFolders.libraryId, libraryId)).orderBy(libraryFolders.createdAt, libraryFolders.id);
   }
 
   findAllFolders() {
-    return this.db.select().from(libraryFolders);
+    return this.db.select().from(libraryFolders).orderBy(libraryFolders.libraryId, libraryFolders.createdAt, libraryFolders.id);
   }
 
   findFoldersByLibraryIds(libraryIds: number[]) {
     if (libraryIds.length === 0) return Promise.resolve([]);
-    return this.db.select().from(libraryFolders).where(inArray(libraryFolders.libraryId, libraryIds));
+    return this.db
+      .select()
+      .from(libraryFolders)
+      .where(inArray(libraryFolders.libraryId, libraryIds))
+      .orderBy(libraryFolders.libraryId, libraryFolders.createdAt, libraryFolders.id);
   }
 
   findAllFolderPaths() {
     return this.db
       .select({ libraryId: libraryFolders.libraryId, path: libraryFolders.path, libraryName: libraries.name })
       .from(libraryFolders)
-      .innerJoin(libraries, eq(libraries.id, libraryFolders.libraryId));
+      .innerJoin(libraries, eq(libraries.id, libraryFolders.libraryId))
+      .orderBy(libraries.displayOrder, libraries.name, libraryFolders.createdAt, libraryFolders.id);
   }
 
   insert(data: typeof libraries.$inferInsert) {
@@ -119,7 +144,7 @@ export class LibraryRepository {
       .returning();
   }
 
-  insertFolder(data: typeof libraryFolders.$inferInsert) {
+  insertFolders(data: (typeof libraryFolders.$inferInsert)[]) {
     return this.db.insert(libraryFolders).values(data).returning();
   }
 
@@ -127,16 +152,38 @@ export class LibraryRepository {
     return this.db.select({ id: books.id }).from(books).where(eq(books.libraryId, libraryId));
   }
 
+  /**
+   * The library's books go with it by cascade; their finished reads stay in each reader's history.
+   * A link group left with fewer than two members means "not linked", so it goes too, as it does
+   * when books or folders are deleted.
+   */
   delete(id: number) {
-    return this.db.delete(libraries).where(eq(libraries.id, id));
+    return this.db.transaction(async (tx) => {
+      await retainFinishedReads(tx, eq(books.libraryId, id));
+      await writeKoboTombstones(tx, eq(books.libraryId, id));
+      await tx.execute(sql`
+        delete from ${schema.bookLinkGroups} g
+        where g.id in (
+            select l.group_id from ${schema.bookLinks} l
+            join ${books} b on b.id = l.book_id
+            where b.library_id = ${id}
+          )
+          and (
+            select count(*) from ${schema.bookLinks} l
+            join ${books} b on b.id = l.book_id
+            where l.group_id = g.id and b.library_id <> ${id}
+          ) < 2
+      `);
+      await tx.delete(libraries).where(eq(libraries.id, id));
+    });
   }
 
   deleteFolder(id: number) {
-    return this.db.delete(libraryFolders).where(eq(libraryFolders.id, id));
+    return deleteLibraryFoldersWithHashInvalidation(this.db, eq(libraryFolders.id, id));
   }
 
   deleteFoldersByLibrary(libraryId: number) {
-    return this.db.delete(libraryFolders).where(eq(libraryFolders.libraryId, libraryId));
+    return deleteLibraryFoldersWithHashInvalidation(this.db, eq(libraryFolders.libraryId, libraryId));
   }
 
   async updateDisplayOrders(order: { id: number; displayOrder: number }[]) {
@@ -227,11 +274,105 @@ export class LibraryRepository {
     return stats;
   }
 
+  /**
+   * Which of these users can open this library, answered in one query rather than one per user.
+   *
+   * A superuser holds no row in the access table and reaches every library anyway, so the flag is
+   * read alongside the grants: filtering on grants alone would report an administrator as having
+   * access to nothing.
+   */
+  findUserIdsWithAccess(libraryId: number, userIds: number[]) {
+    return this.db
+      .select({ id: schema.users.id })
+      .from(schema.users)
+      .leftJoin(
+        schema.userLibraryAccess,
+        and(eq(schema.userLibraryAccess.userId, schema.users.id), eq(schema.userLibraryAccess.libraryId, libraryId)),
+      )
+      .where(and(inArray(schema.users.id, userIds), or(eq(schema.users.isSuperuser, true), isNotNull(schema.userLibraryAccess.userId))));
+  }
+
+  async getAddedAtRecomputeBounds(libraryId: number) {
+    const [row] = await this.db
+      .select({
+        total: sql<number>`count(*)::int`,
+        maxId: sql<number>`coalesce(max(${books.id}), 0)::int`,
+      })
+      .from(books)
+      .where(eq(books.libraryId, libraryId));
+    return row ?? { total: 0, maxId: 0 };
+  }
+
+  findAddedAtBookBatch(libraryId: number, afterId: number, maxId: number, limit: number) {
+    return this.db
+      .select({ id: books.id, addedAt: books.addedAt, previousAddedAt: sql<string>`${books.addedAt}::text` })
+      .from(books)
+      .where(and(eq(books.libraryId, libraryId), gt(books.id, afterId), lte(books.id, maxId)))
+      .orderBy(books.id)
+      .limit(limit);
+  }
+
+  findAddedAtMtimes(libraryId: number, bookIds: number[]) {
+    return this.db
+      .select({ bookId: bookFiles.bookId, mtime: sql<Date>`min(${bookFiles.mtime})`.mapWith(bookFiles.mtime) })
+      .from(bookFiles)
+      .innerJoin(books, eq(books.id, bookFiles.bookId))
+      .where(
+        and(
+          eq(books.libraryId, libraryId),
+          inArray(books.id, bookIds),
+          eq(bookFiles.role, 'content'),
+          gt(bookFiles.mtime, new Date(MIN_VALID_FILE_TIME_MS)),
+        ),
+      )
+      .groupBy(bookFiles.bookId);
+  }
+
+  findAddedAtFileBatch(libraryId: number, bookIds: number[], afterId: number, limit: number) {
+    return this.db
+      .select({
+        id: bookFiles.id,
+        bookId: bookFiles.bookId,
+        absolutePath: bookFiles.absolutePath,
+        mtime: bookFiles.mtime,
+        rootPath: libraryFolders.path,
+      })
+      .from(bookFiles)
+      .innerJoin(books, eq(books.id, bookFiles.bookId))
+      .innerJoin(libraryFolders, eq(libraryFolders.id, books.libraryFolderId))
+      .where(and(eq(books.libraryId, libraryId), inArray(books.id, bookIds), eq(bookFiles.role, 'content'), gt(bookFiles.id, afterId)))
+      .orderBy(bookFiles.id)
+      .limit(limit);
+  }
+
+  async updateAddedAtBatch(libraryId: number, values: { id: number; addedAt: Date; previousAddedAt: string }[]): Promise<number[]> {
+    if (values.length === 0) return [];
+    const rows = sql.join(
+      values.map(({ id, addedAt, previousAddedAt }) => sql`(${id}::int, ${addedAt.toISOString()}::timestamptz, ${previousAddedAt}::timestamptz)`),
+      sql`, `,
+    );
+    const result = await this.db
+      .update(books)
+      .set({ addedAt: sql`dates.added_at`, updatedAt: new Date() })
+      .from(sql`(values ${rows}) as dates(id, added_at, previous_added_at)`)
+      .where(and(eq(books.libraryId, libraryId), sql`${books.id} = dates.id`, sql`${books.addedAt} = dates.previous_added_at`))
+      .returning({ id: books.id });
+    return result.map(({ id }) => id);
+  }
+
   async hasUserAccess(userId: number, libraryId: number): Promise<boolean> {
     const row = await this.db.query.userLibraryAccess.findFirst({
       where: and(eq(schema.userLibraryAccess.userId, userId), eq(schema.userLibraryAccess.libraryId, libraryId)),
     });
     return row !== undefined;
+  }
+
+  async findUserAccessLevel(userId: number, libraryId: number): Promise<AccessLevel | null> {
+    const row = await this.db.query.userLibraryAccess.findFirst({
+      columns: { accessLevel: true },
+      where: and(eq(schema.userLibraryAccess.userId, userId), eq(schema.userLibraryAccess.libraryId, libraryId)),
+    });
+    return row?.accessLevel ?? null;
   }
 
   getAccess(libraryId: number) {

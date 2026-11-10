@@ -7,6 +7,8 @@ import { AchievementEventsService, ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED } from 
 import { KoboStatusProjectionRepository } from './kobo-status-projection.repository';
 import { ReadingAttemptService } from './reading-attempt.service';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { hasReachedProgressThreshold } from '../../common/utils/progress-threshold.utils';
+import { toDateKeyInTimeZone } from '../../common/utils/timezone.utils';
 
 const DEFAULT_FINISH_THRESHOLD = 98;
 const READING_THRESHOLD = 0.25;
@@ -20,7 +22,10 @@ type ManualStatusPatch = {
 };
 
 export type AutoReadingActivity = {
-  occurredOn?: string;
+  /** The instant the activity happened. The calendar day is derived from it per reader timezone. */
+  occurredAt?: Date;
+  /** Saves a lookup when the caller already holds the reader's timezone. Never a default. */
+  timeZone?: string;
   origin?: 'bookorbit' | 'kobo' | 'koreader';
   externalProvider?: string;
   strongRereadEvidence?: boolean;
@@ -38,8 +43,8 @@ export class UserBookStatusService {
     @Optional() private readonly attempts?: ReadingAttemptService,
   ) {}
 
-  async setManual(userId: number, bookId: number, status: ReadStatus): Promise<void> {
-    await this.updateManual(userId, bookId, { status });
+  async setManual(userId: number, bookId: number, status: ReadStatus, timeZone?: string): Promise<void> {
+    await this.updateManual(userId, bookId, { status }, undefined, timeZone);
   }
 
   async updateManual(
@@ -47,8 +52,9 @@ export class UserBookStatusService {
     bookId: number,
     patch: ManualStatusPatch,
     dateKeys?: { startedOn?: string | null; endedOn?: string | null },
+    timeZone?: string,
   ): Promise<UserBookStatus> {
-    const { state, statusChanged } = await this.applyManualStatus(userId, bookId, patch, dateKeys);
+    const { state, statusChanged } = await this.applyManualStatus(userId, bookId, patch, dateKeys, timeZone);
     if (statusChanged) {
       await this.projectToKobo(userId, [bookId], state.status);
     }
@@ -60,6 +66,7 @@ export class UserBookStatusService {
     bookId: number,
     patch: ManualStatusPatch,
     dateKeys?: { startedOn?: string | null; endedOn?: string | null },
+    resolvedTimeZone?: string,
   ): Promise<{ state: UserBookStatus; statusChanged: boolean }> {
     const existing = await this.repo.findOne(userId, bookId);
     const now = new Date();
@@ -69,13 +76,14 @@ export class UserBookStatusService {
 
     if (this.attempts) {
       const nextStatus = patch.status ?? existing?.status ?? 'unread';
-      const today = new Date().toISOString().slice(0, 10);
+      const timeZone = resolvedTimeZone ?? (await this.repo.findUserTimeZone(userId));
+      const today = toDateKeyInTimeZone(now, timeZone);
       const updated = await this.attempts.applyManualStatus(
         userId,
         bookId,
         nextStatus,
-        hasStartedAt ? (dateKeys?.startedOn ?? patch.startedAt?.toISOString().slice(0, 10) ?? null) : undefined,
-        hasFinishedAt ? (dateKeys?.endedOn ?? patch.finishedAt?.toISOString().slice(0, 10) ?? null) : undefined,
+        hasStartedAt ? (dateKeys?.startedOn ?? (patch.startedAt ? toDateKeyInTimeZone(patch.startedAt, timeZone) : null)) : undefined,
+        hasFinishedAt ? (dateKeys?.endedOn ?? (patch.finishedAt ? toDateKeyInTimeZone(patch.finishedAt, timeZone) : null)) : undefined,
         today,
         { statusWasExplicit: hasStatus },
       );
@@ -152,7 +160,14 @@ export class UserBookStatusService {
     };
   }
 
-  async bulkSetManual(userId: number, bookIds: number[], status: ReadStatus): Promise<void> {
+  async bulkSetManual(
+    userId: number,
+    bookIds: number[],
+    status: ReadStatus,
+    datePatch: Pick<ManualStatusPatch, 'startedAt' | 'finishedAt'> = {},
+    dateKeys: { startedOn?: string | null; endedOn?: string | null } = {},
+    resolvedTimeZone?: string,
+  ): Promise<void> {
     if (bookIds.length === 0) return;
     // Grouped by resulting status because reading-attempt projection can settle on a
     // different status than requested (a completed book set to "reading" becomes "rereading").
@@ -164,21 +179,31 @@ export class UserBookStatusService {
     };
 
     if (this.attempts) {
-      const batchSize = 50;
-      for (let offset = 0; offset < bookIds.length; offset += batchSize) {
-        const batch = bookIds.slice(offset, offset + batchSize);
-        const results = await Promise.all(batch.map((bookId) => this.applyManualStatus(userId, bookId, { status })));
-        results.forEach((result, index) => {
-          if (result.statusChanged) recordChange(result.state.status, batch[index]!);
-        });
-      }
-      await this.projectGroupsToKobo(userId, changedByStatus);
+      await this.attempts.coalesceChanges(async () => {
+        const batchSize = 50;
+        const timeZone = resolvedTimeZone ?? (await this.repo.findUserTimeZone(userId));
+        for (let offset = 0; offset < bookIds.length; offset += batchSize) {
+          const batch = bookIds.slice(offset, offset + batchSize);
+          const settled = await Promise.allSettled(
+            batch.map((bookId) => this.applyManualStatus(userId, bookId, { status, ...datePatch }, dateKeys, timeZone)),
+          );
+          const failure = settled.find((result) => result.status === 'rejected');
+          if (failure?.status === 'rejected') throw failure.reason;
+          const results = settled.filter((result) => result.status === 'fulfilled').map((result) => result.value);
+          results.forEach((result, index) => {
+            if (result.statusChanged) recordChange(result.state.status, batch[index]!);
+          });
+        }
+        await this.projectGroupsToKobo(userId, changedByStatus);
+      });
       return;
     }
 
     const now = new Date();
     const existing = await this.repo.findByBookIds(userId, bookIds);
     const existingMap = new Map(existing.map((row) => [row.bookId, row]));
+    const hasStartedAt = Object.prototype.hasOwnProperty.call(datePatch, 'startedAt');
+    const hasFinishedAt = Object.prototype.hasOwnProperty.call(datePatch, 'finishedAt');
     await Promise.all(
       bookIds.map((bookId) => {
         const current = existingMap.get(bookId) ?? null;
@@ -186,8 +211,8 @@ export class UserBookStatusService {
         return this.repo.upsertState(userId, bookId, {
           status,
           source: 'manual',
-          startedAt: clearsLifecycle ? null : (current?.startedAt ?? null),
-          finishedAt: clearsLifecycle ? null : (current?.finishedAt ?? null),
+          startedAt: clearsLifecycle ? null : hasStartedAt ? (datePatch.startedAt ?? null) : (current?.startedAt ?? null),
+          finishedAt: clearsLifecycle ? null : hasFinishedAt ? (datePatch.finishedAt ?? null) : (current?.finishedAt ?? null),
           updatedAt: now,
         });
       }),
@@ -213,6 +238,12 @@ export class UserBookStatusService {
     }
   }
 
+  /** Writes a status onto the user's Kobo reading state when two-way sync is on. Throws on failure. */
+  async projectKoboStatus(userId: number, bookIds: number[], status: ReadStatus): Promise<void> {
+    if (bookIds.length === 0 || !(await this.koboProjection.isEnabled(userId))) return;
+    await this.koboProjection.project(userId, bookIds, status);
+  }
+
   /**
    * Mirrors the new read status onto the Kobo reading state so devices pick it up on
    * the next sync. Best-effort: a Kobo projection failure must not fail the status change.
@@ -221,8 +252,7 @@ export class UserBookStatusService {
     if (bookIds.length === 0) return;
     const startedAt = Date.now();
     try {
-      if (!(await this.koboProjection.isEnabled(userId))) return;
-      await this.koboProjection.project(userId, bookIds, status);
+      await this.projectKoboStatus(userId, bookIds, status);
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error));
       this.logger.warn(
@@ -243,20 +273,25 @@ export class UserBookStatusService {
 
     const normalizedPercentage = this.normalizePercentage(percentage);
     const { readThreshold, finishThreshold: normalizedFinishThreshold } = this.normalizeThresholds(readingThreshold, finishThreshold);
-    const derived: ReadStatus =
-      normalizedPercentage >= normalizedFinishThreshold ? 'read' : normalizedPercentage >= readThreshold ? 'reading' : 'unread';
+    const derived: ReadStatus = hasReachedProgressThreshold(normalizedPercentage, normalizedFinishThreshold)
+      ? 'read'
+      : normalizedPercentage >= readThreshold
+        ? 'reading'
+        : 'unread';
 
     if (this.attempts) {
+      const timeZone = activity.timeZone ?? (await this.repo.findUserTimeZone(userId));
       const updated = await this.attempts.recordActivity({
         userId,
         bookId,
-        occurredOn: activity.occurredOn ?? new Date().toISOString().slice(0, 10),
+        occurredOn: this.dayKeyFor(activity.occurredAt, timeZone),
         origin: activity.origin ?? 'bookorbit',
         ...(activity.externalProvider ? { externalProvider: activity.externalProvider } : {}),
         progress: normalizedPercentage,
         finishThreshold: normalizedFinishThreshold,
         strongRereadEvidence: activity.strongRereadEvidence === true,
         meaningfulActivity: activity.meaningfulActivity === true,
+        timeZone,
       });
       if (updated && updated.status !== (existing?.status ?? null)) {
         this.achievementEvents.emit(ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED, {
@@ -282,6 +317,15 @@ export class UserBookStatusService {
       newStatus: derived,
       previousStatus,
     });
+  }
+
+  /**
+   * A device can push an unparseable or absent timestamp. Falling back to now keeps the status
+   * update alive; throwing here would abandon it for a date we never needed to be exact about.
+   */
+  private dayKeyFor(occurredAt: Date | undefined, timeZone: string): string {
+    const instant = occurredAt && !Number.isNaN(occurredAt.getTime()) ? occurredAt : new Date();
+    return toDateKeyInTimeZone(instant, timeZone);
   }
 
   async findOne(userId: number, bookId: number): Promise<UserBookStatus | null> {

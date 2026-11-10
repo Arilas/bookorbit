@@ -1,3 +1,5 @@
+import { AuthSessionRepository } from './auth-session.repository';
+import { AuthSessionService } from './auth-session.service';
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
@@ -48,6 +50,8 @@ import { OidcTokenValidatorService } from './oidc/oidc-token-validator.service';
   controllers: [AuthController, AppPasswordController],
   providers: [
     AuthService,
+    AuthSessionRepository,
+    AuthSessionService,
     AppPasswordRepository,
     AppPasswordService,
     JwtStrategy,

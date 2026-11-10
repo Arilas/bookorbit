@@ -6,11 +6,14 @@ import type { StringValue } from 'ms';
 import { AppSettingsModule } from '../app-settings/app-settings.module';
 import { AuthModule } from '../auth/auth.module';
 import { BookModule } from '../book/book.module';
+import { BookCoverStoreModule } from '../book-cover-store/book-cover-store.module';
 import { LibraryModule } from '../library/library.module';
 import { MetadataModule } from '../metadata/metadata.module';
+import { MetadataCacheModule } from '../metadata-cache/metadata-cache.module';
 import { MetadataScoreModule } from '../metadata-score/metadata-score.module';
 import { NotificationModule } from '../notification/notification.module';
 import { AuthorImageStorageService } from './author-image-storage.service';
+import { AuthorPhotoFlagBackfillService } from './author-photo-flag-backfill.service';
 import { AuthorEnrichmentConfigService } from './author-enrichment-config.service';
 import { AuthorEnrichmentExecutorService } from './author-enrichment-executor.service';
 import { AuthorEnrichmentGateway } from './author-enrichment.gateway';
@@ -35,9 +38,11 @@ const AUTHOR_PROVIDER_CLASSES = [AudnexusAuthorMetadataProvider, GoodreadsAuthor
 @Module({
   imports: [
     BookModule,
+    BookCoverStoreModule,
     LibraryModule,
     AppSettingsModule,
     MetadataModule,
+    MetadataCacheModule,
     MetadataPreferencesModule,
     MetadataScoreModule,
     forwardRef(() => NotificationModule),
@@ -71,6 +76,7 @@ const AUTHOR_PROVIDER_CLASSES = [AudnexusAuthorMetadataProvider, GoodreadsAuthor
     AuthorEnrichmentRepository,
     AuthorsService,
     AuthorsRepository,
+    AuthorPhotoFlagBackfillService,
   ],
   exports: [AuthorsService, AuthorsRepository, AuthorImageStorageService, AuthorEnrichmentOrchestratorService, AuthorMetadataPreferencesService],
 })

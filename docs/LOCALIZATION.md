@@ -95,11 +95,11 @@ The component only supplies `count`, so its message must not require other argum
 
 After an English source change reaches `main`:
 
-1. Crowdin synchronizes `client/src/locales/en.json`.
+1. The `Crowdin Source Sync` workflow uploads `client/src/locales/en.json`, preserving translations while invalidating approvals for changed source messages, and verifies every source key and value.
 2. Translators update target strings in Crowdin.
-3. The scheduled or manually dispatched `Crowdin Translation Sync` workflow verifies that Crowdin's source keys match `en.json`.
+3. The scheduled or manually dispatched `Crowdin Translation Sync` workflow repeats the source upload and verification before exporting, so a missed push workflow cannot leave the export blocked on stale source data.
 4. The workflow requests only translated strings, removes the empty values Crowdin emits for untranslated nested JSON entries, and validates the resulting sparse catalogs.
-5. Before writing, the workflow rejects exports that omit an existing translation.
+5. Before writing, the workflow normalizes punctuation the catalogs prohibit, omits messages that fail validation, and rejects an export that drops far more translations than translator churn explains.
 6. Only after validation and retention checks pass, the workflow updates `l10n_main` and opens a pull request to `main`.
 7. CI verifies that the pull request changes only the twenty-four target catalogs and runs the normal client checks.
 8. A maintainer reviews and squash-merges the pull request.
@@ -109,9 +109,16 @@ Deleting that branch is required, not tidiness. It guarantees that every later e
 
 Translation pull requests retain the configured `i18n(client)` title and commit format. The `i18n` commit type produces a patch release and an Internationalization release-note section. `CROWDIN_PR_TOKEN` must contain a fine-grained GitHub token with repository contents and pull-request write access. A separate token is required because pull requests created with the workflow's default `GITHUB_TOKEN` do not trigger normal pull-request workflows.
 
-The retention check compares presence, never message content. Exports request only translated strings, so Crowdin omits a key as soon as it stops carrying a translation, and every key already present in a target catalog must come back in the export. A translation that legitimately matches the English source, such as `Error` in Spanish or a product name left untranslated, is a real translation and never counts as a loss. Reading it as one would reject the routine corrections that translators make to short labels, abbreviations, and loanwords.
+The retention check compares presence, never message content. Exports request only translated strings, so Crowdin omits a key as soon as it stops carrying a translation. A translation that legitimately matches the English source, such as `Error` in Spanish or a product name left untranslated, is a real translation and never counts as a loss. Reading it as one would reject the routine corrections that translators make to short labels, abbreviations, and loanwords.
 
-An intentional removal requires a manual workflow dispatch with its exact `locale:message.key` value in `allowed_translation_losses`. Separate multiple acknowledgements with commas. Unknown, misspelled, duplicate, and unused acknowledgements fail the run, so this input cannot act as a broad bypass. Scheduled runs never acknowledge translation loss automatically.
+The check guards against a truncated or empty export, not against churn. Single translations leave Crowdin constantly: a reviewer unapproves a string, or an English edit invalidates the translation attached to it. A locale may lose up to twenty-five keys, or one percent of its translated keys where that is larger, before the run fails. Losses below that limit are listed in the pull request body and the English source renders for them. Failing on each one blocked every other locale over a single message and needed a hand-typed acknowledgement that a scheduled run cannot supply, which is why the export stalled repeatedly.
+
+A message this workflow omits, because it carries HTML or breaks its ICU contract, is reported as a rejection rather than counted as a loss. Two mechanical defects are repaired instead of rejected, and both disappear on their own once Crowdin carries a clean message:
+
+- A Unicode em dash becomes the hyphen the English source uses, so the translation survives and the catalogs stay free of the character.
+- A plural branch the target locale needs and Crowdin omitted is filled from the message's own `other` branch. A translator types the whole ICU message by hand, so a locale with more categories than English loses every plural to one missing branch: Romanian arrived with `one` and `other` for all 156 of its plurals and rendered English for every one of them. The filled branch reads in the translator's language rather than English, and it is still worth fixing properly in Crowdin, because a copied branch cannot carry the form the category actually needs.
+
+A manual workflow dispatch may pass exact `locale:message.key` values in `allowed_translation_losses`, separated by commas, to exclude known removals from the limit. Unknown, misspelled, and duplicate acknowledgements fail the run, so this input cannot act as a broad bypass.
 
 ## Adding a New Language
 
@@ -235,14 +242,9 @@ Only enable scheduled export for the new language after this manual round trip s
 
 ## Crowdin Project Settings
 
-Use the native GitHub integration in **Source and translation files mode** with only `main` connected. Do not use Target file bundles mode or automatic feature-branch discovery. Leave source synchronization enabled, but disable the integration's scheduled translation synchronization and pull-request creation. The repository workflow owns translation export and delivery.
+The repository workflows own source upload, translation export, and pull-request delivery. Do not use the native GitHub integration or its repository webhook as a second synchronization path. When migrating an existing project, first manually run `Crowdin Source Sync` and verify that it succeeds without losing translations, then disconnect the native integration and remove its webhook.
 
-Initial import settings:
-
-- Import existing translations once.
-- Allow target translations to match the source.
-- Do not continuously import translations from GitHub afterward.
-- Keep Push Sources disabled.
+Source updates use Crowdin's `keep_translations` mode. Existing translations survive an English edit, while their approvals are removed. Prefer a new message key when the English meaning changes so an old translation cannot be mistaken for current copy.
 
 Export settings:
 
@@ -250,12 +252,12 @@ Export settings:
 - Skip untranslated files: off.
 - Export only approved translations: off unless the review policy changes explicitly.
 
-Crowdin preserves untranslated nested JSON keys with empty values even when untranslated strings are skipped. `client/scripts/sync-crowdin-translations.mjs` removes those empty entries, restores English source-key ordering, validates every translated message, and refuses to write catalogs if Crowdin has not synchronized the current English keys.
+Crowdin preserves untranslated nested JSON keys with empty values even when untranslated strings are skipped. `client/scripts/sync-crowdin-translations.mjs` removes those empty entries, restores English source-key ordering, validates every translated message, and refuses to export catalogs unless Crowdin matches every current English key and value.
 
-The `Crowdin Translation Sync` workflow requires:
+The Crowdin synchronization workflows require:
 
-- `CROWDIN_TOKEN`, with permission to read project files, strings, and translation builds.
-- `CROWDIN_PR_TOKEN`, a fine-grained GitHub token with repository contents and pull-request write access.
+- `CROWDIN_TOKEN`, with permission to read and write project source files and read translation builds.
+- `CROWDIN_PR_TOKEN`, used only by `Crowdin Translation Sync`, with repository contents and pull-request write access.
 - Optional repository variable `CROWDIN_PROJECT_ID`; the BookOrbit project ID is the script default.
 
 Configure variable mismatches and leading or trailing whitespace as Crowdin QA errors. Keep punctuation and length checks enabled, and include translator instructions for Vue I18n plural branches, the HTML prohibition, and the Unicode em dash prohibition.

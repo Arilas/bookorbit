@@ -8,6 +8,7 @@ vi.mock('drizzle-orm', () => ({
   inArray: vi.fn((left: unknown, right: unknown) => ({ op: 'inArray', left, right })),
   isNull: vi.fn((value: unknown) => ({ op: 'isNull', value })),
   ne: vi.fn((left: unknown, right: unknown) => ({ op: 'ne', left, right })),
+  notInArray: vi.fn((left: unknown, right: unknown) => ({ op: 'notInArray', left, right })),
   or: vi.fn((...clauses: unknown[]) => ({ op: 'or', clauses })),
   sql: Object.assign(
     vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ op: 'sql', text: strings.join(''), values })),
@@ -28,6 +29,7 @@ vi.mock('bcryptjs', () => ({ hash: vi.fn() }));
 import { hash } from 'bcryptjs';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import { eq, ilike, sql } from 'drizzle-orm';
+import { Permission } from '@bookorbit/types';
 
 import * as schema from '../../db/schema';
 import { UserRepository } from './user.repository';
@@ -63,7 +65,15 @@ describe('UserRepository', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
-    repo = new UserRepository(db as any);
+    repo = new UserRepository(
+      db as any,
+      {
+        lockAdministratorAvailability: vi.fn((tx: { execute: () => unknown }) => tx.execute()),
+        assertUsableOidcSuperuser: vi.fn(),
+        isPasswordLoginEnabled: vi.fn().mockReturnValue(true),
+        hasEnabledOidcIdentityForUser: vi.fn().mockResolvedValue(true),
+      } as any,
+    );
 
     db.update.mockImplementation(() => ({ set: updateSet }));
     db.insert.mockImplementation(() => ({ values: insertValues }));
@@ -481,18 +491,185 @@ describe('UserRepository', () => {
     );
   });
 
-  it('delete and setSuperuser issue scoped user updates', async () => {
+  it('delete issues a scoped user update', async () => {
     const deleteWhere = vi.fn().mockResolvedValue(undefined);
     db.delete.mockReturnValue({ where: deleteWhere });
 
     await repo.delete(12);
     expect(db.delete).toHaveBeenCalledWith(schema.users);
     expect(deleteWhere).toHaveBeenCalledWith(expect.objectContaining({ op: 'eq', left: schema.users.id, right: 12 }));
+  });
 
-    await repo.setSuperuser(12, true);
-    expect(db.update).toHaveBeenCalledWith(schema.users);
-    expect(updateSet).toHaveBeenCalledWith({ isSuperuser: true });
-    expect(updateWhere).toHaveBeenCalledWith(expect.objectContaining({ op: 'eq', left: schema.users.id, right: 12 }));
+  it('setSuperuser serializes the transition and revokes target sessions in the same transaction', async () => {
+    const execute = vi.fn().mockResolvedValue(undefined);
+    const lifecycleWhere = vi.fn().mockResolvedValue([
+      { id: 1, active: true, isSuperuser: true, provisioningMethod: 'local' },
+      { id: 12, active: true, isSuperuser: false, provisioningMethod: 'local' },
+    ]);
+    const lifecycleFrom = vi.fn().mockReturnValue({ where: lifecycleWhere });
+    const txSelect = vi.fn().mockReturnValue({ from: lifecycleFrom });
+
+    const userWhere = vi.fn().mockResolvedValue(undefined);
+    const refreshWhere = vi.fn().mockResolvedValue(undefined);
+    const passwordResetWhere = vi.fn().mockResolvedValue(undefined);
+    const userSet = vi.fn().mockReturnValue({ where: userWhere });
+    const refreshSet = vi.fn().mockReturnValue({ where: refreshWhere });
+    const passwordResetSet = vi.fn().mockReturnValue({ where: passwordResetWhere });
+    const txUpdate = vi.fn().mockImplementation((table) => ({
+      set: table === schema.users ? userSet : table === schema.refreshTokens ? refreshSet : passwordResetSet,
+    }));
+    const tx = { execute, select: txSelect, update: txUpdate };
+    db.transaction.mockImplementation((callback) => callback(tx as never));
+
+    await expect(repo.setSuperuser(1, 12, true)).resolves.toBe('updated');
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(txUpdate).toHaveBeenNthCalledWith(1, schema.users);
+    expect(userSet).toHaveBeenCalledWith(
+      expect.objectContaining({ isSuperuser: true, tokenVersion: expect.objectContaining({ op: 'sql' }), updatedAt: expect.any(Date) }),
+    );
+    expect(txUpdate).toHaveBeenNthCalledWith(2, schema.refreshTokens);
+    expect(refreshSet).toHaveBeenCalledWith({ revokedAt: expect.any(Date) });
+    expect(txUpdate).toHaveBeenNthCalledWith(3, schema.passwordResetTokens);
+    expect(passwordResetSet).toHaveBeenCalledWith({ usedAt: expect.any(Date) });
+    expect(userWhere).toHaveBeenCalledWith(expect.objectContaining({ op: 'eq', left: schema.users.id, right: 12 }));
+    expect(refreshWhere).toHaveBeenCalledWith(expect.objectContaining({ op: 'and' }));
+    expect(passwordResetWhere).toHaveBeenCalledWith(expect.objectContaining({ op: 'and' }));
+  });
+
+  it('setSuperuser rechecks the requester after taking the lifecycle lock', async () => {
+    const execute = vi.fn().mockResolvedValue(undefined);
+    const lifecycleWhere = vi.fn().mockResolvedValue([
+      { id: 1, active: true, isSuperuser: false, provisioningMethod: 'local' },
+      { id: 12, active: true, isSuperuser: true, provisioningMethod: 'local' },
+    ]);
+    const lifecycleFrom = vi.fn().mockReturnValue({ where: lifecycleWhere });
+    const tx = { execute, select: vi.fn().mockReturnValue({ from: lifecycleFrom }), update: vi.fn() };
+    db.transaction.mockImplementation((callback) => callback(tx as never));
+
+    await expect(repo.setSuperuser(1, 12, false)).resolves.toBe('requester_not_superuser');
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it('setSuperuser rejects a shared-account promotion without writing', async () => {
+    const lifecycleWhere = vi.fn().mockResolvedValue([
+      { id: 1, active: true, isSuperuser: true, provisioningMethod: 'local' },
+      { id: 12, active: true, isSuperuser: false, provisioningMethod: 'shared' },
+    ]);
+    const lifecycleFrom = vi.fn().mockReturnValue({ where: lifecycleWhere });
+    const tx = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi.fn().mockReturnValue({ from: lifecycleFrom }),
+      update: vi.fn(),
+    };
+    db.transaction.mockImplementation((callback) => callback(tx as never));
+
+    await expect(repo.setSuperuser(1, 12, true)).resolves.toBe('shared_target');
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it('setSuperuser leaves sessions untouched for an idempotent transition', async () => {
+    const lifecycleWhere = vi.fn().mockResolvedValue([
+      { id: 1, active: true, isSuperuser: true, provisioningMethod: 'local' },
+      { id: 12, active: true, isSuperuser: false, provisioningMethod: 'local' },
+    ]);
+    const lifecycleFrom = vi.fn().mockReturnValue({ where: lifecycleWhere });
+    const tx = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi.fn().mockReturnValue({ from: lifecycleFrom }),
+      update: vi.fn(),
+    };
+    db.transaction.mockImplementation((callback) => callback(tx as never));
+
+    await expect(repo.setSuperuser(1, 12, false)).resolves.toBe('unchanged');
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it('setSuperuser prevents demotion of the last active superuser', async () => {
+    const lifecycleWhere = vi.fn().mockResolvedValue([
+      { id: 1, active: true, isSuperuser: true, provisioningMethod: 'local' },
+      { id: 12, active: true, isSuperuser: true, provisioningMethod: 'local' },
+    ]);
+    const lifecycleFrom = vi.fn().mockReturnValue({ where: lifecycleWhere });
+    const countWhere = vi.fn().mockResolvedValue([{ total: 0 }]);
+    const countFrom = vi.fn().mockReturnValue({ where: countWhere });
+    const tx = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi.fn().mockReturnValueOnce({ from: lifecycleFrom }).mockReturnValueOnce({ from: countFrom }),
+      update: vi.fn(),
+    };
+    db.transaction.mockImplementation((callback) => callback(tx as never));
+
+    await expect(repo.setSuperuser(1, 12, false)).resolves.toBe('last_superuser');
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it('updateManagedUser serializes deactivation and protects the last active superuser', async () => {
+    const lifecycleWhere = vi.fn().mockResolvedValue([
+      { id: 1, active: true, isSuperuser: true, provisioningMethod: 'local' },
+      { id: 12, active: true, isSuperuser: true, provisioningMethod: 'local' },
+    ]);
+    const lifecycleFrom = vi.fn().mockReturnValue({ where: lifecycleWhere });
+    const countWhere = vi.fn().mockResolvedValue([{ total: 0 }]);
+    const countFrom = vi.fn().mockReturnValue({ where: countWhere });
+    const tx = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi.fn().mockReturnValueOnce({ from: lifecycleFrom }).mockReturnValueOnce({ from: countFrom }),
+      update: vi.fn(),
+    };
+    db.transaction.mockImplementation((callback) => callback(tx as never));
+
+    await expect(repo.updateManagedUser(1, 12, { active: false })).resolves.toEqual({ status: 'last_superuser' });
+    expect(tx.execute).toHaveBeenCalledOnce();
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it('deleteManagedUser serializes deletion and protects the last active superuser', async () => {
+    const lifecycleWhere = vi.fn().mockResolvedValue([
+      { id: 1, active: true, isSuperuser: true, provisioningMethod: 'local' },
+      { id: 12, active: true, isSuperuser: true, provisioningMethod: 'local' },
+    ]);
+    const lifecycleFrom = vi.fn().mockReturnValue({ where: lifecycleWhere });
+    const countWhere = vi.fn().mockResolvedValue([{ total: 0 }]);
+    const countFrom = vi.fn().mockReturnValue({ where: countWhere });
+    const tx = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi.fn().mockReturnValueOnce({ from: lifecycleFrom }).mockReturnValueOnce({ from: countFrom }),
+      delete: vi.fn(),
+    };
+    db.transaction.mockImplementation((callback) => callback(tx as never));
+
+    await expect(repo.deleteManagedUser(1, 12)).resolves.toBe('last_superuser');
+    expect(tx.execute).toHaveBeenCalledOnce();
+    expect(tx.delete).not.toHaveBeenCalled();
+  });
+
+  it('deleteManagedUser finishes dependent cleanup before deleting the user row', async () => {
+    const lifecycleWhere = vi.fn().mockResolvedValue([
+      { id: 1, active: false, isSuperuser: false, provisioningMethod: 'local' },
+      { id: 12, active: true, isSuperuser: false, provisioningMethod: 'local' },
+    ]);
+    const lifecycleFrom = vi.fn().mockReturnValue({ where: lifecycleWhere });
+    const order: string[] = [];
+    const deleteWhere = vi.fn().mockImplementation(() => {
+      order.push('delete');
+      return Promise.resolve();
+    });
+    const tx = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi.fn().mockReturnValue({ from: lifecycleFrom }),
+      delete: vi.fn().mockReturnValue({ where: deleteWhere }),
+    };
+    db.transaction.mockImplementation((callback) => callback(tx as never));
+
+    await expect(
+      repo.deleteManagedUser(1, 12, () => {
+        order.push('cleanup');
+        return Promise.resolve();
+      }),
+    ).resolves.toBe('updated');
+
+    expect(order).toEqual(['cleanup', 'delete']);
   });
 
   it('clearLockout resets the attempt counter and the lock timestamp', async () => {
@@ -525,6 +702,70 @@ describe('UserRepository', () => {
     expect(txInsertValues).toHaveBeenCalledWith([
       { userId: 7, permissionName: 'library_download' },
       { userId: 7, permissionName: 'kobo_sync' },
+    ]);
+  });
+
+  /**
+   * Enforced here rather than in the service because this is the one line every assignment path
+   * reaches, OIDC auto-provisioning included, and that path skips the service entirely.
+   */
+  it('setPermissions grants a permission that would otherwise be inert without its dependency', async () => {
+    const txInsertValues = vi.fn().mockResolvedValue(undefined);
+    db.transaction.mockImplementation(async (cb: (tx: unknown) => Promise<void>) =>
+      cb({
+        delete: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) }),
+        insert: vi.fn().mockReturnValue({ values: txInsertValues }),
+      }),
+    );
+
+    await repo.setPermissions(7, [Permission.BookRequestSelfFulfill]);
+
+    expect(txInsertValues).toHaveBeenCalledWith([
+      { userId: 7, permissionName: Permission.BookRequestSelfFulfill },
+      { userId: 7, permissionName: Permission.BookRequestAccess },
+    ]);
+  });
+
+  /**
+   * Moderating the queue is a superset of using it. Without this a `manage_book_requests` grant
+   * produced an account the queue websocket rejected and the summary route answered 403 to.
+   */
+  it('setPermissions pulls book request access in behind the moderator and auto-approve grants', async () => {
+    const txInsertValues = vi.fn().mockResolvedValue(undefined);
+    db.transaction.mockImplementation(async (cb: (tx: unknown) => Promise<void>) =>
+      cb({
+        delete: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) }),
+        insert: vi.fn().mockReturnValue({ values: txInsertValues }),
+      }),
+    );
+
+    await repo.setPermissions(7, [Permission.ManageBookRequests]);
+    expect(txInsertValues).toHaveBeenCalledWith([
+      { userId: 7, permissionName: Permission.ManageBookRequests },
+      { userId: 7, permissionName: Permission.BookRequestAccess },
+    ]);
+
+    await repo.setPermissions(7, [Permission.BookRequestAutoApprove]);
+    expect(txInsertValues).toHaveBeenLastCalledWith([
+      { userId: 7, permissionName: Permission.BookRequestAutoApprove },
+      { userId: 7, permissionName: Permission.BookRequestAccess },
+    ]);
+  });
+
+  it('setPermissions does not duplicate a dependency that was already selected', async () => {
+    const txInsertValues = vi.fn().mockResolvedValue(undefined);
+    db.transaction.mockImplementation(async (cb: (tx: unknown) => Promise<void>) =>
+      cb({
+        delete: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) }),
+        insert: vi.fn().mockReturnValue({ values: txInsertValues }),
+      }),
+    );
+
+    await repo.setPermissions(7, [Permission.BookRequestAccess, Permission.BookRequestSelfFulfill]);
+
+    expect(txInsertValues).toHaveBeenCalledWith([
+      { userId: 7, permissionName: Permission.BookRequestAccess },
+      { userId: 7, permissionName: Permission.BookRequestSelfFulfill },
     ]);
   });
 
@@ -603,16 +844,22 @@ describe('UserRepository', () => {
     expect(onConflictDoNothing).toHaveBeenCalled();
   });
 
-  it('findLibraryIdsByUserId and replaceViewerLibraries manage user-library rows', async () => {
+  it('findLibraryIdsByUserId and replaceLibraries manage user-library rows', async () => {
     const where = vi.fn().mockResolvedValue([{ libraryId: 10 }, { libraryId: 11 }]);
     const from = vi.fn().mockReturnValue({ where });
     select.mockReturnValue({ from });
 
     await expect(repo.findLibraryIdsByUserId(2)).resolves.toEqual([10, 11]);
 
+    where.mockResolvedValueOnce([{ libraryId: 10, accessLevel: 'editor' }]);
+    await expect(repo.findLibraryGrantsByUserId(2)).resolves.toEqual([{ libraryId: 10, accessLevel: 'editor' }]);
+    expect(select).toHaveBeenLastCalledWith({ libraryId: schema.userLibraryAccess.libraryId, accessLevel: schema.userLibraryAccess.accessLevel });
+    expect(where).toHaveBeenLastCalledWith(expect.objectContaining({ op: 'eq', left: schema.userLibraryAccess.userId, right: 2 }));
+
     const txDeleteWhere = vi.fn().mockResolvedValue(undefined);
     const txDelete = vi.fn().mockReturnValue({ where: txDeleteWhere });
-    const txInsertValues = vi.fn().mockResolvedValue(undefined);
+    const txOnConflictDoNothing = vi.fn().mockResolvedValue(undefined);
+    const txInsertValues = vi.fn().mockReturnValue({ onConflictDoNothing: txOnConflictDoNothing });
     const txInsert = vi.fn().mockReturnValue({ values: txInsertValues });
     db.transaction.mockImplementation(async (cb: (tx: unknown) => Promise<void>) =>
       cb({
@@ -621,15 +868,24 @@ describe('UserRepository', () => {
       }),
     );
 
-    await repo.replaceViewerLibraries(2, []);
+    await repo.replaceLibraries(2, []);
     expect(txDelete).toHaveBeenCalledWith(schema.userLibraryAccess);
     expect(txDeleteWhere).toHaveBeenCalledWith(expect.objectContaining({ op: 'eq', left: schema.userLibraryAccess.userId, right: 2 }));
     expect(txInsert).not.toHaveBeenCalled();
 
-    await repo.replaceViewerLibraries(2, [10, 11]);
+    txDeleteWhere.mockClear();
+    await repo.replaceLibraries(2, [10, 11]);
+    expect(txDeleteWhere).toHaveBeenCalledWith({
+      op: 'and',
+      clauses: [
+        { op: 'eq', left: schema.userLibraryAccess.userId, right: 2 },
+        { op: 'notInArray', left: schema.userLibraryAccess.libraryId, right: [10, 11] },
+      ],
+    });
     expect(txInsertValues).toHaveBeenCalledWith([
       { userId: 2, libraryId: 10, accessLevel: 'viewer' },
       { userId: 2, libraryId: 11, accessLevel: 'viewer' },
     ]);
+    expect(txOnConflictDoNothing).toHaveBeenCalled();
   });
 });

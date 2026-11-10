@@ -2,7 +2,6 @@ import {
   BadRequestException,
   Body,
   Controller,
-  DefaultValuePipe,
   Delete,
   Get,
   HttpCode,
@@ -21,6 +20,8 @@ import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pag
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Auditable } from '../../common/decorators/auditable.decorator';
 import type { RequestUser } from '../../common/types/request-user';
+import { RequireAppAttest } from '../app-attest/app-attest.guard';
+import { OptionalIntQueryPipe } from '../../common/pipes/optional-int-query.pipe';
 import { BookQueryPipe, JumpBucketsQueryPipe } from '../book/pipes/book-query.pipe';
 import { CreateSmartScopeDto } from './dto/create-smart-scope.dto';
 import { ReorderSmartScopesDto } from './dto/reorder-smart-scopes.dto';
@@ -115,11 +116,12 @@ export class SmartScopeController {
   }
 
   @Get(':id/books')
+  @RequireAppAttest()
   executeSmartScope(
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
-    @Query('page', new DefaultValuePipe(0), ParseIntPipe) page: number,
-    @Query('size', new DefaultValuePipe(50), ParseIntPipe) size: number,
+    @Query('page', new OptionalIntQueryPipe(0)) page: number,
+    @Query('size', new OptionalIntQueryPipe(50)) size: number,
     @Query('q') q?: string,
   ) {
     this.validateSizeQuery(size);

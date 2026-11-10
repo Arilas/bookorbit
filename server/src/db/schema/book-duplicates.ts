@@ -1,4 +1,19 @@
-import { check, index, integer, pgTable, primaryKey, real, serial, text, timestamp, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
+import {
+  bigint,
+  check,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  primaryKey,
+  real,
+  serial,
+  smallint,
+  text,
+  timestamp,
+  uniqueIndex,
+  varchar,
+} from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 import { users } from './auth';
@@ -18,6 +33,9 @@ export const bookDuplicateScans = pgTable(
     processedBooks: integer('processed_books').notNull().default(0),
     totalBooks: integer('total_books'),
     totalGroups: integer('total_groups'),
+    totalExtraCopies: integer('total_extra_copies'),
+    totalReclaimableBytes: bigint('total_reclaimable_bytes', { mode: 'number' }),
+    totalOtherFormatPairs: integer('total_other_format_pairs'),
     errorCode: varchar('error_code', { length: 50 }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp('completed_at', { withTimezone: true }),
@@ -45,7 +63,7 @@ export const bookDuplicateScanKeys = pgTable(
   (t) => [
     primaryKey({ columns: [t.scanId, t.bookId, t.kind, t.value] }),
     index('book_duplicate_scan_keys_lookup_idx').on(t.scanId, t.kind, t.value, t.bookId),
-    check('book_duplicate_scan_keys_kind_chk', sql`${t.kind} in ('file_hash', 'isbn', 'exact_metadata')`),
+    check('book_duplicate_scan_keys_kind_chk', sql`${t.kind} in ('file_hash', 'isbn', 'exact_metadata', 'of_work', 'of_title', 'of_series')`),
   ],
 );
 
@@ -59,14 +77,53 @@ export const bookDuplicateGroups = pgTable(
     rootBookId: integer('root_book_id')
       .notNull()
       .references(() => books.id, { onDelete: 'cascade' }),
+    kind: varchar('kind', { length: 20 }).notNull().default('duplicate'),
     reasons: text('reasons').array().notNull(),
     maxTitleSimilarity: real('max_title_similarity'),
     memberCount: integer('member_count').notNull(),
+    confidence: smallint('confidence').notNull().default(1),
+    memberBytesTotal: bigint('member_bytes_total', { mode: 'number' }).notNull().default(0),
+    memberBytesMax: bigint('member_bytes_max', { mode: 'number' }).notNull().default(0),
   },
   (t) => [
-    uniqueIndex('book_duplicate_groups_scan_root_uidx').on(t.scanId, t.rootBookId),
+    // Other-format groups are pairs, and one ebook can pair with several audiobooks.
+    uniqueIndex('book_duplicate_groups_scan_root_uidx')
+      .on(t.scanId, t.rootBookId)
+      .where(sql`${t.kind} = 'duplicate'`),
     index('book_duplicate_groups_scan_id_idx').on(t.scanId, t.id),
+    index('book_duplicate_groups_scan_kind_idx').on(t.scanId, t.kind, t.id),
     index('book_duplicate_groups_scan_member_count_idx').on(t.scanId, t.memberCount),
+    index('book_duplicate_groups_scan_reclaimable_idx').on(t.scanId, sql`(${t.memberBytesTotal} - ${t.memberBytesMax}) desc`),
+    index('book_duplicate_groups_scan_confidence_idx').on(t.scanId, t.confidence),
+    check('book_duplicate_groups_confidence_chk', sql`${t.confidence} between 1 and 4`),
+    check('book_duplicate_groups_kind_chk', sql`${t.kind} in ('duplicate', 'other_format')`),
+  ],
+);
+
+/**
+ * A pair the user has judged not to be duplicates. Stored per user and outside any scan so the
+ * judgement survives a rescan; the scan deletes matching pairs before groups are formed.
+ */
+export const bookDuplicateDismissals = pgTable(
+  'book_duplicate_dismissals',
+  {
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    bookIdA: integer('book_id_a')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    bookIdB: integer('book_id_b')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    kind: varchar('kind', { length: 20 }).notNull().default('duplicate'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.kind, t.bookIdA, t.bookIdB] }),
+    index('book_duplicate_dismissals_user_created_idx').on(t.userId, sql`${t.createdAt} desc`),
+    check('book_duplicate_dismissals_order_chk', sql`${t.bookIdA} < ${t.bookIdB}`),
+    check('book_duplicate_dismissals_kind_chk', sql`${t.kind} in ('duplicate', 'other_format')`),
   ],
 );
 
@@ -83,15 +140,17 @@ export const bookDuplicatePairs = pgTable(
     bookIdB: integer('book_id_b')
       .notNull()
       .references(() => books.id, { onDelete: 'cascade' }),
+    kind: varchar('kind', { length: 20 }).notNull().default('duplicate'),
     reasons: text('reasons').array().notNull(),
     titleSimilarity: real('title_similarity'),
   },
   (t) => [
-    primaryKey({ columns: [t.scanId, t.bookIdA, t.bookIdB] }),
+    primaryKey({ columns: [t.scanId, t.kind, t.bookIdA, t.bookIdB] }),
     index('book_duplicate_pairs_group_idx').on(t.groupId),
     index('book_duplicate_pairs_scan_a_idx').on(t.scanId, t.bookIdA),
     index('book_duplicate_pairs_scan_b_idx').on(t.scanId, t.bookIdB),
     check('book_duplicate_pairs_order_chk', sql`${t.bookIdA} < ${t.bookIdB}`),
+    check('book_duplicate_pairs_kind_chk', sql`${t.kind} in ('duplicate', 'other_format')`),
   ],
 );
 
@@ -108,7 +167,45 @@ export const bookDuplicateGroupMembers = pgTable(
       .notNull()
       .references(() => books.id, { onDelete: 'cascade' }),
   },
-  (t) => [primaryKey({ columns: [t.scanId, t.bookId] }), index('book_duplicate_group_members_group_idx').on(t.groupId, t.bookId)],
+  (t) => [primaryKey({ columns: [t.groupId, t.bookId] }), index('book_duplicate_group_members_scan_book_idx').on(t.scanId, t.bookId)],
+);
+
+export interface BookDuplicateResolutionOutcomeRow {
+  groupId: number;
+  keeperId: number | null;
+  status: string;
+  reason: string | null;
+  books: Array<{ bookId: number; action: string; status: string; reason: string | null }>;
+}
+
+/** One bulk resolution of a scan's groups. Each merge it runs keeps its own journal in `book_merge_jobs`. */
+export const bookDuplicateResolutions = pgTable(
+  'book_duplicate_resolutions',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    scanId: integer('scan_id').references(() => bookDuplicateScans.id, { onDelete: 'set null' }),
+    status: varchar('status', { length: 20 }).notNull().default('running'),
+    total: integer('total').notNull().default(0),
+    processed: integer('processed').notNull().default(0),
+    currentGroupId: integer('current_group_id'),
+    outcomes: jsonb('outcomes').$type<BookDuplicateResolutionOutcomeRow[]>().notNull().default([]),
+    errorCode: varchar('error_code', { length: 64 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+  },
+  (t) => [
+    index('book_duplicate_resolutions_user_created_idx').on(t.userId, sql`${t.createdAt} desc`),
+    index('book_duplicate_resolutions_running_idx')
+      .on(t.status)
+      .where(sql`${t.status} = 'running'`),
+    check('book_duplicate_resolutions_status_chk', sql`${t.status} in ('running', 'completed', 'failed')`),
+    check('book_duplicate_resolutions_counts_chk', sql`${t.processed} >= 0 and ${t.total} >= 0`),
+  ],
 );
 
 export type BookDuplicateScanRow = typeof bookDuplicateScans.$inferSelect;
+export type BookDuplicateDismissalRow = typeof bookDuplicateDismissals.$inferSelect;
+export type BookDuplicateResolutionRow = typeof bookDuplicateResolutions.$inferSelect;

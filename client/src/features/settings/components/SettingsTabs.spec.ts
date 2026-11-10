@@ -14,7 +14,7 @@ describe('SettingsTabs', () => {
         activeTab: 'first',
       },
     })
-    const container = wrapper.element as HTMLElement
+    const container = wrapper.get('[role="tablist"]').element as HTMLElement
     Object.defineProperties(container, {
       clientWidth: { configurable: true, value: 320 },
       scrollWidth: { configurable: true, value: 640 },
@@ -44,5 +44,21 @@ describe('SettingsTabs', () => {
     expect(wrapper.get('[aria-current="page"]').text()).toBe('Account')
     await wrapper.get('button').trigger('click')
     expect(wrapper.emitted('select')).toEqual([['display']])
+  })
+
+  it('marks a tab that has something waiting, in words a screen reader can say', () => {
+    const wrapper = mount(SettingsTabs, {
+      props: {
+        tabs: [
+          { id: 'quiet', label: 'Quiet' },
+          { id: 'busy', label: 'Busy', count: 3, attention: 'Needs attention' },
+        ],
+        activeTab: 'quiet',
+      },
+    })
+
+    const [quiet, busy] = wrapper.findAll('[role="tab"]')
+    expect(quiet!.find('[role="img"]').exists()).toBe(false)
+    expect(busy!.get('[role="img"]').attributes('aria-label')).toBe('Needs attention')
   })
 })

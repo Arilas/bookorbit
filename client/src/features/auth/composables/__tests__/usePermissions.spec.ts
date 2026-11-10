@@ -5,7 +5,7 @@ import { usePermissions } from '../usePermissions'
 let currentUser: {
   isSuperuser?: boolean
   permissions?: string[]
-  authMethod?: 'primary' | 'app_password'
+  authenticationMethod?: 'password' | 'app_password'
   provisioningMethod?: 'local' | 'shared'
 } | null = null
 
@@ -25,7 +25,7 @@ describe('usePermissions', () => {
   })
 
   it('returns false permissions and marker flags for anonymous state', () => {
-    const { hasPermission, hasExplicitPermission, isDemoRestrictedAccount, isSuperuser, userPermissions, authMethod, provisioningMethod } =
+    const { hasPermission, hasExplicitPermission, isDemoRestrictedAccount, isSuperuser, userPermissions, authenticationMethod, provisioningMethod } =
       usePermissions()
 
     expect(hasPermission(Permission.LibraryDownload)).toBe(false)
@@ -33,7 +33,7 @@ describe('usePermissions', () => {
     expect(isDemoRestrictedAccount.value).toBe(false)
     expect(isSuperuser.value).toBe(false)
     expect(userPermissions.value).toEqual([])
-    expect(authMethod.value).toBeUndefined()
+    expect(authenticationMethod.value).toBeUndefined()
     expect(provisioningMethod.value).toBeUndefined()
   })
 
@@ -56,9 +56,9 @@ describe('usePermissions', () => {
   })
 
   it('exposes how the current session authenticated', () => {
-    currentUser = { isSuperuser: false, permissions: [], authMethod: 'app_password' }
+    currentUser = { isSuperuser: false, permissions: [], authenticationMethod: 'app_password' }
 
-    expect(usePermissions().authMethod.value).toBe('app_password')
+    expect(usePermissions().authenticationMethod.value).toBe('app_password')
   })
 
   it('exposes how the account was provisioned', () => {

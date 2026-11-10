@@ -1,7 +1,8 @@
 import { basename } from 'path';
 
 import type { BookCard, BookMetadataLockField, CollapsedSeriesInfo, CustomMetadataBookValue, UserBookStatus } from '@bookorbit/types';
-import { BOOK_METADATA_LOCK_FIELDS, normalizeCoverAspectRatio } from '@bookorbit/types';
+import { BOOK_METADATA_LOCK_FIELDS, compareSeriesIndices, isContentBookFile, normalizeCoverAspectRatio } from '@bookorbit/types';
+import { mediaOverlayCapabilityFromFields } from '../../reader/epub/epub-media-overlay-capability';
 
 const LOCK_FIELD_SET = new Set<string>(BOOK_METADATA_LOCK_FIELDS);
 
@@ -12,6 +13,7 @@ function normalizeLockedFields(raw: string[] | null | undefined): BookMetadataLo
 
 type BookRow = {
   id: number;
+  libraryId?: number;
   status: string;
   coverAspectRatio: string;
   primaryFileId?: number | null;
@@ -21,7 +23,7 @@ type BookRow = {
   title: string | null;
   seriesId?: number | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   publishedDate: string | null;
   publishedYear: number | null;
   language: string | null;
@@ -50,12 +52,21 @@ type CollapsedBookRow = BookRow & {
 
 type NameRow = { bookId: number; name: string };
 type NarratorRow = { bookId: number; name: string };
-type FileRow = { bookId: number; id: number; format: string | null; role: string; sizeBytes: number | null };
+type FileRow = {
+  bookId: number;
+  id: number;
+  format: string | null;
+  role: string;
+  sizeBytes: number | null;
+  mediaOverlayAvailable?: boolean | null;
+  mediaOverlayDurationSeconds?: number | null;
+  mediaOverlayCheckedAt?: Date | null;
+};
 type SeriesMembershipRow = {
   bookId: number;
   seriesId: number;
   seriesName: string;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   displayOrder: number;
   expectedBookCount?: number | null;
 };
@@ -105,10 +116,18 @@ export function assembleBookCards(
     authorsByBook.set(row.bookId, list);
   }
 
-  const filesByBook = new Map<number, { id: number; format: string | null; role: string; sizeBytes: number | null }[]>();
+  const filesByBook = new Map<number, Omit<FileRow, 'bookId'>[]>();
   for (const row of fileRows) {
     const list = filesByBook.get(row.bookId) ?? [];
-    list.push({ id: row.id, format: row.format, role: row.role, sizeBytes: row.sizeBytes });
+    list.push({
+      id: row.id,
+      format: row.format,
+      role: row.role,
+      sizeBytes: row.sizeBytes,
+      mediaOverlayAvailable: row.mediaOverlayAvailable,
+      mediaOverlayDurationSeconds: row.mediaOverlayDurationSeconds,
+      mediaOverlayCheckedAt: row.mediaOverlayCheckedAt,
+    });
     filesByBook.set(row.bookId, list);
   }
 
@@ -172,22 +191,26 @@ export function assembleBookCards(
 
   return rows.map((row) => {
     const rawFiles = filesByBook.get(row.id) ?? [];
+    // A cover or sidecar is never the primary: a book with no content file has none.
     const primaryFile =
       (row.primaryFileId != null ? rawFiles.find((f) => f.id === row.primaryFileId) : undefined) ??
-      rawFiles.find((f) => f.role === 'primary') ??
-      rawFiles.find((f) => f.role === 'content') ??
-      rawFiles[0] ??
+      rawFiles.find((f) => isContentBookFile(f)) ??
       null;
-    const files = rawFiles.map((f) => ({
-      id: f.id,
-      format: f.format,
-      role: primaryFile && f.id === primaryFile.id ? 'primary' : f.role,
-      sizeBytes: f.sizeBytes,
-    }));
+    const files = rawFiles.map((f) => {
+      const mediaOverlay = mediaOverlayCapabilityFromFields(f);
+      return {
+        id: f.id,
+        format: f.format,
+        role: primaryFile && f.id === primaryFile.id ? 'primary' : f.role,
+        sizeBytes: f.sizeBytes,
+        ...(mediaOverlay ? { mediaOverlay } : {}),
+      };
+    });
     const readingProgress = primaryFile != null ? (progressByFileId.get(primaryFile.id) ?? null) : null;
 
     return {
       id: row.id,
+      libraryId: row.libraryId,
       status: row.status,
       coverAspectRatio: normalizeCoverAspectRatio(row.coverAspectRatio),
       title: row.title ?? basename(row.folderPath),
@@ -215,6 +238,7 @@ export function assembleBookCards(
       readStatus: statusByBookId.get(row.id) ?? null,
       addedAt: row.addedAt.toISOString(),
       updatedAt: row.updatedAt?.toISOString() ?? null,
+      coverVersion: `legacy:${(row.updatedAt ?? row.addedAt).toISOString()}`,
       metadataScore: row.metadataScore ?? null,
       hasCover: row.coverSource != null,
       hasMetadataLocks: (row.lockedFields?.length ?? 0) > 0,
@@ -303,7 +327,7 @@ export function collapseBookCards(cards: BookCard[]): BookCard[] {
 
   for (const [, { firstIndex, books: group }] of seriesGroups) {
     const sorted = [...group].sort((a, b) => {
-      if (a.seriesIndex !== null && b.seriesIndex !== null) return a.seriesIndex - b.seriesIndex;
+      if (a.seriesIndex !== null && b.seriesIndex !== null) return compareSeriesIndices(a.seriesIndex, b.seriesIndex);
       if (a.seriesIndex !== null) return -1;
       if (b.seriesIndex !== null) return 1;
       return new Date(a.addedAt).getTime() - new Date(b.addedAt).getTime();

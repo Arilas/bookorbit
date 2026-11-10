@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RouteRecordRaw } from 'vue-router'
-import { AuthMethod, Permission, ProvisioningMethod } from '@bookorbit/types'
+import { AuthenticationMethod, Permission, ProvisioningMethod } from '@bookorbit/types'
 import { routes } from '@/router'
 
 type MissingRoute = {
@@ -61,7 +61,7 @@ describe('router redirects', () => {
 
     expect(route?.meta).toMatchObject({
       forbiddenPermission: Permission.DemoRestricted,
-      forbiddenAuthMethod: AuthMethod.AppPassword,
+      forbiddenAuthenticationMethod: AuthenticationMethod.AppPassword,
       forbiddenProvisioningMethod: ProvisioningMethod.Shared,
       permissionFallback: 'settings-account-profile',
     })

@@ -1,7 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, desc, eq, inArray, lt, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, lt, notInArray, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
+import { NOTIFICATION_TYPE_META, NotificationType } from '@bookorbit/types';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import { notifications, users, userPermissions, userLibraryAccess } from '../../db/schema';
@@ -9,44 +10,78 @@ import type { NewNotification, Notification } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 
+const BOOK_REQUEST_NOTIFICATION_TYPES = Object.values(NotificationType).filter((type) => NOTIFICATION_TYPE_META[type]?.category === 'bookRequests');
+
 @Injectable()
 export class NotificationRepository {
   constructor(@Inject(DB) private readonly db: Db) {}
 
-  async insertMany(rows: NewNotification[]): Promise<Notification[]> {
+  async insertOrCollapse(rows: NewNotification[]): Promise<Notification[]> {
     if (rows.length === 0) return [];
-    return this.db.insert(notifications).values(rows).returning();
+    return this.db
+      .insert(notifications)
+      .values(rows)
+      .onConflictDoUpdate({
+        target: [notifications.userId, notifications.groupKey],
+        targetWhere: sql`${notifications.read} = false and ${notifications.groupKey} is not null`,
+        set: {
+          title: sql`excluded.title`,
+          message: sql`excluded.message`,
+          actionUrl: sql`excluded.action_url`,
+          meta: sql`excluded.meta`,
+          count: sql`${notifications.count} + 1`,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
   }
 
   async findByUser(userId: number, limit: number, offset: number): Promise<{ items: Notification[]; total: number }> {
+    const requestCondition = await this.requestVisibilityCondition(userId);
+    const condition = and(eq(notifications.userId, userId), requestCondition);
     const [items, [{ value: total }]] = await Promise.all([
-      this.db.select().from(notifications).where(eq(notifications.userId, userId)).orderBy(desc(notifications.createdAt)).limit(limit).offset(offset),
-      this.db.select({ value: count() }).from(notifications).where(eq(notifications.userId, userId)),
+      this.db
+        .select()
+        .from(notifications)
+        .where(condition)
+        .orderBy(desc(notifications.updatedAt), desc(notifications.id))
+        .limit(limit)
+        .offset(offset),
+      this.db.select({ value: count() }).from(notifications).where(condition),
     ]);
     return { items, total };
   }
 
   async countUnread(userId: number): Promise<number> {
+    const requestCondition = await this.requestVisibilityCondition(userId);
     const [{ value }] = await this.db
       .select({ value: count() })
       .from(notifications)
-      .where(and(eq(notifications.userId, userId), eq(notifications.read, false)));
+      .where(and(eq(notifications.userId, userId), eq(notifications.read, false), requestCondition));
     return value;
+  }
+
+  private async requestVisibilityCondition(userId: number) {
+    const [user] = await this.db.select({ settings: users.settings }).from(users).where(eq(users.id, userId)).limit(1);
+    return (user?.settings as Record<string, unknown> | null)?.showBookRequests === false
+      ? notInArray(notifications.type, BOOK_REQUEST_NOTIFICATION_TYPES)
+      : undefined;
   }
 
   async setRead(id: number, userId: number): Promise<boolean> {
     const result = await this.db
       .update(notifications)
-      .set({ read: true })
+      .set({ read: true, updatedAt: sql`${notifications.updatedAt}` })
       .where(and(eq(notifications.id, id), eq(notifications.userId, userId)));
     return (result.rowCount ?? 0) > 0;
   }
 
   async setAllRead(userId: number): Promise<number> {
+    const requestCondition = await this.requestVisibilityCondition(userId);
     const result = await this.db
       .update(notifications)
-      .set({ read: true })
-      .where(and(eq(notifications.userId, userId), eq(notifications.read, false)));
+      .set({ read: true, updatedAt: sql`${notifications.updatedAt}` })
+      .where(and(eq(notifications.userId, userId), eq(notifications.read, false), requestCondition));
     return result.rowCount ?? 0;
   }
 
@@ -56,13 +91,41 @@ export class NotificationRepository {
   }
 
   async deleteAllForUser(userId: number): Promise<number> {
-    const result = await this.db.delete(notifications).where(eq(notifications.userId, userId));
+    const requestCondition = await this.requestVisibilityCondition(userId);
+    const result = await this.db.delete(notifications).where(and(eq(notifications.userId, userId), requestCondition));
     return result.rowCount ?? 0;
   }
 
-  async deleteOlderThan(date: Date): Promise<number> {
-    const result = await this.db.delete(notifications).where(lt(notifications.createdAt, date));
-    return result.rowCount ?? 0;
+  async deleteOlderThan(date: Date, batchSize = 1_000): Promise<{ deleted: number; userIds: number[] }> {
+    let deleted = 0;
+    const userIds = new Set<number>();
+
+    while (true) {
+      const candidates = await this.db
+        .select({ id: notifications.id })
+        .from(notifications)
+        .where(lt(notifications.updatedAt, date))
+        .orderBy(notifications.updatedAt, notifications.id)
+        .limit(batchSize);
+      if (candidates.length === 0) break;
+
+      const rows = await this.db
+        .delete(notifications)
+        .where(
+          and(
+            inArray(
+              notifications.id,
+              candidates.map((row) => row.id),
+            ),
+            lt(notifications.updatedAt, date),
+          ),
+        )
+        .returning({ userId: notifications.userId });
+      deleted += rows.length;
+      for (const row of rows) userIds.add(row.userId);
+    }
+
+    return { deleted, userIds: [...userIds] };
   }
 
   async findUserIdsWithLibraryAccess(libraryId: number): Promise<number[]> {

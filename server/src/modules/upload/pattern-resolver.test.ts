@@ -1,12 +1,15 @@
 import {
+  appendToPathStem,
   applyModifier,
   DEFAULT_DOWNLOAD_PATTERN,
+  DEFAULT_KOREADER_DEVICE_PATTERN,
   DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE,
   DEFAULT_UPLOAD_PATTERN_BOOK_PER_FOLDER,
   EXAMPLE_PATTERN_METADATA,
   MAX_PATH_SEGMENT_BYTES,
   replacePlaceholders,
   resolveDownloadFilename,
+  resolvePlaceholders,
   resolveUploadPath,
   sanitizePathSegment,
   validatePattern,
@@ -32,6 +35,11 @@ const MULTI_AUTHOR: Record<string, string> = {
 const DECIMAL_INDEX: Record<string, string> = {
   ...FULL,
   seriesIndex: '01.5',
+};
+
+const FULL_CAST: Record<string, string> = {
+  ...FULL,
+  narrators: 'Simon Vance, Scott Brick, Ilyana Kadushin, Euan Morton',
 };
 
 describe('sanitizePathSegment', () => {
@@ -105,6 +113,24 @@ describe('applyModifier', () => {
     });
   });
 
+  describe('max3', () => {
+    it('passes a single value through', () => {
+      expect(applyModifier('Simon Vance', 'max3', 'narrators')).toBe('Simon Vance');
+    });
+
+    it('passes three values through', () => {
+      expect(applyModifier('A, B, C', 'max3', 'narrators')).toBe('A, B, C');
+    });
+
+    it('collapses to nothing above three values', () => {
+      expect(applyModifier('A, B, C, D', 'max3', 'narrators')).toBe('');
+    });
+
+    it('ignores empty entries when counting', () => {
+      expect(applyModifier('A, , B, , C', 'max3', 'narrators')).toBe('A, B, C');
+    });
+  });
+
   describe('unknown modifier', () => {
     it('returns the value unchanged', () => {
       expect(applyModifier('Patrick Rothfuss', 'nonexistent', 'authors')).toBe('Patrick Rothfuss');
@@ -149,6 +175,24 @@ describe('replacePlaceholders', () => {
     });
   });
 
+  describe('optional groups judge modifier output', () => {
+    it('takes the fallback when a modifier collapses to nothing', () => {
+      expect(replacePlaceholders('<{narrators:max3}|Full Cast>', FULL_CAST)).toBe('Full Cast');
+    });
+
+    it('keeps the primary branch while the modifier still yields text', () => {
+      expect(replacePlaceholders('<{narrators:max3}|Full Cast>', FULL)).toBe('Robertson Dean');
+    });
+
+    it('drops an unguarded group whose modifier collapses to nothing', () => {
+      expect(replacePlaceholders('{title}< - {narrators:max3}>', FULL_CAST)).toBe('Neuromancer');
+    });
+
+    it('still takes the fallback when the underlying value is absent', () => {
+      expect(replacePlaceholders('<{narrators:max3}|Full Cast>', PARTIAL)).toBe('Full Cast');
+    });
+  });
+
   describe('modifiers', () => {
     it('{authors:first} picks the first author', () => {
       expect(replacePlaceholders('{authors:first}', MULTI_AUTHOR)).toBe('Bruce Sterling');
@@ -172,6 +216,14 @@ describe('replacePlaceholders', () => {
 
     it('{title:initial} gives the first letter of the title', () => {
       expect(replacePlaceholders('{title:initial}', FULL)).toBe('N');
+    });
+
+    it('{narrators} joins every narrator', () => {
+      expect(replacePlaceholders('{narrators}', FULL_CAST)).toBe('Simon Vance, Scott Brick, Ilyana Kadushin, Euan Morton');
+    });
+
+    it('{narrators:first} picks the first narrator', () => {
+      expect(replacePlaceholders('{narrators:first}', FULL_CAST)).toBe('Simon Vance');
     });
 
     it('modifier on a missing token resolves to empty string', () => {
@@ -249,6 +301,24 @@ describe('replacePlaceholders', () => {
     });
   });
 
+  describe('chained fallbacks <primary|fallback|default>', () => {
+    const pattern = '<{series}|{publisher}|Unsorted>';
+
+    it('uses the first branch whose tokens all fill', () => {
+      expect(replacePlaceholders(pattern, FULL)).toBe('Sprawl');
+      expect(replacePlaceholders(pattern, { ...FULL, series: '' })).toBe('Ace Books');
+    });
+
+    it('uses the last branch as-is when no earlier branch fills', () => {
+      expect(replacePlaceholders(pattern, { ...FULL, series: '', publisher: '' })).toBe('Unsorted');
+      expect(replacePlaceholders('<{series}|{publisher}|{language}>', { ...FULL, series: '', publisher: '', language: '' })).toBe('');
+    });
+
+    it('reports a chained group that fell back', () => {
+      expect(resolvePlaceholders(pattern, { ...FULL, series: '' })).toEqual({ text: 'Ace Books', usedFallback: true, droppedOptional: false });
+    });
+  });
+
   describe('author fallback pattern', () => {
     it('uses the author when present', () => {
       expect(replacePlaceholders('<{authors:first}|Unknown Author>', FULL)).toBe('William Gibson');
@@ -294,13 +364,52 @@ describe('replacePlaceholders', () => {
   });
 });
 
+describe('resolvePlaceholders', () => {
+  it('resolves to the same text as replacePlaceholders', () => {
+    for (const pattern of [DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE, DEFAULT_UPLOAD_PATTERN_BOOK_PER_FOLDER, '{title}< - {subtitle}>']) {
+      expect(resolvePlaceholders(pattern, PARTIAL).text).toBe(replacePlaceholders(pattern, PARTIAL));
+    }
+  });
+
+  it('reports neither branch when every group fills its primary side', () => {
+    expect(resolvePlaceholders('<{authors}|Unknown>/<{series}/>{title}', FULL)).toEqual({
+      text: 'William Gibson/Sprawl/Neuromancer',
+      usedFallback: false,
+      droppedOptional: false,
+    });
+  });
+
+  it('reports a group that fell back', () => {
+    const result = resolvePlaceholders('<{publisher}|Unknown Publisher>/{title}', PARTIAL);
+
+    expect(result).toEqual({ text: 'Unknown Publisher/Project Hail Mary', usedFallback: true, droppedOptional: false });
+  });
+
+  it('reports a group without a fallback that dropped out', () => {
+    const result = resolvePlaceholders('<{series}/>{title}', PARTIAL);
+
+    expect(result).toEqual({ text: 'Project Hail Mary', usedFallback: false, droppedOptional: true });
+  });
+});
+
 // ── resolveUploadPath ─────────────────────────────────────────────────────────
 
 describe('KOReader device pattern', () => {
   it('routes series and standalone books into separate folders', () => {
-    const pattern = '<Series/{series}/|Standalone/{authors:first} - ><{seriesIndex:fixed2} - >{title}';
-    expect(resolveUploadPath(pattern, FULL, 'epub')).toBe('Series/Sprawl/1.00 - Neuromancer.epub');
-    expect(resolveUploadPath(pattern, { ...FULL, series: '', seriesIndex: '' }, 'epub')).toBe('Standalone/William Gibson - Neuromancer.epub');
+    expect(resolveUploadPath(DEFAULT_KOREADER_DEVICE_PATTERN, FULL, 'epub')).toBe('Series/Sprawl/01.00 - Neuromancer.epub');
+    expect(resolveUploadPath(DEFAULT_KOREADER_DEVICE_PATTERN, { ...FULL, series: '', seriesIndex: '' }, 'epub')).toBe(
+      'Standalone/William Gibson - Neuromancer.epub',
+    );
+  });
+
+  it('names a standalone book without an author by its title alone', () => {
+    expect(resolveUploadPath(DEFAULT_KOREADER_DEVICE_PATTERN, { ...FULL, series: '', seriesIndex: '', authors: '' }, 'epub')).toBe(
+      'Standalone/Neuromancer.epub',
+    );
+  });
+
+  it('keeps a series book without an author in its series folder', () => {
+    expect(resolveUploadPath(DEFAULT_KOREADER_DEVICE_PATTERN, { ...FULL, authors: '' }, 'epub')).toBe('Series/Sprawl/01.00 - Neuromancer.epub');
   });
 
   it('keeps each library in its own subtree when the pattern starts with the library token', () => {
@@ -587,6 +696,27 @@ describe('path segment byte limits', () => {
   });
 });
 
+describe('appendToPathStem', () => {
+  it('inserts the suffix before the extension, matching it case-insensitively', () => {
+    expect(appendToPathStem('Frank Herbert/Dune.epub', ' - Text Only', 'epub')).toBe('Frank Herbert/Dune - Text Only.epub');
+    expect(appendToPathStem('Dune.EPUB', ' [101]', '.epub')).toBe('Dune [101].EPUB');
+  });
+
+  it('appends the suffix when the path does not end in the extension', () => {
+    expect(appendToPathStem('Books/Dune', ' [101]', 'epub')).toBe('Books/Dune [101]');
+  });
+
+  it('keeps a long suffixed segment within the limit and distinct from its unsuffixed form', () => {
+    const path = resolveUploadPath('{title}', { ...FULL, title: 'Long Title '.repeat(22).trim() }, 'epub')!;
+    const suffixed = appendToPathStem(path, ' - Text Only', 'epub');
+
+    expect(Buffer.byteLength(path, 'utf8')).toBeLessThanOrEqual(MAX_PATH_SEGMENT_BYTES);
+    expect(Buffer.byteLength(suffixed, 'utf8')).toBeLessThanOrEqual(MAX_PATH_SEGMENT_BYTES);
+    expect(suffixed.endsWith('.epub')).toBe(true);
+    expect(suffixed).not.toBe(path);
+  });
+});
+
 // ── validatePattern ───────────────────────────────────────────────────────────
 
 describe('validatePattern', () => {
@@ -700,5 +830,133 @@ describe('DEFAULT_UPLOAD_PATTERN_BOOK_PER_FOLDER', () => {
 
   it('passes validatePattern', () => {
     expect(validatePattern(P)).toBe(true);
+  });
+});
+
+// ── Trailing dots and spaces in assembled segments (issue #1160) ─────────────
+
+describe('assembled segment normalization', () => {
+  const ISSUE_PATTERN = '{authors:sort}/<{series} {seriesIndex} >{title} ({year})/{authors}_{year}_{title} ({publisher}, {language})';
+
+  const ISSUE_VALUES: Record<string, string> = {
+    title: 'Harry Potter and the Half-Blood Prince',
+    year: '2005',
+    series: 'Harry Potter',
+    seriesIndex: '06',
+    publisher: 'Pottermore',
+    language: 'English',
+    originalFilename: 'hp6',
+    extension: 'epub',
+  };
+
+  function resolveIssuePath(authors: string): string {
+    const resolved = resolveUploadPath(ISSUE_PATTERN, { ...ISSUE_VALUES, authors }, 'epub', { sanitizeForCrossPlatform: true });
+    expect(resolved).not.toBeNull();
+    return resolved as string;
+  }
+
+  it('a sort-modified author no longer leaves the folder ending in a period', () => {
+    expect(resolveIssuePath('J.K. Rowling').split('/')[0]).toBe('Rowling, J.K');
+  });
+
+  it.each([
+    ['J.K. Rowling', 'Rowling, J.K'],
+    ['JK. Rowling', 'Rowling, JK'],
+    ['JK Rowling', 'Rowling, JK'],
+    ['asd.', 'asd'],
+    ['asd.asd', 'asd.asd'],
+    ['asd. asd', 'asd, asd'],
+  ])('reported author %j resolves to folder %j', (authors, expectedFolder) => {
+    expect(resolveIssuePath(authors).split('/')[0]).toBe(expectedFolder);
+  });
+
+  it('no segment of a resolved path ends in a dot or a space', () => {
+    for (const authors of ['J.K. Rowling', 'JK. Rowling', 'JK Rowling', 'asd.', 'asd.asd', 'asd. asd', 'W. E. B. Du Bois']) {
+      for (const segment of resolveIssuePath(authors).split('/')) {
+        expect(segment).not.toMatch(/[. ]$/);
+      }
+    }
+  });
+
+  it('sort modifier on a single-name author is unaffected', () => {
+    expect(resolveUploadPath('{authors:sort}', { authors: 'Homer' }, 'epub', { sanitizeForCrossPlatform: true })).toBe('Homer.epub');
+  });
+
+  it('first modifier trims a trailing period left by a suffixed name', () => {
+    expect(
+      resolveUploadPath('{authors:first}/{title}', { authors: 'Sammy Davis Jr., Jane Boyd', title: 'Yes I Can' }, 'epub', {
+        sanitizeForCrossPlatform: true,
+      }),
+    ).toBe('Sammy Davis Jr/Yes I Can.epub');
+  });
+
+  it('an empty trailing token no longer leaves the segment ending in a space', () => {
+    expect(
+      resolveUploadPath('{authors}/{title} - {subtitle}', { authors: 'Andy Weir', title: 'Artemis', subtitle: '' }, 'epub', {
+        sanitizeForCrossPlatform: true,
+      }),
+    ).toBe('Andy Weir/Artemis -.epub');
+  });
+
+  it('a literal trailing period in the pattern is trimmed from the folder segment', () => {
+    expect(resolveUploadPath('{authors}./{title}', { authors: 'Andy Weir', title: 'Artemis' }, 'epub', { sanitizeForCrossPlatform: true })).toBe(
+      'Andy Weir/Artemis.epub',
+    );
+  });
+
+  it('a segment that is entirely dots falls back to the replacement character', () => {
+    expect(resolveUploadPath('{authors}/.../{title}', { authors: 'Andy Weir', title: 'Artemis' }, 'epub', { sanitizeForCrossPlatform: true })).toBe(
+      'Andy Weir/_/Artemis.epub',
+    );
+  });
+
+  it('honours a non-default replacement character', () => {
+    expect(
+      resolveUploadPath('{authors}/.../{title}', { authors: 'Andy Weir', title: 'Artemis' }, 'epub', {
+        sanitizeForCrossPlatform: true,
+        replacementCharacter: '-',
+      }),
+    ).toBe('Andy Weir/-/Artemis.epub');
+  });
+
+  it('download filenames drop the trailing period instead of doubling the dot', () => {
+    expect(resolveDownloadFilename('{authors:sort}', { authors: 'J.K. Rowling' }, 'epub', { sanitizeForCrossPlatform: true })).toBe(
+      'Rowling, J.K.epub',
+    );
+  });
+
+  it('leaves the trailing period intact when cross-platform sanitization is disabled', () => {
+    expect(resolveUploadPath('{authors:sort}/{title}', { authors: 'J.K. Rowling', title: 'Artemis' }, 'epub')).toBe('Rowling, J.K./Artemis.epub');
+  });
+
+  it('does not double-guard a reserved name that contains a dot', () => {
+    expect(resolveUploadPath('{title}', { ...FULL, title: 'NUL.txt' }, 'epub', { sanitizeForCrossPlatform: true })).toBe('NUL.txt_.epub');
+    expect(resolveDownloadFilename('{title}', { ...FULL, title: 'NUL.txt ' }, 'epub', { sanitizeForCrossPlatform: true })).toBe('NUL.txt_.epub');
+  });
+
+  it('keeps the trailing separator of a folder-only pattern', () => {
+    expect(
+      resolveUploadPath('{authors:sort}/', { authors: 'J.K. Rowling', originalFilename: 'hp6' }, 'epub', { sanitizeForCrossPlatform: true }),
+    ).toBe('Rowling, J.K/hp6.epub');
+  });
+
+  it('still treats a slash inside a token value as part of the segment', () => {
+    expect(resolveUploadPath('{title}', { ...FULL, title: '24/7 Life.' }, 'epub', { sanitizeForCrossPlatform: true })).toBe('24_7 Life.epub');
+  });
+
+  it('applies the reserved-name guard exactly once alongside the trailing-dot trim', () => {
+    const values = { authors: 'J.K. Rowling', title: 'NUL.txt' };
+    const options = { sanitizeForCrossPlatform: true } as const;
+    const first = resolveUploadPath('{authors:sort}/{title}', values, 'epub', options);
+    const second = resolveUploadPath('{authors:sort}/{title}', values, 'epub', options);
+
+    expect(first).toBe('Rowling, J.K/NUL.txt_.epub');
+    expect(second).toBe(first);
+  });
+
+  it('leaves an already-clean segment untouched', () => {
+    expect(resolveUploadPath('{authors}/{title}', { authors: 'Rowling, J.K', title: 'Artemis' }, 'epub', { sanitizeForCrossPlatform: true })).toBe(
+      'Rowling, J.K/Artemis.epub',
+    );
   });
 });

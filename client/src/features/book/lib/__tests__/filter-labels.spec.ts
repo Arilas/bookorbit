@@ -137,6 +137,10 @@ describe('community rating labels', () => {
   it('exposes a Community Rating field label', () => {
     expect(fieldLabel('communityRating')).toBe('Community Rating')
   })
+
+  it('exposes a Community Review Count field label', () => {
+    expect(fieldLabel('communityRatingCount')).toBe('Community Review Count')
+  })
 })
 
 describe('ruleToParts', () => {
@@ -160,6 +164,11 @@ describe('ruleToParts', () => {
     expect(ruleToParts(rule)).toEqual({ field: 'Added Date', operator: 'within last', value: '7 days' })
   })
 
+  it('renders moreThanAgo rules as a day age', () => {
+    const rule: Rule = { type: 'rule', field: 'finishedAt', operator: 'moreThanAgo', value: 30 }
+    expect(ruleToParts(rule)).toEqual({ field: 'Date Finished', operator: 'more than', value: '30 days ago' })
+  })
+
   it('joins array values with commas', () => {
     const rule: Rule = { type: 'rule', field: 'author', operator: 'includesAny', value: ['Tolkien', 'Le Guin'] }
     expect(ruleToParts(rule)).toEqual({ field: 'Author', operator: 'includes any of', value: 'Tolkien, Le Guin' })
@@ -168,6 +177,11 @@ describe('ruleToParts', () => {
   it('renders a range when valueTo is present', () => {
     const rule: Rule = { type: 'rule', field: 'pageCount', operator: 'between', value: 100, valueTo: 200 }
     expect(ruleToParts(rule)).toEqual({ field: 'Page Count', operator: 'between', value: '100 - 200' })
+  })
+
+  it('formats primary file size values as readable byte sizes', () => {
+    const rule: Rule = { type: 'rule', field: 'fileSize', operator: 'between', value: 10_485_760, valueTo: 26_214_400 }
+    expect(ruleToParts(rule)).toEqual({ field: 'Primary File Size', operator: 'between', value: '10 MB - 25 MB' })
   })
 
   it('renders an empty value when a valued operator has no value', () => {
@@ -183,5 +197,10 @@ describe('ruleToParts', () => {
   it('renders any-provider context for community rating rules', () => {
     const rule: Rule = { type: 'rule', field: 'communityRating', provider: 'any', operator: 'gte', value: 4.5 }
     expect(ruleToParts(rule)).toEqual({ field: 'Community Rating (Any provider)', operator: 'at least', value: '4.5' })
+  })
+
+  it('renders provider context for community review count rules', () => {
+    const rule: Rule = { type: 'rule', field: 'communityRatingCount', provider: 'hardcover', operator: 'gte', value: 1000 }
+    expect(ruleToParts(rule)).toEqual({ field: 'Community Review Count (Hardcover)', operator: 'at least', value: '1000' })
   })
 })

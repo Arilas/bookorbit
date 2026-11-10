@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatDate as formatLocaleDate } from '@/i18n/formatters'
 import { formatBytes as formatFileSize } from '@/lib/formatting'
@@ -8,9 +8,12 @@ import {
   BookOpen,
   Check,
   ChevronDown,
+  Combine,
+  Crown,
   Eye,
   Library,
   Headphones,
+  Link2,
   Lock,
   MoreVertical,
   Pencil,
@@ -21,32 +24,52 @@ import {
   FolderInput,
   Trash2,
   TriangleAlert,
+  Unlink,
   X,
 } from '@lucide/vue'
-import { DialogClose, DialogContent, DialogOverlay, DialogPortal, DialogRoot } from 'reka-ui'
-import { getFormatColor } from '@/features/book/lib/format-colors'
-import { providerIconPath, providerIconPathSafe } from '@/features/book/lib/provider-icons'
-import { libroFmAudiobookUrl, lubimyczytacBookUrl } from '@/features/book/lib/provider-links'
-import { getProviderColor, PROVIDER_SHORT_LABELS } from '@/lib/provider-colors'
+import { toast } from 'vue-sonner'
+import BookFormatChip from '@/features/book/components/BookFormatChip.vue'
+import { bookFormatEntries, fileFormatKey, formatKeyName } from '@/features/book/lib/book-formats'
+import { providerIconPathSafe } from '@/features/book/lib/provider-icons'
+import { createBookProviderLinks, createExternalProviderLinks } from '@/features/book/lib/provider-links'
+import { useMetadataProviderLabels } from '@/features/book/composables/useMetadataProviderLabels'
+import { faceMedium } from '@/features/book/lib/cover-slots'
+import { readingDateToDateKey } from '@/features/book/lib/reading-date'
+import { getProviderColor, providerShortLabel } from '@/lib/provider-colors'
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
-import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '@/features/book/lib/cover-aspect-ratio'
-import { FORMAT_TO_GROUP, READER_OPENABLE_FORMATS } from '@bookorbit/types'
-import type { BookDetail, BookKoboState, CustomMetadataBookValue, ReadStatus, UserBookStatus } from '@bookorbit/types'
+import { useBookCoverAspectRatio } from '@/features/book/composables/useBookCoverAspectRatio'
+import { FORMAT_TO_GROUP, getPrimaryBookFile, Permission, READER_OPENABLE_FORMATS, isComicFormat } from '@bookorbit/types'
+import type {
+  BookDetail,
+  BookKoboState,
+  BookMergedEvent,
+  CoverMedium,
+  CustomMetadataBookValue,
+  ReadAloudProgressSync,
+  ReadStatus,
+  UserBookStatus,
+} from '@bookorbit/types'
 import { STATUS_OPTIONS, STATUS_ICONS, STATUS_COLORS, useBookStatus } from '@/features/book/composables/useBookStatus'
 import BookDownloadButton from '@/features/book/components/BookDownloadButton.vue'
 import DiscoverRow from '@/features/book/components/detail/DiscoverRow.vue'
 import BookCoverArtwork from '@/features/book/components/BookCoverArtwork.vue'
+import BookCoverLightbox from '@/features/book/components/BookCoverLightbox.vue'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { api } from '@/lib/api'
+import { clearReadingProgress, fetchBookProgress } from '@/lib/reading-progress'
 import { useAuth } from '@/features/auth/composables/useAuth'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useLibraryPermissions } from '@/features/library/composables/useLibraryPermissions'
 import { useDeleteBook } from '@/features/book/composables/useDeleteBook'
 import { useMetadataLocks } from '@/features/book/composables/useMetadataLocks'
 import { usePersonalNote, PERSONAL_NOTE_MAX_LENGTH } from '@/features/book/composables/usePersonalNote'
 import { useResetReadingState } from '@/features/book/composables/useResetReadingState'
 import DeleteBookDialog from '@/features/book/components/DeleteBookDialog.vue'
+import BookLinkedChips from '@/features/book/components/link/BookLinkedChips.vue'
+import { useBookLinkActions } from '@/features/book/composables/useBookLinkActions'
+import type { LinkSeedBook } from '@/features/book/lib/book-link'
 import MoveToLibrarySheet from '@/features/book/components/MoveToLibrarySheet.vue'
 import ResetReadingStateDialog from '@/features/book/components/ResetReadingStateDialog.vue'
 import SendBookDialog from '@/features/email/components/SendBookDialog.vue'
@@ -56,19 +79,35 @@ import MetadataScoreBreakdown from '@/features/metadata-score/components/Metadat
 import { useMetadataScoreWeights } from '@/features/metadata-score/composables/useMetadataScoreWeights'
 import { useSafeHtml } from '@/features/book/composables/useSafeHtml'
 import { useKoreaderBookProgress } from '@/features/koreader/composables/useKoreaderBookProgress'
+import KoreaderResetHoldNotice from '@/features/koreader/components/KoreaderResetHoldNotice.vue'
 import { RATING_STARS, getRatingStarClass } from '@/features/book/lib/rating-stars'
 import { formatCommunityRatingValue } from '@/features/book/lib/community-rating'
 import BookCoverSurface from '@/features/book/components/BookCoverSurface.vue'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import HardcoverBookSyncGridItem from '@/features/hardcover/components/HardcoverBookSyncGridItem.vue'
 import StorygraphBookSyncGridItem from '@/features/storygraph/components/StorygraphBookSyncGridItem.vue'
+import BookEditionsCard, { type EditionProgress } from '@/features/book/components/detail/details/BookEditionsCard.vue'
+import BookReadingActivityCard from '@/features/book/components/detail/details/BookReadingActivityCard.vue'
+import ReadAloudSyncMeter from '@/features/book/components/detail/details/ReadAloudSyncMeter.vue'
+import BookMissingFormatRequest from '@/features/book-requests/components/BookMissingFormatRequest.vue'
+import { useBookReadingLog } from '@/features/book/composables/useBookReadingLog'
+import { useProviderLinkSettings } from '@/features/book/composables/useProviderLinkSettings'
+import { hasReadAlong } from '@/features/book/lib/file-capabilities'
+import { COVER_STACK_ASPECT_RATIO, hasCoverPair } from '@/features/book/lib/cover-stack'
+import BookCoverStack from '@/features/book/components/detail/details/BookCoverStack.vue'
+import ReadAloudInviteChip from '@/features/read-aloud/components/ReadAloudInviteChip.vue'
+import ReadAloudSparkles from '@/features/read-aloud/components/ReadAloudSparkles.vue'
+import { useReadAloudInvite } from '@/features/read-aloud/composables/useReadAloudInvite'
 
 type FileProgress = {
+  appName: string | null
   percentage: number
   cfi: string | null
   pageNumber: number | null
+  positionSeconds: number | null
+  mediaOverlayFragment: string | null
+  mediaOverlaySectionIndex: number | null
   updatedAt: string | null
-  appName: string | null
 }
 
 type FileProgressRow = FileProgress & {
@@ -82,28 +121,37 @@ type CollectionMembership = {
   memberCount?: number
 }
 
-type ProviderLink = {
-  key: string
-  label: string
-  url: string
-  iconUrl: string
-  fallback: string
-}
-
 type SeriesDisplayLink = {
   key: string
   seriesId: number | null
   label: string
 }
 
+const MergeBooksSheet = defineAsyncComponent(() => import('@/features/book/components/merge/MergeBooksSheet.vue'))
+const LinkBooksSheet = defineAsyncComponent(() => import('@/features/book/components/link/LinkBooksSheet.vue'))
+
 const props = defineProps<{ book: BookDetail }>()
-const emit = defineEmits<{ saved: [BookDetail]; moved: [] }>()
+const emit = defineEmits<{ saved: [BookDetail]; moved: []; merged: [BookMergedEvent]; 'links-changed': [] }>()
 const { t } = useI18n()
 const router = useRouter()
 const { user } = useAuth()
 
 const addToCollectionOpen = ref(false)
 const moveToLibraryOpen = ref(false)
+const mergeOpen = ref(false)
+// The sheet mounts on first use and stays, so a merge still running keeps reporting after it closes.
+const mergeRequested = ref(false)
+const mergeBookIds = computed(() => [props.book.id])
+const linkOpen = ref(false)
+const linkRequested = ref(false)
+const linkActions = useBookLinkActions()
+const linkedBooks = computed(() => props.book.linkedBooks ?? [])
+const isLinked = computed(() => linkedBooks.value.length > 0)
+/** Books a merge blocker handed over to Link; otherwise Link starts from this book with the picker. */
+const linkSeedIds = ref<number[] | null>(null)
+const linkSeedBooks = ref<LinkSeedBook[]>([])
+const linkBookIds = computed(() => linkSeedIds.value ?? [props.book.id])
+const linkExcludedIds = computed(() => linkedBooks.value.map((book) => book.bookId))
 const scoreBreakdownOpen = ref(false)
 const mobileScoreBreakdownOpen = ref(false)
 const moreMenuOpen = ref(false)
@@ -118,6 +166,7 @@ function togglePersonalReview() {
 }
 
 const { weights: scoreWeights, fetchWeights } = useMetadataScoreWeights()
+const { settings: providerLinkSettings, loadSettings: loadProviderLinkSettings } = useProviderLinkSettings()
 const {
   bookProgress: koreaderBookProgress,
   fetchBookProgress: fetchKoreaderProgress,
@@ -126,6 +175,8 @@ const {
 
 onMounted(() => {
   void fetchWeights()
+  void reloadReadingLog()
+  void loadProviderLinkSettings()
 })
 
 const {
@@ -247,7 +298,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', scheduleGenreOverflowMeasure)
 })
 
-const { hasPermission } = usePermissions()
+const { hasPermission, isDemoRestrictedAccount } = usePermissions()
+const { hasLibraryPermission } = useLibraryPermissions()
 const { load: loadLocks, isLocked } = useMetadataLocks()
 watch(
   () => props.book,
@@ -258,7 +310,23 @@ watch(
 const isRatingLocked = computed(() => isLocked('rating'))
 const canViewKobo = computed(() => hasPermission('kobo_sync'))
 const canViewKoreader = computed(() => hasPermission('koreader_sync'))
-const canEditMetadata = computed(() => hasPermission('library_edit_metadata'))
+const canEditMetadata = computed(() => hasLibraryPermission('library_edit_metadata', props.book?.libraryId, 'editor'))
+const canManageReadingState = computed(() => hasPermission('library_edit_metadata'))
+const canMergeBook = computed(
+  () => !isDemoRestrictedAccount.value && hasLibraryPermission(Permission.LibraryMergeBooks, props.book?.libraryId, 'editor'),
+)
+// Linking shares Merge's permission and editor rule; the server checks every other book's library too.
+const canLinkBook = canMergeBook
+const canUnlinkBook = computed(() => canLinkBook.value && isLinked.value)
+/** Offered on a linked book that is not its group's main book, including a group left without one (G11). */
+const canMakeMainBook = computed(
+  () =>
+    canLinkBook.value &&
+    isLinked.value &&
+    props.book.linkGroupId != null &&
+    // Servers with `linkIsLead` say so directly; older ones only show the main book when it is visible.
+    (props.book.linkIsLead !== undefined ? !props.book.linkIsLead : linkedBooks.value.some((book) => book.isLead)),
+)
 const resetReadingStateBookId = computed(() => props.book.id)
 const {
   open: resetReadingStateDialogOpen,
@@ -271,9 +339,13 @@ const {
 
 const coverSeed = computed(() => props.book.title ?? props.book.folderPath.split('/').pop() ?? String(props.book.id))
 const coverPlaceholderTitle = computed(() => props.book.title ?? props.book.folderPath.split('/').pop() ?? null)
+const coverAuthors = computed(() => props.book.authors.map((a) => a.name))
 const hasCover = computed(() => props.book.coverSource !== null)
+// Both slots hold art, so the cover slot shows them as a stack instead of the face alone, at every width.
+const showCoverStack = computed(() => hasCoverPair(props.book))
+const coverLightboxMedium = ref<CoverMedium | undefined>(undefined)
 const { coverUrl } = useCoverVersions()
-const coverSrc = computed(() => coverUrl(props.book.id, 'cover', props.book.updatedAt ?? props.book.addedAt))
+const coverSrc = computed(() => coverUrl(props.book.id, 'cover', props.book.coverVersion))
 
 watch(coverSrc, () => {
   coverLoaded.value = false
@@ -281,7 +353,62 @@ watch(coverSrc, () => {
   coverImageRatio.value = null
 })
 
-const coverAspectRatio = inject(COVER_ASPECT_RATIO_KEY, ref(DEFAULT_COVER_ASPECT_RATIO))
+/**
+ * The cover frame follows the library's aspect ratio, so a 1/1 library makes it much shorter than
+ * a 2/3 one. The column height is fixed by the grid, so the width is derived from the space left
+ * after the actions: that keeps the group top-packed without overflowing short viewports.
+ */
+const coverColumnEl = ref<HTMLElement | null>(null)
+const coverActionsEl = ref<HTMLElement | null>(null)
+const coverColumnHeight = ref(0)
+const coverActionsHeight = ref(0)
+let coverLayoutObserver: ResizeObserver | null = null
+const COVER_GROUP_GAP_PX = 16
+
+const coverMaxWidth = computed(() => {
+  const availableHeight = coverColumnHeight.value - coverActionsHeight.value - COVER_GROUP_GAP_PX
+  if (availableHeight <= 0) return undefined
+  const parts = (showCoverStack.value ? COVER_STACK_ASPECT_RATIO : detailCoverAspectRatio.value).split('/').map((part) => Number(part.trim()))
+  const width = parts[0]
+  const height = parts[1]
+  if (width === undefined || height === undefined) return undefined
+  if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) return undefined
+  return `${Math.floor(availableHeight * (width / height))}px`
+})
+
+function measureCoverLayout() {
+  coverColumnHeight.value = coverColumnEl.value?.clientHeight ?? 0
+  coverActionsHeight.value = coverActionsEl.value?.getBoundingClientRect().height ?? 0
+}
+
+function toggleDescription() {
+  descriptionExpanded.value = !descriptionExpanded.value
+}
+
+function handleMobileScoreOpen(open: boolean) {
+  mobileScoreBreakdownOpen.value = open
+}
+
+onMounted(() => {
+  coverLayoutObserver = new ResizeObserver(measureCoverLayout)
+  if (coverColumnEl.value) coverLayoutObserver.observe(coverColumnEl.value)
+  if (coverActionsEl.value) coverLayoutObserver.observe(coverActionsEl.value)
+  measureCoverLayout()
+})
+
+onBeforeUnmount(() => {
+  coverLayoutObserver?.disconnect()
+  coverLayoutObserver = null
+})
+
+watch([coverColumnEl, coverActionsEl], ([column, actions]) => {
+  coverLayoutObserver?.disconnect()
+  if (column) coverLayoutObserver?.observe(column)
+  if (actions) coverLayoutObserver?.observe(actions)
+  measureCoverLayout()
+})
+
+const coverAspectRatio = useBookCoverAspectRatio(() => props.book)
 const { bookCoverDisplayMode } = useDisplaySettings()
 const detailCoverAspectRatio = computed(() => {
   if (bookCoverDisplayMode.value !== 'natural-bottom' || !hasCover.value || !coverLoaded.value || coverFailed.value || !coverImageRatio.value) {
@@ -290,59 +417,137 @@ const detailCoverAspectRatio = computed(() => {
 
   return `${coverImageRatio.value} / 1`
 })
-const primaryFile = computed(() => props.book.files.find((f) => f.role === 'primary') ?? props.book.files[0] ?? null)
+const primaryFile = computed(() => getPrimaryBookFile(props.book.files))
+const readAlongFile = computed(() => props.book.files.find((file) => hasReadAlong(file)) ?? null)
+const hasAudioFile = computed(() => props.book.files.some((file) => file.format != null && FORMAT_TO_GROUP[file.format] === 'audio'))
 const isPrimaryAudio = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
-const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
-const readableFiles = computed(() => props.book.files.filter((f) => f.format && READER_OPENABLE_FORMATS.has(f.format)))
-
-// For multi-file audiobooks, collapse all tracks into one representative entry.
-const isMultiTrackAudio = computed(() => {
-  const audioFiles = readableFiles.value.filter((f) => FORMAT_TO_GROUP[f.format!] === 'audio')
-  return audioFiles.length > 1
+// The hero shows the face: the primary file's slot, or the other one when that slot has no art.
+const isFaceAudio = computed(() => {
+  if (!props.book.covers.ebook && !props.book.covers.audio) return isPrimaryAudio.value
+  return faceMedium(props.book, coverAspectRatio.value) === 'audio'
 })
-const openableFiles = computed(() => {
-  if (isMultiTrackAudio.value) {
-    const first = readableFiles.value.find((f) => FORMAT_TO_GROUP[f.format!] === 'audio')
-    const nonAudio = readableFiles.value.filter((f) => FORMAT_TO_GROUP[f.format!] !== 'audio')
-    return first ? [first, ...nonAudio] : nonAudio
-  }
-  return readableFiles.value
-})
+const isPrimaryComic = computed(() => primaryFile.value?.format != null && isComicFormat(primaryFile.value.format))
+const formatEntries = computed(() => bookFormatEntries(props.book.files, props.book.formatPriority))
+const isMultiTrackAudio = computed(() => formatEntries.value.some((entry) => entry.audio && entry.files.length > 1))
+// A multi-file audiobook opens from its first track, so it is one entry in the menu.
+const openableFiles = computed(() =>
+  formatEntries.value
+    .flatMap((entry) => (entry.audio ? entry.files.slice(0, 1) : entry.files))
+    .filter((file) => READER_OPENABLE_FORMATS.has(file.format!.toLowerCase())),
+)
 const hasMultipleFiles = computed(() => openableFiles.value.length > 1)
+const readAloudSync = ref<ReadAloudProgressSync>(props.book.readAloudSync)
+const readAloudSyncSaving = ref(false)
+const readAloudSyncError = ref<string | null>(null)
+const readAloudInviteBook = computed(() => props.book)
+const { invite: readAloudInvite } = useReadAloudInvite(readAloudInviteBook)
+const offersReadAloudInSync = computed(
+  () => readAloudInvite.value && readAloudSync.value.state === 'unavailable' && readAloudSync.value.unavailableReason === 'no_media_overlay_epub',
+)
+const hasOtherEpubCopy = computed(() => props.book.files.filter((file) => file.format?.toLowerCase() === 'epub').length > 1)
+// Sync bridges a read-along EPUB to an audiobook or to other EPUB copies; a book with only one side has nothing to sync.
+const showReadAloudSync = computed(
+  () => (readAlongFile.value != null && (hasAudioFile.value || hasOtherEpubCopy.value)) || offersReadAloudInSync.value,
+)
+
+function handleCreateReadAloud() {
+  void router.push({ name: 'book-detail', params: { bookId: props.book.id }, query: { tab: 'files', readAloud: 'create' } })
+}
+// Another EPUB beside the read-along file keeps its position in sync through the read-along's
+// narration even when no audiobook can be matched, so only the audiobook half is unavailable.
+const syncsEpubCopiesOnly = computed(
+  () => readAloudSync.value.state === 'unavailable' && readAloudSync.value.unavailableReason !== 'no_media_overlay_epub' && hasOtherEpubCopy.value,
+)
+const readAloudSyncStatus = computed(() =>
+  syncsEpubCopiesOnly.value
+    ? t('book.detail.details.readAloudSync.state.epubCopiesOnly')
+    : t(`book.detail.details.readAloudSync.state.${readAloudSync.value.state}`),
+)
+const readAloudSyncDescription = computed(() => {
+  if (readAloudSync.value.state === 'enabled') return t('book.detail.details.readAloudSync.enabledDescription')
+  if (readAloudSync.value.state === 'disabled') return t('book.detail.details.readAloudSync.disabledDescription')
+  if (syncsEpubCopiesOnly.value) return t('book.detail.details.readAloudSync.epubCopiesDescription')
+  return readAloudSyncUnavailableReason()
+})
+/** Why the audiobook is left out, when there is one and it is not simply missing. */
+const readAloudSyncAudiobookNote = computed(() =>
+  syncsEpubCopiesOnly.value && readAloudSync.value.unavailableReason !== 'no_audio_files' ? readAloudSyncUnavailableReason() : null,
+)
+const readAloudSyncChipLabel = computed(() => {
+  if (!syncsEpubCopiesOnly.value) return t(`book.detail.details.readAloudSync.chip.${readAloudSync.value.state}`)
+  return readAloudSyncAudiobookNote.value ? t('book.detail.details.readAloudSync.chip.partial') : t('book.detail.details.readAloudSync.chip.enabled')
+})
+const readAloudSyncAligned = computed(
+  () => readAloudSync.value.state === 'enabled' || (syncsEpubCopiesOnly.value && readAloudSyncAudiobookNote.value == null),
+)
+const readAloudSyncChipAria = computed(() => t('book.detail.details.readAloudSync.chipAria', { status: readAloudSyncChipLabel.value }))
+const readAloudSyncNeedsAttention = computed(
+  () => (readAloudSync.value.state === 'unavailable' && !syncsEpubCopiesOnly.value) || readAloudSyncAudiobookNote.value != null,
+)
+const readAloudSyncToggleLabel = computed(() => {
+  if (readAloudSyncSaving.value) return t('book.detail.details.readAloudSync.saving')
+  return readAloudSync.value.mode === 'disabled' ? t('book.detail.details.readAloudSync.enable') : t('book.detail.details.readAloudSync.disable')
+})
+
+function readAloudSyncUnavailableReason(): string {
+  const reason = readAloudSync.value.unavailableReason ?? 'missing_duration'
+  if (reason === 'duration_mismatch') {
+    return t('book.detail.details.readAloudSync.reason.durationMismatch', {
+      audio: formatDuration(readAloudSync.value.audioDurationSeconds),
+      overlay: formatDuration(readAloudSync.value.overlayDurationSeconds),
+    })
+  }
+  return t(`book.detail.details.readAloudSync.reason.${reason}`)
+}
+
+watch(
+  () => props.book.readAloudSync,
+  (value) => {
+    readAloudSync.value = value
+    readAloudSyncError.value = null
+  },
+)
+
+async function handleToggleReadAloudSync() {
+  if (readAloudSyncSaving.value) return
+  const mode = readAloudSync.value.mode === 'disabled' ? 'auto' : 'disabled'
+  readAloudSyncSaving.value = true
+  readAloudSyncError.value = null
+  try {
+    const res = await api(`/api/v1/books/${props.book.id}/read-aloud-sync`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    })
+    if (!res.ok) throw new Error('Failed to update read-aloud sync')
+    const updated = (await res.json()) as BookDetail
+    readAloudSync.value = updated.readAloudSync
+    emit('saved', updated)
+  } catch {
+    readAloudSyncError.value = t('book.detail.details.readAloudSync.saveFailed')
+  } finally {
+    readAloudSyncSaving.value = false
+  }
+}
 const authorLinks = computed(() => props.book.authors.filter((author) => author.name.trim().length > 0))
 const narratorLine = computed(() => props.book.audioMetadata?.narrators?.map((n) => n.name).join(', ') || null)
-const formats = computed(() => {
-  const all = [...new Set(props.book.files.filter((f) => f.format && FORMAT_TO_GROUP[f.format]).map((f) => f.format!))]
-  const priority = props.book.formatPriority
-  const sorted = priority.length
-    ? all.sort((a, b) => {
-        const ai = priority.indexOf(a)
-        const bi = priority.indexOf(b)
-        return (ai === -1 ? Infinity : ai) - (bi === -1 ? Infinity : bi)
-      })
-    : all
-  const primary = primaryFile.value?.format
-  if (!primary) return sorted
-  return [primary, ...sorted.filter((f) => f !== primary)]
-})
-
 function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null) return '-'
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  if (h > 0) return `${h}h ${m}m`
-  return `${m}m`
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  return hours > 0 ? t('book.detail.details.durationHm', { hours, minutes }) : t('book.detail.details.durationM', { minutes })
 }
 
 const localRating = ref<number | null>(null)
 const hoverRating = ref<number | null>(null)
 const displayRating = computed(() => hoverRating.value ?? localRating.value)
+const { labels: providerLabels } = useMetadataProviderLabels()
 const communityRatingByProvider = computed(() => {
   const map: Record<string, { score: string; tooltip: string }> = {}
   for (const rating of props.book.communityRatings) {
     if (rating.rating == null || !Number.isFinite(rating.rating)) continue
     const score = Number.isInteger(rating.rating) ? rating.rating.toFixed(0) : rating.rating.toFixed(1)
-    const label = PROVIDER_SHORT_LABELS[rating.provider] ?? rating.provider
+    const label = providerShortLabel(rating.provider, providerLabels.value[rating.provider])
     const value = formatCommunityRatingValue(rating.rating, rating.ratingCount)
     map[rating.provider] = { score, tooltip: `${label} ${value}` }
   }
@@ -396,6 +601,11 @@ const {
 
 const personalNoteUpdatedLabel = computed(() => (props.book.personalNoteUpdatedAt ? formatDateTime(props.book.personalNoteUpdatedAt) : null))
 
+function startVisiblePersonalNoteEdit() {
+  showPersonalReview.value = true
+  startPersonalNoteEdit()
+}
+
 watch(
   () => props.book.id,
   () => {
@@ -407,6 +617,9 @@ async function savePersonalNote() {
   const updated = await savePersonalNoteDraft()
   if (updated) emit('saved', updated)
 }
+
+const bookIdRef = computed(() => props.book.id)
+const { sessions: readingSessions, stats: readingStats, loading: readingLogLoading, reload: reloadReadingLog } = useBookReadingLog(bookIdRef)
 
 const { setStatus, updateStatus } = useBookStatus()
 
@@ -454,8 +667,8 @@ const addedDateEditButton = ref<HTMLButtonElement | null>(null)
 
 const localReadStatus = ref<ReadStatus | null>(props.book.readStatus?.status ?? null)
 const savedReadingDates = ref<{ startedAt: string; finishedAt: string }>({
-  startedAt: toDateInputValue(props.book.readStatus?.startedAt),
-  finishedAt: toDateInputValue(props.book.readStatus?.finishedAt),
+  startedAt: readingDateToDateKey(props.book.readStatus?.startedAt, userTimeZone.value),
+  finishedAt: readingDateToDateKey(props.book.readStatus?.finishedAt, userTimeZone.value),
 })
 const draftReadingDates = ref<{ startedAt: string; finishedAt: string }>({
   startedAt: savedReadingDates.value.startedAt,
@@ -524,8 +737,8 @@ function clearAddedDateError() {
 
 function normalizeReadStatusDates(readStatus: UserBookStatus | null | undefined) {
   return {
-    startedAt: toDateInputValue(readStatus?.startedAt),
-    finishedAt: toDateInputValue(readStatus?.finishedAt),
+    startedAt: readingDateToDateKey(readStatus?.startedAt, userTimeZone.value),
+    finishedAt: readingDateToDateKey(readStatus?.finishedAt, userTimeZone.value),
   }
 }
 
@@ -651,9 +864,10 @@ function cancelReadingDateEdit(field: 'startedAt' | 'finishedAt') {
 const fileProgressById = ref<Record<number, FileProgress>>({})
 const audiobookProgress = ref<{
   percentage: number
-  currentFileId: number
-  positionSeconds: number
-  updatedAt: string | null
+  assetId: string
+  positionMs: number
+  capturedAt: string
+  revision: number
   appName: string | null
 } | null>(null)
 const collections = ref<CollectionMembership[]>([])
@@ -662,120 +876,10 @@ const supplementalLoading = ref(false)
 const resettingFileIds = ref<number[]>([])
 const providerIconErrors = ref<Record<string, boolean>>({})
 
-const providerLinks = computed<ProviderLink[]>(() => {
-  const out: ProviderLink[] = []
-  const ids = props.book.providerIds
-  if (ids.google) {
-    out.push({
-      key: 'google',
-      label: 'Google Books',
-      url: `https://books.google.com/books?id=${ids.google}`,
-      iconUrl: providerIconPath('google'),
-      fallback: 'G',
-    })
-  }
-  if (ids.goodreads) {
-    out.push({
-      key: 'goodreads',
-      label: 'Goodreads',
-      url: `https://www.goodreads.com/book/show/${ids.goodreads}`,
-      iconUrl: providerIconPath('goodreads'),
-      fallback: 'GR',
-    })
-  }
-  if (ids.amazon) {
-    out.push({
-      key: 'amazon',
-      label: 'Amazon',
-      url: `https://www.amazon.com/dp/${ids.amazon}`,
-      iconUrl: providerIconPath('amazon'),
-      fallback: 'A',
-    })
-  }
-  if (ids.hardcover) {
-    out.push({
-      key: 'hardcover',
-      label: 'Hardcover',
-      url: `https://hardcover.app/books/${ids.hardcover}`,
-      iconUrl: providerIconPath('hardcover'),
-      fallback: 'H',
-    })
-  }
-  if (ids.openLibrary) {
-    const path = String(ids.openLibrary).startsWith('/works/') ? String(ids.openLibrary) : `/works/${ids.openLibrary}`
-    out.push({
-      key: 'openLibrary',
-      label: 'Open Library',
-      url: `https://openlibrary.org${path}`,
-      iconUrl: providerIconPath('openLibrary'),
-      fallback: 'OL',
-    })
-  }
-  if (ids.itunes) {
-    out.push({
-      key: 'itunes',
-      label: 'Apple Books',
-      url: `https://books.apple.com/book/id${ids.itunes}`,
-      iconUrl: providerIconPath('itunes'),
-      fallback: '',
-    })
-  }
-  if (ids.audible) {
-    out.push({
-      key: 'audible',
-      label: 'Audible',
-      url: `https://www.audible.com/pd/${ids.audible}`,
-      iconUrl: providerIconPath('audible'),
-      fallback: 'Au',
-    })
-  }
-  if (ids.librofm) {
-    out.push({
-      key: 'librofm',
-      label: 'Libro.fm',
-      url: libroFmAudiobookUrl(ids.librofm),
-      iconUrl: providerIconPath('librofm'),
-      fallback: 'Lf',
-    })
-  }
-  if (ids.kobo) {
-    out.push({
-      key: 'kobo',
-      label: 'Kobo',
-      url: `https://www.kobo.com/us/en/ebook/${encodeURIComponent(ids.kobo)}`,
-      iconUrl: providerIconPath('kobo'),
-      fallback: 'K',
-    })
-  }
-  if (ids.ranobedb) {
-    out.push({
-      key: 'ranobedb',
-      label: 'RanobeDB',
-      url: `https://ranobedb.org/book/${ids.ranobedb}`,
-      iconUrl: providerIconPath('ranobedb'),
-      fallback: 'RN',
-    })
-  }
-  if (ids.lubimyczytac) {
-    out.push({
-      key: 'lubimyczytac',
-      label: 'LubimyCzytac',
-      url: lubimyczytacBookUrl(ids.lubimyczytac),
-      iconUrl: providerIconPath('lubimyczytac'),
-      fallback: 'LC',
-    })
-  }
-  if (ids.aladin) {
-    out.push({
-      key: 'aladin',
-      label: 'Aladin',
-      url: `https://www.aladin.co.kr/shop/wproduct.aspx?ItemId=${ids.aladin}`,
-      iconUrl: providerIconPath('aladin'),
-      fallback: '알',
-    })
-  }
-  return out
-})
+const providerLinks = computed(() => [
+  ...createBookProviderLinks(props.book.providerIds, providerLinkSettings.value),
+  ...createExternalProviderLinks(props.book.providerIds, props.book.providerLinks, providerLabels.value),
+])
 
 const communityRatingBadges = computed(() => {
   const linkByKey = new Map(providerLinks.value.map((link) => [link.key, link]))
@@ -784,7 +888,7 @@ const communityRatingBadges = computed(() => {
     .map((rating) => {
       const link = linkByKey.get(rating.provider)
       const meta = communityRatingByProvider.value[rating.provider]
-      const label = PROVIDER_SHORT_LABELS[rating.provider] ?? rating.provider
+      const label = providerShortLabel(rating.provider, providerLabels.value[rating.provider])
       return {
         key: rating.provider,
         label,
@@ -795,7 +899,6 @@ const communityRatingBadges = computed(() => {
         tooltip: meta?.tooltip ?? '',
       }
     })
-    .filter((badge) => badge.iconUrl)
 })
 
 const unlinkedCommunityBadges = computed(() => communityRatingBadges.value.filter((badge) => !badge.url))
@@ -804,92 +907,78 @@ const fileProgressRows = computed(() =>
   props.book.files.map((file) => ({
     file,
     progress: fileProgressById.value[file.id] ?? {
+      appName: null,
       percentage: 0,
       cfi: null,
       pageNumber: null,
+      positionSeconds: null,
+      mediaOverlayFragment: null,
+      mediaOverlaySectionIndex: null,
       updatedAt: null,
-      appName: null,
     },
   })),
 )
-const detailProgressRows = computed(() => fileProgressRows.value.filter(({ progress }) => progress.percentage > 0))
 
-type ProgressRow = {
-  key: string
-  label: string
-  appName: string | null
-  percentage: number
-  color: string
-  badgeStyle: Record<string, string>
-  finished: boolean
-  resetFileId: number | null
+function hasMediaOverlayProgress(progress: FileProgress): boolean {
+  return (
+    (progress.positionSeconds != null && progress.positionSeconds > 0) || !!progress.mediaOverlayFragment || progress.mediaOverlaySectionIndex != null
+  )
 }
 
-const KOBO_COLOR = '#f59e0b'
+function effectiveFileProgressPercentage(file: BookDetail['files'][number], progress: FileProgress): number {
+  if (progress.percentage > 0) return progress.percentage
+  const duration = file.mediaOverlay?.durationSeconds
+  if (duration != null && duration > 0 && progress.positionSeconds != null && progress.positionSeconds > 0) {
+    return (progress.positionSeconds / duration) * 100
+  }
+  return progress.percentage
+}
 
-const leftColumnProgressRows = computed<ProgressRow[]>(() => {
-  const rows: ProgressRow[] = []
+const detailProgressRows = computed(() =>
+  fileProgressRows.value
+    .map(({ file, progress }) => ({
+      file,
+      progress,
+      percentage: effectiveFileProgressPercentage(file, progress),
+    }))
+    .filter(({ progress, percentage }) => percentage > 0 || hasMediaOverlayProgress(progress)),
+)
 
-  for (const { file, progress } of detailProgressRows.value) {
-    const color = getFormatColor(file.format ?? '?')
-    rows.push({
-      key: `file:${file.id}`,
-      label: (file.format ?? '?').toUpperCase(),
-      appName: progress.appName,
-      percentage: progress.percentage,
-      color,
-      badgeStyle: { color, borderColor: `${color}66`, backgroundColor: `${color}1a` },
-      finished: progress.percentage >= 100,
-      resetFileId: file.id,
+/**
+ * One bar per edition: each read file's own progress, and the audiobook's playback position on the
+ * audio edition. Two files of one edition keep the further of the two.
+ */
+const editionProgress = computed<EditionProgress[]>(() => {
+  const byKey = new Map<string, EditionProgress>()
+  for (const { file, progress, percentage } of detailProgressRows.value) {
+    const key = fileFormatKey(file)
+    if (!key) continue
+    const current = byKey.get(key)
+    if (current && current.percentage >= percentage) continue
+    byKey.set(key, { key, appName: progress.appName, percentage, finished: percentage >= 100, resetFileId: file.id })
+  }
+  const audioEntry = formatEntries.value.find((entry) => entry.audio)
+  const audioPercentage = audiobookProgress.value?.percentage ?? 0
+  if (audioEntry && audioPercentage > 0) {
+    byKey.set(audioEntry.key, {
+      key: audioEntry.key,
+      appName: audiobookProgress.value?.appName ?? null,
+      percentage: audioPercentage,
+      finished: audioPercentage >= 100,
+      resetFileId: -props.book.id,
     })
   }
-
-  if (audiobookProgress.value && audiobookProgress.value.percentage > 0) {
-    const audioFile = props.book.files.find((f) => f.id === audiobookProgress.value!.currentFileId)
-    const format = audioFile?.format ?? 'audio'
-    const color = getFormatColor(format)
-    rows.push({
-      key: `audio:${audiobookProgress.value.currentFileId}`,
-      label: format.toUpperCase(),
-      appName: audiobookProgress.value.appName,
-      percentage: audiobookProgress.value.percentage,
-      color,
-      badgeStyle: { color, borderColor: `${color}66`, backgroundColor: `${color}1a` },
-      finished: audiobookProgress.value.percentage >= 100,
-      resetFileId: audiobookProgress.value.currentFileId,
-    })
-  }
-  const koboPercent = koboState.value?.readingState?.progressPercent
-  if (canViewKobo.value && koboPercent != null && koboPercent > 0) {
-    rows.push({
-      key: 'kobo',
-      label: 'Kobo',
-      appName: null,
-      percentage: koboPercent,
-      color: KOBO_COLOR,
-      badgeStyle: { color: KOBO_COLOR, borderColor: `${KOBO_COLOR}66`, backgroundColor: `${KOBO_COLOR}1a` },
-      finished: koboPercent >= 100,
-      resetFileId: null,
-    })
-  }
-  if (canViewKoreader.value && koreaderBookProgress.value != null && koreaderBookProgress.value.canonicalPercentage > 0) {
-    const koreaderColor = '#b3b910'
-    rows.push({
-      key: 'koreader',
-      label: 'KO-R',
-      appName: null,
-      percentage: koreaderBookProgress.value.canonicalPercentage,
-      color: koreaderColor,
-      badgeStyle: { color: koreaderColor, borderColor: `${koreaderColor}66`, backgroundColor: `${koreaderColor}1a` },
-      finished: koreaderBookProgress.value.canonicalPercentage >= 100,
-      resetFileId: null,
-    })
-  }
-  return rows
+  return [...byKey.values()]
 })
 
-const leftColumnProgressVisible = computed(() => leftColumnProgressRows.value.slice(0, 3))
-const leftColumnProgressOverflow = computed(() => Math.max(0, leftColumnProgressRows.value.length - 3))
+watch(bookIdRef, () => {
+  void reloadReadingLog()
+})
+
+function handleEditionReset(key: string) {
+  const row = editionProgress.value.find((entry) => entry.key === key)
+  if (row) void handleResetFileProgress(row)
+}
 
 function formatKoboDeviceNames(snapshots: BookKoboState['snapshots']): string {
   const names = snapshots.map((snapshot) => snapshot.deviceName)
@@ -899,28 +988,9 @@ function formatKoboDeviceNames(snapshots: BookKoboState['snapshots']): string {
 }
 
 const resetHeldDevices = computed(() => (canViewKoreader.value ? (koreaderBookProgress.value?.heldByReset ?? []) : []))
-const releasingDeviceIds = ref<string[]>([])
-const failedReleaseDeviceIds = ref<string[]>([])
 
-function isReleasingHold(deviceId: string): boolean {
-  return releasingDeviceIds.value.includes(deviceId)
-}
-
-function hasReleaseFailed(deviceId: string): boolean {
-  return failedReleaseDeviceIds.value.includes(deviceId)
-}
-
-async function handleReleaseResetHold(deviceId: string) {
-  if (isReleasingHold(deviceId)) return
-  releasingDeviceIds.value = [...releasingDeviceIds.value, deviceId]
-  failedReleaseDeviceIds.value = failedReleaseDeviceIds.value.filter((id) => id !== deviceId)
-  try {
-    const released = await releaseKoreaderResetHold(props.book.id, deviceId)
-    // A button that re-enables with the hold still showing reads as nothing having happened.
-    if (!released) failedReleaseDeviceIds.value = [...failedReleaseDeviceIds.value, deviceId]
-  } finally {
-    releasingDeviceIds.value = releasingDeviceIds.value.filter((id) => id !== deviceId)
-  }
+function releaseResetHold(deviceId: string): Promise<boolean> {
+  return releaseKoreaderResetHold(props.book.id, deviceId)
 }
 
 const koboAnomaly = computed(() => {
@@ -941,10 +1011,9 @@ const koboAnomaly = computed(() => {
   return null
 })
 
-function formatSeriesLabel(seriesName: string, seriesIndex: number | null): string {
+function formatSeriesLabel(seriesName: string, seriesIndex: string | null): string {
   if (seriesIndex == null) return seriesName
-  const formattedIndex = seriesIndex % 1 === 0 ? Math.floor(seriesIndex) : seriesIndex
-  return `${seriesName} #${formattedIndex}`
+  return `${seriesName} #${seriesIndex}`
 }
 
 const seriesLinks = computed<SeriesDisplayLink[]>(() => {
@@ -986,31 +1055,15 @@ function formatAddedDateTime(iso: string): string {
   })
 }
 
-function formatPercent(value: number): string {
-  const clamped = Math.max(0, Math.min(100, value))
-  if (clamped > 0 && clamped < 1) return '<1%'
-  if (clamped > 99 && clamped < 100) return '>99%'
-  return `${Math.round(clamped)}%`
-}
-
 function formatDate(iso: string): string {
   return formatLocaleDate(new Date(iso), { year: 'numeric', month: 'short', day: 'numeric', timeZone: userTimeZone.value })
-}
-
-function formatBadgeStyle(fmt: string) {
-  const color = getFormatColor(fmt)
-  return {
-    color,
-    borderColor: `${color}66`,
-    backgroundColor: `${color}1a`,
-  }
 }
 
 function providerLinkStyle(provider: string) {
   const color = getProviderColor(provider)
   return {
-    borderColor: `${color}66`,
-    backgroundColor: `${color}12`,
+    borderColor: `color-mix(in srgb, ${color} 40%, transparent)`,
+    backgroundColor: `color-mix(in srgb, ${color} 7%, transparent)`,
   }
 }
 
@@ -1033,6 +1086,73 @@ function handleMoveOpenChange(open: boolean) {
 // detail rather than navigating away.
 function handleBookMoved() {
   emit('moved')
+}
+
+function handleMergeFromMenu() {
+  moreMenuOpen.value = false
+  mobileMoreMenuOpen.value = false
+  mergeRequested.value = true
+  mergeOpen.value = true
+}
+
+function handleMergeOpenChange(open: boolean) {
+  mergeOpen.value = open
+}
+
+function handleBooksMerged(event: BookMergedEvent) {
+  emit('merged', event)
+}
+
+function closeMoreMenus() {
+  moreMenuOpen.value = false
+  mobileMoreMenuOpen.value = false
+}
+
+function handleLinkFromMenu() {
+  closeMoreMenus()
+  linkSeedIds.value = null
+  linkSeedBooks.value = []
+  linkRequested.value = true
+  linkOpen.value = true
+}
+
+/** The blocked merge's books, already chosen: Link lists them instead of asking for them again. */
+function handleMergeLinkInstead(bookIds: number[], books: LinkSeedBook[] = []) {
+  mergeOpen.value = false
+  linkSeedIds.value = bookIds.includes(props.book.id) ? bookIds : [props.book.id, ...bookIds]
+  linkSeedBooks.value = books
+  linkRequested.value = true
+  linkOpen.value = true
+}
+
+function handleLinkOpenChange(open: boolean) {
+  linkOpen.value = open
+}
+
+function handleBooksLinked() {
+  emit('links-changed')
+}
+
+async function handleUnlinkFromMenu() {
+  closeMoreMenus()
+  if (await linkActions.unlink(props.book.id)) {
+    toast.success(t('book.link.toast.unlinked'))
+    emit('links-changed')
+  } else if (linkActions.error.value) {
+    toast.error(linkActions.error.value)
+  }
+}
+
+async function handleMakeMainFromMenu() {
+  closeMoreMenus()
+  const groupId = props.book.linkGroupId
+  if (groupId == null) return
+  if (await linkActions.makeLead(groupId, props.book.id)) {
+    toast.success(t('book.link.toast.madeMain'))
+    emit('links-changed')
+  } else if (linkActions.error.value) {
+    toast.error(linkActions.error.value)
+  }
 }
 
 function handleDeleteFromMenu() {
@@ -1073,13 +1193,25 @@ function handleCoverError() {
   coverImageRatio.value = null
 }
 
+const canOpenCoverLightbox = computed(() => hasCover.value && coverLoaded.value && !coverFailed.value)
+
 function handleCoverClick() {
-  if (hasCover.value && coverLoaded.value && !coverFailed.value) {
-    coverLightboxOpen.value = true
-  }
+  if (!canOpenCoverLightbox.value) return
+  coverLightboxMedium.value = undefined
+  coverLightboxOpen.value = true
+}
+
+function handleCoverStackOpen(medium: CoverMedium) {
+  coverLightboxMedium.value = medium
+  coverLightboxOpen.value = true
+}
+
+function handleCoverLightboxOpenChange(open: boolean) {
+  coverLightboxOpen.value = open
 }
 
 function openEditCover() {
+  if (!canEditMetadata.value) return
   router.push({ name: 'book-detail', params: { bookId: props.book.id }, query: { tab: 'edit' } })
 }
 
@@ -1123,14 +1255,15 @@ function setFileResetting(fileId: number, resetting: boolean): void {
   resettingFileIds.value = resettingFileIds.value.filter((id) => id !== fileId)
 }
 
-async function handleResetFileProgress(row: ProgressRow) {
+async function handleResetFileProgress(row: EditionProgress) {
   const fileId = row.resetFileId
   if (fileId == null || isResettingFile(fileId)) return
-  if (!window.confirm(t('book.detail.details.resetProgressConfirm', { label: row.label }))) return
+  if (!window.confirm(t('book.detail.details.resetProgressConfirm', { label: formatKeyName(row.key) }))) return
 
   setFileResetting(fileId, true)
   try {
-    const res = await api(`/api/v1/books/files/${fileId}/progress`, { method: 'DELETE' })
+    const res =
+      fileId < 0 ? await api(`/api/v1/audiobooks/${props.book.id}/playback-state`, { method: 'DELETE' }) : await clearReadingProgress(fileId)
     if (!res.ok) throw new Error('Failed to reset file progress')
     await loadSupplemental()
   } finally {
@@ -1145,8 +1278,8 @@ async function loadSupplemental() {
   supplementalLoading.value = true
   const hasAudio = props.book.files.some((f) => f.format && FORMAT_TO_GROUP[f.format] === 'audio')
   try {
-    const progressPromise = api(`/api/v1/books/${props.book.id}/progress`).catch(() => null)
-    const audioProgressPromise = hasAudio ? api(`/api/v1/books/${props.book.id}/audio-progress`).catch(() => null) : Promise.resolve(null)
+    const progressPromise = fetchBookProgress(props.book.id).catch(() => null)
+    const audioProgressPromise = hasAudio ? api(`/api/v1/audiobooks/${props.book.id}/playback-state`).catch(() => null) : Promise.resolve(null)
     const collectionsPromise = api('/api/v1/collections/membership', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1155,7 +1288,7 @@ async function loadSupplemental() {
     const koboPromise = canViewKobo.value ? api(`/api/v1/books/${props.book.id}/kobo-state`) : Promise.resolve(null)
     const koreaderProgressPromise = canViewKoreader.value ? fetchKoreaderProgress(props.book.id) : Promise.resolve()
 
-    const [progressRes, audioProgressRes, collectionsRes, koboRes] = await Promise.all([
+    const [fetchedProgressRows, audioProgressRes, collectionsRes, koboRes] = await Promise.all([
       progressPromise,
       audioProgressPromise,
       collectionsPromise,
@@ -1165,16 +1298,20 @@ async function loadSupplemental() {
 
     if (requestId !== supplementalRequestId) return
 
-    const progressRows: FileProgressRow[] = progressRes && progressRes.ok ? ((await progressRes.json()) as FileProgressRow[]) : []
+    const progressRows: FileProgressRow[] = fetchedProgressRows ?? []
     const progressMap: Record<number, FileProgress> = {}
     for (const row of progressRows) {
       if (!Number.isFinite(row.fileId)) continue
       progressMap[row.fileId] = {
-        percentage: row.percentage,
+        appName: row.appName ?? null,
+        percentage: typeof row.percentage === 'number' && Number.isFinite(row.percentage) ? row.percentage : 0,
         cfi: row.cfi,
         pageNumber: row.pageNumber,
+        positionSeconds: typeof row.positionSeconds === 'number' && Number.isFinite(row.positionSeconds) ? row.positionSeconds : null,
+        mediaOverlayFragment: typeof row.mediaOverlayFragment === 'string' ? row.mediaOverlayFragment : null,
+        mediaOverlaySectionIndex:
+          typeof row.mediaOverlaySectionIndex === 'number' && Number.isFinite(row.mediaOverlaySectionIndex) ? row.mediaOverlaySectionIndex : null,
         updatedAt: row.updatedAt,
-        appName: row.appName ?? null,
       }
     }
     fileProgressById.value = progressMap
@@ -1184,9 +1321,10 @@ async function loadSupplemental() {
       audiobookProgress.value = data
         ? {
             percentage: data.percentage,
-            currentFileId: data.currentFileId,
-            positionSeconds: data.positionSeconds,
-            updatedAt: data.updatedAt ?? null,
+            assetId: data.assetId,
+            positionMs: data.positionMs,
+            capturedAt: data.capturedAt,
+            revision: data.revision,
             appName: data.appName ?? null,
           }
         : null
@@ -1255,352 +1393,151 @@ watch(
     </div>
   </div>
 
-  <!-- Mobile-only hero: compact cover thumbnail + identity info + action buttons -->
-  <div class="md:hidden mb-6">
-    <div class="flex gap-4 mb-4 items-start">
-      <!-- Cover thumbnail -->
-      <div class="w-28 shrink-0">
-        <BookCoverSurface
-          class="book-cover-surface--spine-fitted relative w-full rounded-sm overflow-hidden"
-          :disable-spine="isPrimaryAudio"
-          :is-comic="isPrimaryComic"
-          :class="hasCover && coverLoaded && !coverFailed ? 'cursor-zoom-in' : ''"
-          :style="{ aspectRatio: detailCoverAspectRatio }"
-          @click="handleCoverClick"
+  <!-- Below 46rem of pane width the page is a single column. Above it, the shelf follows the
+       natural height of the three-column content instead of being pinned to the viewport bottom. -->
+  <div
+    data-test="details-layout"
+    class="flex flex-col gap-5 @min-[46rem]/book-detail:grid @min-[46rem]/book-detail:content-start @min-[46rem]/book-detail:grid-cols-[clamp(12rem,23cqi,17rem)_minmax(16rem,1fr)_clamp(15rem,26cqi,19.25rem)] @min-[46rem]/book-detail:gap-x-6 @min-[46rem]/book-detail:gap-y-5"
+  >
+    <!-- Cover column -->
+    <div
+      ref="coverColumnEl"
+      data-test="cover-column"
+      class="flex min-w-0 flex-col gap-4 @min-[46rem]/book-detail:col-start-1 @min-[46rem]/book-detail:row-start-1 @min-[46rem]/book-detail:min-h-0"
+    >
+      <div class="flex items-start gap-4 sm:gap-5 @min-[46rem]/book-detail:block @min-[46rem]/book-detail:min-h-0">
+        <div
+          class="w-28 shrink-0 sm:w-36 @min-[46rem]/book-detail:flex @min-[46rem]/book-detail:w-full @min-[46rem]/book-detail:items-start @min-[46rem]/book-detail:justify-end"
+          :class="!showCoverStack && hasCover && coverLoaded && !coverFailed ? 'cursor-zoom-in' : ''"
         >
-          <BookCoverArtwork
-            :src="coverSrc"
-            :has-cover="hasCover"
-            :title="coverPlaceholderTitle"
-            :author-line="book.authors.map((a) => a.name).join(', ') || null"
-            :is-audio="isPrimaryAudio"
-            :seed="coverSeed"
-            :alt="book.title ?? ''"
-            :frame-aspect-ratio="detailCoverAspectRatio"
-            loading="eager"
-            backdrop-class="blur-lg brightness-50"
-            :spine="!isPrimaryAudio"
-            :is-comic="isPrimaryComic"
-            @load="handleCoverLoad"
-            @error="handleCoverError"
-          />
-        </BookCoverSurface>
-      </div>
-      <!-- Identity info -->
-      <div class="flex-1 min-w-0">
-        <h1 class="text-base font-bold leading-snug break-words">{{ book.title ?? t('book.detail.details.untitled') }}</h1>
-        <p v-if="book.subtitle" class="text-sm text-muted-foreground mt-1 leading-snug break-words">{{ book.subtitle }}</p>
-
-        <div class="mt-2">
-          <Popover :open="mobileScoreBreakdownOpen" @update:open="(v) => (mobileScoreBreakdownOpen = v)">
-            <PopoverTrigger as-child>
-              <MetadataScoreBadge :score="book.metadataScore" />
-            </PopoverTrigger>
-            <PopoverContent class="w-72 p-4" align="start">
-              <p class="text-sm font-semibold mb-3">{{ t('book.detail.details.metadataScore') }}</p>
-              <MetadataScoreBreakdown :book="book" :weights="scoreWeights" @edit-metadata="handleEditMetadataFromScore" />
-            </PopoverContent>
-          </Popover>
+          <div
+            class="w-full @min-[46rem]/book-detail:max-h-full @min-[46rem]/book-detail:max-w-[var(--detail-cover-max-width)]"
+            :style="{ '--detail-cover-max-width': coverMaxWidth }"
+          >
+            <BookCoverStack
+              v-if="showCoverStack"
+              :book="book"
+              :face="isFaceAudio ? 'audio' : 'ebook'"
+              :editable="canEditMetadata"
+              @open="handleCoverStackOpen"
+              @edit="openEditCover"
+            />
+            <BookCoverSurface
+              v-else
+              class="book-cover-surface--spine-fitted group relative w-full overflow-hidden rounded-lg shadow-lg shadow-black/40"
+              :disable-spine="isFaceAudio"
+              :is-comic="isPrimaryComic"
+              :class="hasCover && coverLoaded && !coverFailed ? 'cursor-zoom-in' : ''"
+              :style="{ aspectRatio: detailCoverAspectRatio }"
+            >
+              <button
+                v-if="canOpenCoverLightbox"
+                type="button"
+                class="absolute inset-0 z-[4] cursor-zoom-in rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                :aria-label="t('book.detail.details.viewCover')"
+                @click="handleCoverClick"
+              />
+              <Tooltip v-if="canEditMetadata">
+                <TooltipTrigger as-child>
+                  <button
+                    class="absolute top-1.5 right-1.5 z-10 p-1 rounded-xs bg-black/50 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                    :aria-label="t('book.detail.details.editCover')"
+                    @click.stop="openEditCover"
+                  >
+                    <Pencil class="size-3" aria-hidden="true" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>{{ t('book.detail.details.editCover') }}</TooltipContent>
+              </Tooltip>
+              <BookCoverArtwork
+                :src="coverSrc"
+                :has-cover="hasCover"
+                :title="coverPlaceholderTitle"
+                :author-line="book.authors.map((a) => a.name).join(', ') || null"
+                :is-audio="isFaceAudio"
+                :seed="coverSeed"
+                :alt="book.title ?? ''"
+                :frame-aspect-ratio="detailCoverAspectRatio"
+                loading="eager"
+                backdrop-class="blur-lg brightness-50"
+                :spine="!isFaceAudio"
+                :is-comic="isPrimaryComic"
+                :authors="coverAuthors"
+                :subtitle="book.subtitle"
+                :series-name="book.seriesName"
+                :series-index="book.seriesIndex"
+                :genres="book.genres"
+                @load="handleCoverLoad"
+                @error="handleCoverError"
+              />
+            </BookCoverSurface>
+          </div>
         </div>
 
-        <!-- Author / narrator / series -->
-        <div class="mt-2 space-y-1 min-w-0">
-          <p v-if="authorLinks.length" class="text-xs break-words">
+        <!-- Compact identity, replaced by the full block in column two from 46rem -->
+        <div class="min-w-0 flex-1 @min-[46rem]/book-detail:hidden">
+          <h1 class="text-lg font-bold leading-snug break-words sm:text-xl">{{ book.title ?? t('book.detail.details.untitled') }}</h1>
+          <p v-if="book.subtitle" class="mt-1 text-sm leading-snug text-muted-foreground break-words">{{ book.subtitle }}</p>
+          <BookLinkedChips v-if="isLinked" :books="linkedBooks" class="mt-2" />
+          <p v-if="authorLinks.length" class="mt-2 text-[13px] break-words">
             <span class="text-muted-foreground">{{ t('book.detail.details.by') }}</span>
-            <span class="ml-1 font-medium text-foreground">
-              <template v-for="(author, index) in authorLinks" :key="`${author.id}-${index}`">
+            <span class="ml-1 font-semibold">
+              <template v-for="(author, index) in authorLinks" :key="`m-${author.id}-${index}`">
                 <RouterLink
                   :to="{ name: 'author-detail', params: { id: author.id } }"
-                  class="hover:text-primary hover:underline underline-offset-2 transition-colors"
+                  class="transition-colors hover:text-primary hover:underline underline-offset-2"
                   >{{ author.name }}</RouterLink
                 ><span v-if="index < authorLinks.length - 1">, </span>
               </template>
             </span>
           </p>
-          <p v-if="narratorLine" class="text-xs break-words">
+          <p v-if="narratorLine" class="mt-1 text-[13px] break-words">
             <span class="text-muted-foreground">{{ t('book.detail.details.narratedBy') }}</span>
-            <span class="ml-1 font-medium text-foreground">{{ narratorLine }}</span>
+            <span class="ml-1 font-semibold">{{ narratorLine }}</span>
           </p>
-          <div v-if="seriesLinks.length" class="flex flex-wrap gap-1">
-            <template v-for="series in seriesLinks" :key="series.key">
+          <div v-if="seriesLinks.length" class="mt-2 flex flex-wrap gap-1.5">
+            <template v-for="series in seriesLinks" :key="`m-${series.key}`">
               <RouterLink
                 v-if="series.seriesId != null"
                 :to="{ name: 'series-detail', params: { seriesId: series.seriesId } }"
-                class="inline-block text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground transition-colors"
+                class="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium transition-colors hover:bg-muted/80"
                 >{{ series.label }}</RouterLink
               >
-              <span v-else class="inline-block text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground">{{ series.label }}</span>
+              <span v-else class="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium">{{ series.label }}</span>
             </template>
           </div>
-        </div>
-        <!-- Stars: own row -->
-        <div class="mt-2 flex items-center gap-0.5" @mouseleave="hoverRating = null">
-          <div class="flex items-center gap-0.5">
-            <template v-if="canEditMetadata">
-              <Tooltip v-for="star in ratingStars" :key="star">
-                <TooltipTrigger as-child>
-                  <button
-                    type="button"
-                    class="p-1 transition-colors"
-                    :class="isRatingLocked ? 'pointer-events-none' : 'disabled:opacity-50'"
-                    :disabled="isRatingLocked"
-                    @mouseenter="hoverRating = star"
-                    @click="setRating(star)"
-                  >
-                    <Star class="size-4" :class="getRatingStarClass(star, displayRating)" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>{{
-                  isRatingLocked ? t('book.detail.details.ratingLocked') : t('book.detail.details.rateStar', { star })
-                }}</TooltipContent>
-              </Tooltip>
-            </template>
-            <template v-else>
-              <Star v-for="star in ratingStars" :key="star" class="size-4" :class="getRatingStarClass(star, localRating)" />
-            </template>
+          <div class="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-2">
+            <Popover :open="mobileScoreBreakdownOpen" @update:open="handleMobileScoreOpen">
+              <PopoverTrigger as-child>
+                <MetadataScoreBadge :score="book.metadataScore" />
+              </PopoverTrigger>
+              <PopoverContent class="w-72 p-4" align="start">
+                <p class="mb-3 text-sm font-semibold">{{ t('book.detail.details.metadataScore') }}</p>
+                <MetadataScoreBreakdown :book="book" :weights="scoreWeights" @edit-metadata="handleEditMetadataFromScore" />
+              </PopoverContent>
+            </Popover>
+            <DropdownMenu>
+              <DropdownMenuTrigger as-child>
+                <button class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
+                  <component :is="STATUS_ICONS[localReadStatus ?? 'unread']" class="size-3.5" :class="STATUS_COLORS[localReadStatus ?? 'unread']" />
+                  {{ STATUS_OPTIONS.find((o) => o.value === (localReadStatus ?? 'unread'))?.label }}
+                  <ChevronDown class="size-3 opacity-60" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuItem v-for="opt in STATUS_OPTIONS" :key="opt.value" @click="handleSetReadStatus(opt.value)">
+                  <component :is="STATUS_ICONS[opt.value]" class="mr-2 size-4" :class="STATUS_COLORS[opt.value]" />
+                  {{ opt.label }}
+                  <Check v-if="localReadStatus === opt.value" class="ml-auto size-3 text-primary" />
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <template v-if="isRatingLocked">
-            <div class="ml-1 p-1 rounded-full bg-primary/10 text-primary">
-              <Lock class="size-3" />
-            </div>
-          </template>
-        </div>
-        <div v-if="communityRatingBadges.length" class="mt-2 flex flex-wrap items-center gap-1.5">
-          <component
-            :is="badge.url ? 'a' : 'span'"
-            v-for="badge in communityRatingBadges"
-            :key="badge.key"
-            :href="badge.url ?? undefined"
-            :target="badge.url ? '_blank' : undefined"
-            :rel="badge.url ? 'noopener noreferrer' : undefined"
-            :title="badge.tooltip"
-            class="inline-flex h-6 items-center overflow-hidden rounded-md border transition-colors"
-            :class="badge.url ? 'hover:bg-muted/60' : ''"
-            :style="providerLinkStyle(badge.key)"
-          >
-            <span class="flex size-6 items-center justify-center">
-              <img
-                v-if="!providerIconErrors[badge.key]"
-                :src="badge.iconUrl ?? undefined"
-                :alt="badge.label"
-                class="size-3.5 rounded-[2px] object-contain"
-                loading="lazy"
-                @error="providerIconErrors[badge.key] = true"
-              />
-              <span v-else class="text-[8px] font-bold leading-none text-foreground">{{ badge.fallback }}</span>
-            </span>
-            <span
-              class="flex h-full items-center border-l border-border/60 bg-background/50 px-1.5 text-[11px] font-semibold tabular-nums text-foreground"
-            >
-              {{ badge.score }}
-            </span>
-          </component>
-        </div>
-        <!-- Read status + Personal Review row -->
-        <div class="mt-1 flex items-center gap-1.5 flex-wrap">
-          <DropdownMenu>
-            <DropdownMenuTrigger as-child>
-              <button class="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors px-1 py-1">
-                <component :is="STATUS_ICONS[localReadStatus ?? 'unread']" class="size-3.5" :class="STATUS_COLORS[localReadStatus ?? 'unread']" />
-                {{ STATUS_OPTIONS.find((o) => o.value === (localReadStatus ?? 'unread'))?.label }}
-                <ChevronDown class="size-3 opacity-60" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              <DropdownMenuItem v-for="opt in STATUS_OPTIONS" :key="opt.value" @click="handleSetReadStatus(opt.value)">
-                <component :is="STATUS_ICONS[opt.value]" class="size-4 mr-2" :class="STATUS_COLORS[opt.value]" />
-                {{ opt.label }}
-                <Check v-if="localReadStatus === opt.value" class="size-3 ml-auto text-primary" />
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <div class="w-px h-3.5 bg-border mx-1" />
-
-          <button
-            type="button"
-            :aria-label="t('book.detail.details.personalReview.toggleAria')"
-            class="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors px-1 py-1"
-            :class="{ 'text-primary hover:text-primary': showPersonalReview }"
-            @click="togglePersonalReview"
-          >
-            <StickyNote class="size-3.5" />
-            <span>{{ t('book.detail.details.personalReview.title') }}</span>
-            <span v-if="hasPersonalNote" class="size-1.5 rounded-full bg-primary" />
-          </button>
         </div>
       </div>
-    </div>
 
-    <!-- Mobile action buttons: single row -->
-    <div class="flex gap-2 mt-3 pt-3 border-t border-border">
-      <div v-if="hasMultipleFiles" class="flex flex-1 h-9 rounded-md overflow-hidden">
-        <button
-          class="flex flex-1 items-center justify-center gap-1.5 bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
-          :disabled="!primaryFile"
-          @click="openBook"
-        >
-          <Headphones v-if="isPrimaryAudio" class="size-4" />
-          <BookOpen v-else class="size-4" />
-          {{ isPrimaryAudio ? t('book.detail.details.listen') : t('book.detail.details.read') }}
-        </button>
-        <div class="w-px bg-primary-foreground/20 shrink-0" />
-        <Popover :open="mobileReadMenuOpen" @update:open="(v) => (mobileReadMenuOpen = v)">
-          <PopoverTrigger as-child>
-            <button
-              class="w-8 shrink-0 flex items-center justify-center bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-              :title="t('book.detail.details.chooseFormat')"
-            >
-              <ChevronDown class="size-3.5" />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent class="w-52 p-1" align="end">
-            <button
-              v-for="file in openableFiles"
-              :key="file.id"
-              class="flex w-full items-center gap-2.5 px-2 py-1.5 rounded text-sm hover:bg-muted transition-colors"
-              @click="openBookFile(file)"
-            >
-              <span
-                class="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0"
-                :style="formatBadgeStyle(file.format ?? '?')"
-                >{{ file.format ?? '?' }}</span
-              >
-              <span class="flex-1 text-left text-muted-foreground text-xs truncate">
-                <template v-if="isMultiTrackAudio && FORMAT_TO_GROUP[file.format!] === 'audio'">{{ t('book.detail.details.audiobook') }}</template>
-                <template v-else>{{ formatFileSize(file.sizeBytes) }}</template>
-              </span>
-              <span v-if="file.role === 'primary' && !isMultiTrackAudio" class="text-[10px] text-primary font-medium shrink-0">{{
-                t('book.detail.details.primary')
-              }}</span>
-            </button>
-          </PopoverContent>
-        </Popover>
-      </div>
-      <button
-        v-else
-        class="flex flex-1 items-center justify-center gap-1.5 h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
-        :disabled="!primaryFile"
-        @click="openBook"
-      >
-        <Headphones v-if="isPrimaryAudio" class="size-4" />
-        <BookOpen v-else class="size-4" />
-        {{ isPrimaryAudio ? t('book.detail.details.listen') : t('book.detail.details.read') }}
-      </button>
-      <Tooltip>
-        <TooltipTrigger as-child>
-          <button
-            class="flex items-center justify-center h-9 w-12 rounded-md border border-input bg-background hover:bg-muted transition-colors disabled:opacity-50"
-            :disabled="!primaryFile"
-            :aria-label="t('book.detail.details.peek')"
-            @click="peekBook"
-          >
-            <Eye class="size-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent>{{ t('book.detail.details.peek') }}</TooltipContent>
-      </Tooltip>
-      <div v-if="hasPermission('library_download')" class="w-12 shrink-0">
-        <BookDownloadButton :files="book.files" :book-id="book.id" />
-      </div>
-      <button
-        class="flex items-center justify-center h-9 w-9 rounded-md border border-input bg-background hover:bg-muted transition-colors"
-        @click="addToCollectionOpen = true"
-      >
-        <Library class="size-3.5" />
-      </button>
-      <button
-        v-if="hasPermission('email_send')"
-        class="flex items-center justify-center h-9 w-9 rounded-md border border-input bg-background hover:bg-muted transition-colors"
-        :aria-label="t('book.detail.details.sendViaEmail')"
-        @click="handleSendFromMenu"
-      >
-        <Send class="size-3.5" />
-      </button>
-      <Popover
-        v-if="canEditMetadata || hasPermission('library_delete_books')"
-        :open="mobileMoreMenuOpen"
-        @update:open="(v) => (mobileMoreMenuOpen = v)"
-      >
-        <PopoverTrigger as-child>
-          <button
-            class="flex items-center justify-center h-9 w-9 rounded-md border border-border bg-background text-foreground hover:bg-muted transition-colors"
-          >
-            <MoreVertical class="size-3.5" />
-          </button>
-        </PopoverTrigger>
-        <PopoverContent class="w-44 p-1" align="end">
-          <button
-            v-if="canEditMetadata"
-            class="flex w-full items-center gap-2 px-2 py-1.5 rounded text-sm text-foreground hover:bg-muted transition-colors"
-            @click="handleOpenResetReadingState"
-          >
-            <RotateCcw class="size-3.5" />
-            Reset reading state
-          </button>
-          <button
-            v-if="hasPermission('library_edit_metadata')"
-            class="flex w-full items-center gap-2 px-2 py-1.5 rounded text-sm hover:bg-muted transition-colors"
-            @click="handleMoveFromMenu"
-          >
-            <FolderInput class="size-3.5" />
-            {{ t('book.move.action') }}
-          </button>
-          <button
-            v-if="hasPermission('library_delete_books')"
-            class="flex w-full items-center gap-2 px-2 py-1.5 rounded text-sm text-destructive hover:bg-destructive/10 transition-colors"
-            @click="handleDeleteFromMenu"
-          >
-            <Trash2 class="size-3.5" />
-            {{ t('common.delete') }}
-          </button>
-        </PopoverContent>
-      </Popover>
-    </div>
-  </div>
-
-  <div class="flex flex-col md:flex-row gap-8">
-    <!-- Left column: cover + actions (desktop only) -->
-    <div class="hidden md:block md:w-56 shrink-0 md:sticky md:top-0 md:self-start">
-      <div class="max-w-48 mx-auto md:max-w-none">
-        <BookCoverSurface
-          class="book-cover-surface--spine-fitted group relative w-full rounded-sm overflow-hidden"
-          :disable-spine="isPrimaryAudio"
-          :is-comic="isPrimaryComic"
-          :class="hasCover && coverLoaded && !coverFailed ? 'cursor-zoom-in' : ''"
-          :style="{ aspectRatio: detailCoverAspectRatio }"
-          @click="handleCoverClick"
-        >
-          <Tooltip>
-            <TooltipTrigger as-child>
-              <button
-                class="absolute top-1.5 right-1.5 z-10 p-1 rounded bg-black/50 text-white opacity-0 group-hover:opacity-100 transition-opacity"
-                @click.stop="openEditCover"
-              >
-                <Pencil class="size-3" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>{{ t('book.detail.details.editCover') }}</TooltipContent>
-          </Tooltip>
-          <BookCoverArtwork
-            :src="coverSrc"
-            :has-cover="hasCover"
-            :title="coverPlaceholderTitle"
-            :author-line="book.authors.map((a) => a.name).join(', ') || null"
-            :is-audio="isPrimaryAudio"
-            :seed="coverSeed"
-            :alt="book.title ?? ''"
-            :frame-aspect-ratio="detailCoverAspectRatio"
-            loading="eager"
-            backdrop-class="blur-lg brightness-50"
-            :spine="!isPrimaryAudio"
-            :is-comic="isPrimaryComic"
-            @load="handleCoverLoad"
-            @error="handleCoverError"
-          />
-        </BookCoverSurface>
-
-        <div class="mt-4 space-y-2">
+      <div ref="coverActionsEl" data-test="cover-actions">
+        <div class="space-y-2">
           <div class="flex gap-2">
             <!-- Read/Play button: split when multiple files, plain when single -->
             <div v-if="hasMultipleFiles" class="flex flex-1 h-9 rounded-md overflow-hidden">
@@ -1609,7 +1546,7 @@ watch(
                 :disabled="!primaryFile"
                 @click="openBook"
               >
-                <BookOpen v-if="isPrimaryAudio" class="size-4" />
+                <Headphones v-if="isPrimaryAudio" class="size-4" />
                 <BookOpen v-else class="size-4" />
                 {{ isPrimaryAudio ? t('book.detail.details.listen') : t('book.detail.details.read') }}
               </button>
@@ -1627,14 +1564,10 @@ watch(
                   <button
                     v-for="file in openableFiles"
                     :key="file.id"
-                    class="flex w-full items-center gap-2.5 px-2 py-1.5 rounded text-sm hover:bg-muted transition-colors"
+                    class="flex w-full items-center gap-2.5 px-2 py-1.5 rounded-xs text-sm hover:bg-muted transition-colors"
                     @click="openBookFile(file)"
                   >
-                    <span
-                      class="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0"
-                      :style="formatBadgeStyle(file.format ?? '?')"
-                      >{{ file.format ?? '?' }}</span
-                    >
+                    <BookFormatChip :format-key="fileFormatKey(file) ?? '?'" class="shrink-0 rounded-xs px-1.5 py-0.5 text-[10px] tracking-wider" />
                     <span class="flex-1 text-left text-muted-foreground text-xs truncate">
                       <template v-if="isMultiTrackAudio && FORMAT_TO_GROUP[file.format!] === 'audio'">{{
                         t('book.detail.details.audiobook')
@@ -1676,7 +1609,7 @@ watch(
 
           <div class="flex gap-2">
             <div v-if="hasPermission('library_download')" class="flex-1">
-              <BookDownloadButton :files="book.files" :book-id="book.id" />
+              <BookDownloadButton :files="book.files" :book-id="book.id" :format-priority="book.formatPriority" />
             </div>
             <button
               class="flex flex-1 items-center justify-center h-9 rounded-md border border-input bg-background text-sm hover:bg-muted transition-colors"
@@ -1692,7 +1625,11 @@ watch(
             >
               <Send class="size-3.5" />
             </button>
-            <Popover v-if="canEditMetadata || hasPermission('library_delete_books')" :open="moreMenuOpen" @update:open="(v) => (moreMenuOpen = v)">
+            <Popover
+              v-if="canManageReadingState || canEditMetadata || canMergeBook || canLinkBook || hasPermission('library_delete_books')"
+              :open="moreMenuOpen"
+              @update:open="(v) => (moreMenuOpen = v)"
+            >
               <PopoverTrigger as-child>
                 <button
                   class="flex flex-1 items-center justify-center h-9 rounded-md border border-border bg-background text-foreground hover:bg-muted transition-colors"
@@ -1700,93 +1637,75 @@ watch(
                   <MoreVertical class="size-3.5" />
                 </button>
               </PopoverTrigger>
-              <PopoverContent class="w-44 p-1" align="end">
+              <PopoverContent class="w-max min-w-44 max-w-[min(18rem,calc(100vw-2rem))] p-1" align="end">
                 <button
-                  v-if="canEditMetadata"
-                  class="flex w-full items-center gap-2 px-2 py-1.5 rounded text-sm text-foreground hover:bg-muted transition-colors"
+                  v-if="canManageReadingState"
+                  class="flex w-full items-center gap-2 px-2 py-1.5 text-start rounded-xs text-sm text-foreground hover:bg-muted transition-colors"
                   @click="handleOpenResetReadingState"
                 >
-                  <RotateCcw class="size-3.5" />
+                  <RotateCcw class="size-3.5 shrink-0" />
                   Reset reading state
                 </button>
                 <button
-                  v-if="hasPermission('library_edit_metadata')"
-                  class="flex w-full items-center gap-2 px-2 py-1.5 rounded text-sm hover:bg-muted transition-colors"
+                  v-if="canEditMetadata"
+                  class="flex w-full items-center gap-2 px-2 py-1.5 text-start rounded-xs text-sm hover:bg-muted transition-colors"
                   @click="handleMoveFromMenu"
                 >
-                  <FolderInput class="size-3.5" />
+                  <FolderInput class="size-3.5 shrink-0" />
                   {{ t('book.move.action') }}
                 </button>
                 <button
+                  v-if="canMergeBook"
+                  class="flex w-full items-center gap-2 px-2 py-1.5 text-start rounded-xs text-sm text-foreground hover:bg-muted transition-colors"
+                  data-testid="detail-merge-book"
+                  @click="handleMergeFromMenu"
+                >
+                  <Combine class="size-3.5 shrink-0" aria-hidden="true" />
+                  {{ t('book.merge.detailAction') }}
+                </button>
+                <button
+                  v-if="canLinkBook"
+                  class="flex w-full items-center gap-2 px-2 py-1.5 text-start rounded-xs text-sm text-foreground hover:bg-muted transition-colors"
+                  data-testid="detail-link-book"
+                  @click="handleLinkFromMenu"
+                >
+                  <Link2 class="size-3.5 shrink-0" aria-hidden="true" />
+                  {{ t('book.link.detailAction') }}
+                </button>
+                <button
+                  v-if="canMakeMainBook"
+                  class="flex w-full items-center gap-2 px-2 py-1.5 text-start rounded-xs text-sm text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+                  :disabled="linkActions.pending.value"
+                  data-testid="detail-make-main-book"
+                  @click="handleMakeMainFromMenu"
+                >
+                  <Crown class="size-3.5 shrink-0" aria-hidden="true" />
+                  {{ t('book.link.makeMain') }}
+                </button>
+                <button
+                  v-if="canUnlinkBook"
+                  class="flex w-full items-center gap-2 px-2 py-1.5 text-start rounded-xs text-sm text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+                  :disabled="linkActions.pending.value"
+                  data-testid="detail-unlink-book"
+                  @click="handleUnlinkFromMenu"
+                >
+                  <Unlink class="size-3.5 shrink-0" aria-hidden="true" />
+                  {{ t('book.link.unlink') }}
+                </button>
+                <button
                   v-if="hasPermission('library_delete_books')"
-                  class="flex w-full items-center gap-2 px-2 py-1.5 rounded text-sm text-destructive hover:bg-destructive/10 transition-colors"
+                  class="flex w-full items-center gap-2 px-2 py-1.5 text-start rounded-xs text-sm text-destructive hover:bg-destructive/10 transition-colors"
                   @click="handleDeleteFromMenu"
                 >
-                  <Trash2 class="size-3.5" />
+                  <Trash2 class="size-3.5 shrink-0" />
                   Delete book
                 </button>
               </PopoverContent>
             </Popover>
           </div>
         </div>
-        <div v-if="leftColumnProgressVisible.length" class="mt-4 space-y-2">
-          <div v-for="row in leftColumnProgressVisible" :key="row.key" class="flex items-center gap-2 cursor-default">
-            <span
-              class="w-11 shrink-0 text-center text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border"
-              :style="row.badgeStyle"
-              >{{ row.label }}</span
-            >
-            <span v-if="row.appName" class="max-w-24 truncate text-[10px] text-muted-foreground" :title="row.appName">{{ row.appName }}</span>
-            <div class="flex-1 h-1 rounded-full bg-muted overflow-hidden">
-              <div
-                class="h-full rounded-full"
-                :style="{
-                  width: `${Math.min(100, row.percentage)}%`,
-                  backgroundColor: row.finished ? 'rgb(34 197 94 / 0.8)' : row.color,
-                  opacity: row.finished ? '1' : '0.75',
-                }"
-              />
-            </div>
-            <span v-if="row.finished" class="text-[11px] font-medium text-green-500 shrink-0">{{ t('book.detail.details.finished') }}</span>
-            <span v-else class="text-[11px] text-muted-foreground shrink-0 w-7 text-right">{{ formatPercent(row.percentage) }}</span>
-            <Tooltip v-if="row.resetFileId != null">
-              <TooltipTrigger as-child>
-                <button
-                  class="ml-1 inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                  :aria-label="t('book.detail.details.resetFileProgress')"
-                  :disabled="isResettingFile(row.resetFileId)"
-                  @click.stop="void handleResetFileProgress(row)"
-                >
-                  <RotateCcw class="size-3" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>{{
-                isResettingFile(row.resetFileId) ? t('book.detail.details.resetting') : t('book.detail.details.resetFileProgress')
-              }}</TooltipContent>
-            </Tooltip>
-          </div>
-          <p v-if="leftColumnProgressOverflow > 0" class="text-[11px] text-muted-foreground">
-            {{ t('book.detail.details.moreCount', { count: leftColumnProgressOverflow }) }}
-          </p>
-        </div>
-        <div v-for="held in resetHeldDevices" :key="held.deviceId" class="mt-2 flex items-start gap-1.5">
-          <TriangleAlert class="size-3 text-amber-500 shrink-0 mt-0.5" aria-hidden="true" />
-          <div class="min-w-0">
-            <p class="text-[11px] text-amber-500">
-              {{ t('book.detail.details.resetHoldNotice', { device: held.device, percent: formatPercent(held.percentage) }) }}
-            </p>
-            <button
-              class="mt-0.5 text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground focus-visible:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="isReleasingHold(held.deviceId)"
-              @click="handleReleaseResetHold(held.deviceId)"
-            >
-              {{ isReleasingHold(held.deviceId) ? t('book.detail.details.resetHoldReleasing') : t('book.detail.details.resetHoldRelease') }}
-            </button>
-            <p v-if="hasReleaseFailed(held.deviceId)" role="alert" class="text-[11px] text-destructive">
-              {{ t('book.detail.details.resetHoldReleaseFailed') }}
-            </p>
-          </div>
-        </div>
+
+        <KoreaderResetHoldNotice v-if="resetHeldDevices.length > 0" class="mt-2" :held="resetHeldDevices" :release="releaseResetHold" />
         <Tooltip v-if="koboAnomaly">
           <TooltipTrigger as-child>
             <div class="mt-2 flex items-center gap-1.5 cursor-help" tabindex="0">
@@ -1799,9 +1718,11 @@ watch(
       </div>
     </div>
 
-    <!-- Right column -->
-    <div class="flex-1 min-w-0">
-      <div class="hidden md:block">
+    <!-- Main column -->
+    <div
+      class="flex min-w-0 flex-col gap-2.5 @min-[46rem]/book-detail:col-start-2 @min-[46rem]/book-detail:row-start-1 @min-[46rem]/book-detail:min-h-0 @min-[46rem]/book-detail:overflow-y-auto"
+    >
+      <div class="hidden @min-[46rem]/book-detail:block">
         <!-- Identity block -->
         <div class="flex items-center flex-wrap gap-x-3 gap-y-2 -mt-1">
           <h1 class="text-2xl font-bold leading-tight">{{ book.title ?? t('book.detail.details.untitled') }}</h1>
@@ -1816,6 +1737,7 @@ watch(
           </Popover>
         </div>
         <p v-if="book.subtitle" class="text-base text-muted-foreground mt-1 leading-snug">{{ book.subtitle }}</p>
+        <BookLinkedChips v-if="isLinked" :books="linkedBooks" class="mt-2" />
 
         <div class="flex items-baseline flex-wrap gap-x-2 gap-y-1 mt-3">
           <p v-if="authorLinks.length" class="text-sm">
@@ -1841,16 +1763,16 @@ watch(
                 <RouterLink
                   v-if="series.seriesId != null"
                   :to="{ name: 'series-detail', params: { seriesId: series.seriesId } }"
-                  class="text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground transition-colors"
+                  class="text-xs px-2 py-0.5 rounded-xs bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground transition-colors"
                   >{{ series.label }}</RouterLink
                 >
-                <span v-else class="text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground">{{ series.label }}</span>
+                <span v-else class="text-xs px-2 py-0.5 rounded-xs bg-muted text-muted-foreground">{{ series.label }}</span>
               </template>
             </span>
           </template>
         </div>
 
-        <div class="mt-3 flex items-center gap-1" @mouseleave="hoverRating = null">
+        <div class="mt-3 flex flex-wrap items-center gap-x-1 gap-y-1.5" @mouseleave="hoverRating = null">
           <div class="flex items-center gap-1">
             <template v-if="canEditMetadata">
               <Tooltip v-for="star in ratingStars" :key="star">
@@ -1922,6 +1844,197 @@ watch(
         </div>
       </div>
 
+      <!-- Format badges + provider links -->
+      <div v-if="formatEntries.length || providerLinks.length || unlinkedCommunityBadges.length" class="flex flex-wrap items-center gap-2">
+        <BookFormatChip
+          v-for="entry in formatEntries"
+          :key="entry.key"
+          :format-key="entry.key"
+          :primary="entry.primary"
+          class="rounded-xs px-2 py-0.5 text-[10px] tracking-wider"
+        />
+        <ReadAloudInviteChip v-if="readAloudInvite" @create="handleCreateReadAloud" />
+        <Popover v-if="showReadAloudSync">
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              data-test="read-aloud-sync-trigger"
+              class="inline-flex h-6 items-center overflow-hidden rounded-md border border-border text-[11px] font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :aria-label="readAloudSyncChipAria"
+              :title="readAloudSyncChipAria"
+            >
+              <span class="flex size-6 items-center justify-center">
+                <ReadAloudSyncMeter :aligned="readAloudSyncAligned" :muted="readAloudSync.state === 'disabled'" />
+              </span>
+              <span class="flex h-full items-center gap-1.5 border-l border-border/60 bg-background/50 pl-1.5 pr-1">
+                {{ readAloudSyncChipLabel }}
+                <span v-if="readAloudSyncNeedsAttention" data-test="read-aloud-sync-attention" class="size-1.5 shrink-0 rounded-full bg-warning" />
+                <ChevronDown class="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              </span>
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="start" class="w-80 max-w-[calc(100vw-2rem)] p-3">
+            <div data-test="read-aloud-sync">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <p class="text-xs font-semibold text-foreground">{{ t('book.detail.details.readAloudSync.title') }}</p>
+                <span class="text-[11px] text-muted-foreground">{{ readAloudSyncStatus }}</span>
+              </div>
+              <p class="mt-1 text-xs text-muted-foreground">
+                {{ offersReadAloudInSync ? t('book.detail.details.readAloudSync.noneYet') : readAloudSyncDescription }}
+              </p>
+              <p v-if="readAloudSyncAudiobookNote" data-test="read-aloud-sync-audiobook-note" class="mt-1 text-xs text-muted-foreground">
+                {{ readAloudSyncAudiobookNote }}
+              </p>
+              <p v-if="readAloudSyncError" class="mt-1 text-xs text-destructive" role="status" aria-live="polite">
+                {{ readAloudSyncError }}
+              </p>
+              <div class="mt-3 flex justify-end">
+                <button
+                  v-if="offersReadAloudInSync"
+                  type="button"
+                  data-test="read-aloud-sync-create"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-primary/60 bg-primary/10 px-2.5 py-1 text-xs font-semibold text-foreground transition-colors hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="handleCreateReadAloud"
+                >
+                  <ReadAloudSparkles class="size-3.5 text-primary" />
+                  {{ t('book.detail.files.readAloud.action') }}
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  data-test="read-aloud-sync-toggle"
+                  class="rounded-md border border-input px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  :disabled="readAloudSyncSaving"
+                  @click="handleToggleReadAloudSync"
+                >
+                  {{ readAloudSyncToggleLabel }}
+                </button>
+              </div>
+            </div>
+          </PopoverContent>
+        </Popover>
+        <div v-if="providerLinks.length || unlinkedCommunityBadges.length" class="flex items-center flex-wrap gap-2 w-full sm:w-auto sm:shrink-0">
+          <div class="hidden sm:block w-px h-3.5 bg-border" />
+          <a
+            v-for="link in providerLinks"
+            :key="link.key"
+            :href="link.url"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="communityRatingByProvider[link.key]?.tooltip ?? t('book.detail.details.openIn', { provider: link.label })"
+            class="inline-flex h-6 items-center overflow-hidden rounded-md border transition-colors hover:bg-muted/60"
+            :style="providerLinkStyle(link.key)"
+          >
+            <span class="flex size-6 items-center justify-center">
+              <img
+                v-if="link.iconUrl && !providerIconErrors[link.key]"
+                :src="link.iconUrl"
+                :alt="link.label"
+                class="size-3.5 rounded-[2px] object-contain"
+                loading="lazy"
+                @error="providerIconErrors[link.key] = true"
+              />
+              <span v-else class="text-[8px] font-bold leading-none text-foreground">{{ link.fallback }}</span>
+            </span>
+            <span
+              v-if="communityRatingByProvider[link.key]"
+              class="flex h-full items-center border-l border-border/60 bg-background/50 px-1.5 text-[11px] font-semibold tabular-nums text-foreground"
+            >
+              {{ communityRatingByProvider[link.key]?.score }}
+            </span>
+          </a>
+          <span
+            v-for="badge in unlinkedCommunityBadges"
+            :key="badge.key"
+            :title="badge.tooltip"
+            class="inline-flex h-6 items-center overflow-hidden rounded-md border"
+            :style="providerLinkStyle(badge.key)"
+          >
+            <span class="flex size-6 items-center justify-center">
+              <img
+                v-if="!providerIconErrors[badge.key]"
+                :src="badge.iconUrl ?? undefined"
+                :alt="badge.label"
+                class="size-3.5 rounded-[2px] object-contain"
+                loading="lazy"
+                @error="providerIconErrors[badge.key] = true"
+              />
+              <span v-else class="text-[8px] font-bold leading-none text-foreground">{{ badge.fallback }}</span>
+            </span>
+            <span
+              class="flex h-full items-center border-l border-border/60 bg-background/50 px-1.5 text-[11px] font-semibold tabular-nums text-foreground"
+            >
+              {{ badge.score }}
+            </span>
+          </span>
+        </div>
+      </div>
+
+      <!-- Genres + Tags -->
+      <div v-if="book.genres.length || book.tags.length" class="space-y-1">
+        <div v-if="book.genres.length" class="relative">
+          <div data-test="genre-row" class="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap">
+            <span
+              v-for="(genre, index) in displayedGenres"
+              :key="`${genre}-${index}`"
+              data-test="visible-genre"
+              class="chip-genre shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium"
+            >
+              {{ genre }}
+            </span>
+            <Popover v-if="genreHiddenCount > 0">
+              <PopoverTrigger as-child>
+                <button
+                  type="button"
+                  data-test="genre-overflow-trigger"
+                  class="shrink-0 whitespace-nowrap rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  :aria-label="t('book.detail.details.moreCount', { count: genreHiddenCount })"
+                >
+                  +{{ genreHiddenCount }}
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" class="w-80 max-w-[calc(100vw-2rem)] p-3">
+                <div data-test="hidden-genres" class="flex flex-wrap gap-1.5">
+                  <span
+                    v-for="(genre, index) in hiddenGenres"
+                    :key="`hidden-${genre}-${index}`"
+                    class="chip-genre rounded-md px-2 py-0.5 text-[11px] font-medium"
+                  >
+                    {{ genre }}
+                  </span>
+                </div>
+              </PopoverContent>
+            </Popover>
+          </div>
+          <div
+            ref="genreMeasureContainer"
+            aria-hidden="true"
+            class="pointer-events-none invisible absolute left-0 top-0 -z-10 flex w-full items-center gap-1.5 overflow-hidden whitespace-nowrap"
+          >
+            <span
+              v-for="(genre, index) in book.genres"
+              :key="`measure-${genre}-${index}`"
+              data-genre-pill="true"
+              class="chip-genre shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium"
+            >
+              {{ genre }}
+            </span>
+            <button
+              type="button"
+              tabindex="-1"
+              data-genre-more-measure="true"
+              class="shrink-0 whitespace-nowrap rounded-md border border-border px-2 py-0.5 text-[11px] font-medium"
+            >
+              +{{ book.genres.length }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="book.tags.length" class="flex flex-wrap gap-1.5">
+          <span v-for="tag in book.tags" :key="tag" class="chip-tag rounded-md border px-2 py-0.5 text-[11px] font-medium"> #{{ tag }} </span>
+        </div>
+      </div>
+
       <!-- Collapsible Personal Review container -->
       <div v-show="showPersonalReview" class="mt-4 p-4 border border-border/70 rounded-lg bg-card/60 shadow-sm">
         <div class="mb-3 flex items-start justify-between gap-3">
@@ -1937,7 +2050,7 @@ watch(
             <TooltipTrigger as-child>
               <button
                 type="button"
-                class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-input text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-xs border border-input text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 :aria-label="t('book.detail.details.personalReview.editAria')"
                 @click="startPersonalNoteEdit"
               >
@@ -1963,7 +2076,7 @@ watch(
                 <TooltipTrigger as-child>
                   <button
                     type="button"
-                    class="inline-flex h-8 w-8 items-center justify-center rounded border border-input text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    class="inline-flex h-8 w-8 items-center justify-center rounded-xs border border-input text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                     :aria-label="t('book.detail.details.personalReview.clearAria')"
                     :disabled="!canClearPersonalNoteDraft || personalNoteSaving"
                     @click="clearPersonalNoteDraft"
@@ -1977,7 +2090,7 @@ watch(
                 <TooltipTrigger as-child>
                   <button
                     type="button"
-                    class="inline-flex h-8 w-8 items-center justify-center rounded border border-input text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    class="inline-flex h-8 w-8 items-center justify-center rounded-xs border border-input text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                     :aria-label="t('book.detail.details.personalReview.cancelEditAria')"
                     :disabled="personalNoteSaving"
                     @click="cancelPersonalNoteEdit"
@@ -1989,7 +2102,7 @@ watch(
               </Tooltip>
               <button
                 type="button"
-                class="inline-flex h-8 items-center gap-1.5 rounded bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                class="inline-flex h-8 items-center gap-1.5 rounded-xs bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                 :disabled="!canSavePersonalNote"
                 @click="savePersonalNote"
               >
@@ -2014,422 +2127,283 @@ watch(
         </button>
       </div>
 
-      <!-- Format badges + provider links -->
-      <div v-if="formats.length || providerLinks.length || unlinkedCommunityBadges.length" class="flex items-center flex-wrap gap-2 mt-0 md:mt-4">
-        <span
-          v-for="fmt in formats"
-          :key="fmt"
-          class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
-          :style="formatBadgeStyle(fmt)"
-        >
-          <Tooltip v-if="fmt === primaryFile?.format">
-            <TooltipTrigger as-child>
-              <span class="size-1.5 rounded-full shrink-0" :style="{ backgroundColor: 'currentColor' }" />
-            </TooltipTrigger>
-            <TooltipContent>{{ t('book.detail.details.primaryFormat') }}</TooltipContent>
-          </Tooltip>
-          {{ fmt }}
-        </span>
-        <div v-if="providerLinks.length || unlinkedCommunityBadges.length" class="flex items-center flex-wrap gap-2 w-full sm:w-auto sm:shrink-0">
-          <div class="hidden sm:block w-px h-3.5 bg-border" />
-          <a
-            v-for="link in providerLinks"
-            :key="link.key"
-            :href="link.url"
-            target="_blank"
-            rel="noopener noreferrer"
-            :title="communityRatingByProvider[link.key]?.tooltip ?? t('book.detail.details.openIn', { provider: link.label })"
-            class="inline-flex h-7 items-center overflow-hidden rounded-md border transition-colors hover:bg-muted/60"
-            :style="providerLinkStyle(link.key)"
-          >
-            <span class="flex size-7 items-center justify-center">
-              <img
-                v-if="!providerIconErrors[link.key]"
-                :src="link.iconUrl"
-                :alt="link.label"
-                class="size-4 rounded-[2px] object-contain"
-                loading="lazy"
-                @error="providerIconErrors[link.key] = true"
-              />
-              <span v-else class="text-[8px] font-bold leading-none text-foreground">{{ link.fallback }}</span>
-            </span>
-            <span
-              v-if="communityRatingByProvider[link.key]"
-              class="flex h-full items-center border-l border-border/60 bg-background/50 px-1.5 text-xs font-semibold tabular-nums text-foreground"
+      <section class="rounded-xl border border-border bg-card px-4 py-3.5">
+        <div>
+          <div class="flex items-baseline gap-3">
+            <p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              {{ t('book.detail.details.synopsis') }}
+            </p>
+            <button
+              v-if="book.description"
+              type="button"
+              class="ml-auto shrink-0 text-[11px] font-semibold text-primary transition-colors hover:underline"
+              :aria-controls="`book-${book.id}-synopsis`"
+              :aria-expanded="descriptionExpanded"
+              @click="toggleDescription"
             >
-              {{ communityRatingByProvider[link.key]?.score }}
-            </span>
-          </a>
-          <span
-            v-for="badge in unlinkedCommunityBadges"
-            :key="badge.key"
-            :title="badge.tooltip"
-            class="inline-flex h-7 items-center overflow-hidden rounded-md border"
-            :style="providerLinkStyle(badge.key)"
-          >
-            <span class="flex size-7 items-center justify-center">
-              <img
-                v-if="!providerIconErrors[badge.key]"
-                :src="badge.iconUrl ?? undefined"
-                :alt="badge.label"
-                class="size-4 rounded-[2px] object-contain"
-                loading="lazy"
-                @error="providerIconErrors[badge.key] = true"
-              />
-              <span v-else class="text-[8px] font-bold leading-none text-foreground">{{ badge.fallback }}</span>
-            </span>
-            <span
-              class="flex h-full items-center border-l border-border/60 bg-background/50 px-1.5 text-xs font-semibold tabular-nums text-foreground"
-            >
-              {{ badge.score }}
-            </span>
-          </span>
-        </div>
-      </div>
-
-      <!-- Genres + Tags -->
-      <div v-if="book.genres.length || book.tags.length" class="mt-4 space-y-1.5">
-        <div v-if="book.genres.length" class="relative">
-          <div data-test="genre-row" class="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap">
-            <span
-              v-for="(genre, index) in displayedGenres"
-              :key="`${genre}-${index}`"
-              data-test="visible-genre"
-              class="shrink-0 rounded-full border border-primary/40 px-2.5 py-0.5 text-xs text-primary"
-            >
-              {{ genre }}
-            </span>
-            <Popover v-if="genreHiddenCount > 0">
-              <PopoverTrigger as-child>
-                <button
-                  type="button"
-                  data-test="genre-overflow-trigger"
-                  class="shrink-0 whitespace-nowrap rounded-full border border-border px-2.5 py-0.5 text-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                  :aria-label="t('book.detail.details.moreCount', { count: genreHiddenCount })"
-                >
-                  +{{ genreHiddenCount }}
-                </button>
-              </PopoverTrigger>
-              <PopoverContent align="start" class="w-80 max-w-[calc(100vw-2rem)] p-3">
-                <div data-test="hidden-genres" class="flex flex-wrap gap-1.5">
-                  <span
-                    v-for="(genre, index) in hiddenGenres"
-                    :key="`hidden-${genre}-${index}`"
-                    class="rounded-full border border-primary/40 px-2.5 py-0.5 text-xs text-primary"
-                  >
-                    {{ genre }}
-                  </span>
-                </div>
-              </PopoverContent>
-            </Popover>
+              {{ descriptionExpanded ? t('book.detail.details.showLess') : t('book.detail.details.showMore') }}
+            </button>
           </div>
           <div
-            ref="genreMeasureContainer"
-            aria-hidden="true"
-            class="pointer-events-none invisible absolute left-0 top-0 -z-10 flex w-full items-center gap-1.5 whitespace-nowrap"
-          >
-            <span
-              v-for="(genre, index) in book.genres"
-              :key="`measure-${genre}-${index}`"
-              data-genre-pill="true"
-              class="shrink-0 rounded-full border border-primary/40 px-2.5 py-0.5 text-xs text-primary"
-            >
-              {{ genre }}
-            </span>
-            <button
-              type="button"
-              tabindex="-1"
-              data-genre-more-measure="true"
-              class="shrink-0 whitespace-nowrap rounded-full border border-border px-2.5 py-0.5 text-xs font-medium"
-            >
-              +{{ book.genres.length }}
-            </button>
-          </div>
+            v-if="book.description"
+            :id="`book-${book.id}-synopsis`"
+            data-test="synopsis-copy"
+            class="mt-2 text-sm leading-relaxed text-foreground"
+            :class="{ 'synopsis-copy--clamped': !descriptionExpanded }"
+            v-html="safeDescription"
+          />
+          <p v-else class="mt-2 text-sm italic text-muted-foreground">{{ t('book.detail.details.noDescription') }}</p>
         </div>
-
-        <div v-if="book.tags.length" class="flex flex-wrap gap-1.5">
-          <span
-            v-for="tag in book.tags"
-            :key="tag"
-            class="text-xs px-2.5 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-          >
-            #{{ tag }}
-          </span>
-        </div>
-      </div>
-
-      <!-- Metadata grid -->
-      <dl class="mt-5 pt-5 border-t border-border grid grid-cols-2 xl:grid-cols-4 gap-x-6 gap-y-4">
-        <div class="min-w-0">
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.publisher') }}</dt>
-          <template v-if="book.publisher">
-            <Tooltip>
-              <TooltipTrigger as-child>
-                <dd class="text-sm text-foreground mt-0.5 truncate cursor-default">{{ book.publisher }}</dd>
-              </TooltipTrigger>
-              <TooltipContent>{{ book.publisher }}</TooltipContent>
-            </Tooltip>
-          </template>
-          <dd v-else class="text-sm text-foreground mt-0.5">-</dd>
-        </div>
-        <div>
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.published') }}</dt>
-          <dd class="text-sm text-foreground mt-0.5">{{ book.publishedDate ? formatDisplayDate(book.publishedDate) : book.publishedYear || '-' }}</dd>
-        </div>
-        <div>
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.language') }}</dt>
-          <dd class="text-sm text-foreground mt-0.5 capitalize">{{ book.language || '-' }}</dd>
-        </div>
-        <div>
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.pages') }}</dt>
-          <dd class="text-sm text-foreground mt-0.5">{{ book.pageCount || '-' }}</dd>
-        </div>
-        <div v-if="book.audioMetadata?.durationSeconds != null">
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.duration') }}</dt>
-          <dd class="text-sm text-foreground mt-0.5">{{ formatDuration(book.audioMetadata.durationSeconds) }}</dd>
-        </div>
-        <div v-if="book.audioMetadata?.durationSeconds != null">
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.edition') }}</dt>
-          <dd class="text-sm text-foreground mt-0.5">
-            {{ book.audioMetadata.abridged ? t('book.detail.details.abridged') : t('book.detail.details.unabridged') }}
-          </dd>
-        </div>
-        <div class="min-w-0">
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.isbn') }}</dt>
-          <dd v-if="book.isbn13 || book.isbn10" class="text-sm text-foreground mt-0.5 font-mono space-y-0.5">
-            <div v-if="book.isbn13">{{ book.isbn13 }}</div>
-            <div v-if="book.isbn10" :class="book.isbn13 ? 'text-xs text-muted-foreground' : ''">{{ book.isbn10 }}</div>
-          </dd>
-          <dd v-else class="text-sm text-foreground mt-0.5">-</dd>
-        </div>
-        <div>
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.fileSize') }}</dt>
-          <dd class="text-sm text-foreground mt-0.5">{{ formatFileSize(primaryFile?.sizeBytes) }}</dd>
-        </div>
-        <div class="min-w-0">
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.library') }}</dt>
-          <dd class="text-sm text-foreground mt-0.5">{{ book.libraryName || '-' }}</dd>
-        </div>
-        <div class="min-w-0">
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.added') }}</dt>
-          <template v-if="editingAddedDate">
-            <dd class="mt-1">
-              <div class="flex items-center gap-1.5">
-                <input
-                  ref="addedDateInput"
-                  v-model="draftAddedDate"
-                  type="date"
-                  required
-                  :max="todayDateInput"
-                  :aria-label="t('book.detail.details.added')"
-                  :aria-invalid="addedDateError ? 'true' : undefined"
-                  :aria-describedby="addedDateError ? 'added-date-error' : undefined"
-                  class="w-full rounded border border-input bg-background px-2 py-1 text-xs text-foreground"
-                  @input="clearAddedDateError"
-                />
-                <button
-                  class="h-6 rounded bg-primary px-2 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-                  :disabled="!canSaveAddedDate"
-                  @click="saveAddedDate"
-                >
-                  {{ savingAddedDate ? t('book.detail.details.saving') : t('common.save') }}
-                </button>
-                <button
-                  class="inline-flex h-6 w-6 items-center justify-center rounded border border-destructive/30 text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
-                  :title="t('book.detail.details.cancelDateAddedEdit')"
-                  :aria-label="t('book.detail.details.cancelDateAddedEdit')"
-                  :disabled="savingAddedDate"
-                  @click="cancelAddedDateEdit"
-                >
-                  <X class="size-3" />
-                </button>
-              </div>
-              <p v-if="addedDateError" id="added-date-error" role="alert" class="mt-1 text-[10px] text-destructive">{{ addedDateError }}</p>
-            </dd>
-          </template>
-          <dd v-else class="mt-0.5 flex items-center gap-1.5">
-            <Tooltip>
-              <TooltipTrigger as-child>
-                <span class="text-sm text-foreground truncate cursor-default">{{ formatDate(book.addedAt) }}</span>
-              </TooltipTrigger>
-              <TooltipContent>{{ formatAddedDateTime(book.addedAt) }}</TooltipContent>
-            </Tooltip>
-            <button
-              v-if="canEditMetadata"
-              ref="addedDateEditButton"
-              class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-              :title="t('book.detail.details.editDateAdded')"
-              :aria-label="t('book.detail.details.editDateAdded')"
-              :disabled="isEditingAnyDate || savingAddedDate || savingReadingDates"
-              @click="startEditingAddedDate"
-            >
-              <Pencil class="size-3" />
-            </button>
-          </dd>
-        </div>
-        <HardcoverBookSyncGridItem :book-id="book.id" />
-        <StorygraphBookSyncGridItem :book-id="book.id" />
-        <div class="min-w-0">
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.dateStarted') }}</dt>
-          <template v-if="isEditingReadingDate('startedAt')">
-            <dd class="mt-1">
-              <div class="flex items-center gap-1.5">
-                <input
-                  v-model="draftReadingDates.startedAt"
-                  type="date"
-                  :max="todayDateInput"
-                  class="w-full rounded border border-input bg-background px-2 py-1 text-xs text-foreground"
-                />
-                <button
-                  class="h-6 rounded bg-primary px-2 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-                  :disabled="!hasReadingDateFieldChanges('startedAt') || savingReadingDates"
-                  @click="saveReadingDateField('startedAt')"
-                >
-                  {{ savingReadingDates ? t('book.detail.details.saving') : t('common.save') }}
-                </button>
-                <button
-                  class="inline-flex h-6 w-6 items-center justify-center rounded border border-destructive/30 text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
-                  :title="t('book.detail.details.cancelDateStartedEdit')"
-                  :aria-label="t('book.detail.details.cancelDateStartedEdit')"
-                  :disabled="savingReadingDates"
-                  @click="cancelReadingDateEdit('startedAt')"
-                >
-                  <X class="size-3" />
-                </button>
-              </div>
-              <p v-if="readingDatesError" class="mt-1 text-[10px] text-rose-500">{{ readingDatesError }}</p>
-            </dd>
-          </template>
-          <dd v-else class="mt-0.5 flex items-center gap-1.5">
-            <span class="text-sm text-foreground">{{ formatDisplayDate(savedReadingDates.startedAt) }}</span>
-            <button
-              class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-              :title="t('book.detail.details.editDateStarted')"
-              :disabled="isEditingAnyDate || savingReadingDates"
-              @click="startEditingReadingDate('startedAt')"
-            >
-              <Pencil class="size-3" />
-            </button>
-          </dd>
-        </div>
-        <div class="min-w-0">
-          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">{{ t('book.detail.details.dateFinished') }}</dt>
-          <template v-if="isEditingReadingDate('finishedAt')">
-            <dd class="mt-1">
-              <div class="flex items-center gap-1.5">
-                <input
-                  v-model="draftReadingDates.finishedAt"
-                  type="date"
-                  :max="todayDateInput"
-                  class="w-full rounded border border-input bg-background px-2 py-1 text-xs text-foreground"
-                />
-                <button
-                  class="h-6 rounded bg-primary px-2 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-                  :disabled="!hasReadingDateFieldChanges('finishedAt') || savingReadingDates"
-                  @click="saveReadingDateField('finishedAt')"
-                >
-                  {{ savingReadingDates ? t('book.detail.details.saving') : t('common.save') }}
-                </button>
-                <button
-                  class="inline-flex h-6 w-6 items-center justify-center rounded border border-destructive/30 text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
-                  :title="t('book.detail.details.cancelDateFinishedEdit')"
-                  :aria-label="t('book.detail.details.cancelDateFinishedEdit')"
-                  :disabled="savingReadingDates"
-                  @click="cancelReadingDateEdit('finishedAt')"
-                >
-                  <X class="size-3" />
-                </button>
-              </div>
-              <p v-if="readingDatesError" class="mt-1 text-[10px] text-rose-500">{{ readingDatesError }}</p>
-            </dd>
-          </template>
-          <dd v-else class="mt-0.5 flex items-center gap-1.5">
-            <span class="text-sm text-foreground">{{ formatDisplayDate(savedReadingDates.finishedAt) }}</span>
-            <button
-              class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-              :title="t('book.detail.details.editDateFinished')"
-              :disabled="isEditingAnyDate || savingReadingDates"
-              @click="startEditingReadingDate('finishedAt')"
-            >
-              <Pencil class="size-3" />
-            </button>
-          </dd>
-        </div>
-      </dl>
-
-      <!-- Mobile-only: reading progress from left column -->
-      <div
-        v-if="leftColumnProgressVisible.length || koboAnomaly || resetHeldDevices.length"
-        class="md:hidden mt-6 pt-5 border-t border-border space-y-3"
-      >
-        <div v-if="leftColumnProgressVisible.length" class="space-y-2">
-          <div v-for="row in leftColumnProgressVisible" :key="row.key" class="flex items-center gap-2 cursor-default">
-            <span
-              class="w-11 shrink-0 text-center text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border"
-              :style="row.badgeStyle"
-              >{{ row.label }}</span
-            >
-            <span v-if="row.appName" class="max-w-24 truncate text-[10px] text-muted-foreground" :title="row.appName">{{ row.appName }}</span>
-            <div class="flex-1 h-1 rounded-full bg-muted overflow-hidden">
-              <div
-                class="h-full rounded-full"
-                :style="{
-                  width: `${Math.min(100, row.percentage)}%`,
-                  backgroundColor: row.finished ? 'rgb(34 197 94 / 0.8)' : row.color,
-                  opacity: row.finished ? '1' : '0.75',
-                }"
-              />
-            </div>
-            <span v-if="row.finished" class="text-[11px] font-medium text-green-500 shrink-0">{{ t('book.detail.details.finished') }}</span>
-            <span v-else class="text-[11px] text-muted-foreground shrink-0 w-7 text-right">{{ formatPercent(row.percentage) }}</span>
-            <Tooltip v-if="row.resetFileId != null">
-              <TooltipTrigger as-child>
-                <button
-                  class="ml-1 inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                  :aria-label="t('book.detail.details.resetFileProgress')"
-                  :disabled="isResettingFile(row.resetFileId)"
-                  @click.stop="void handleResetFileProgress(row)"
-                >
-                  <RotateCcw class="size-3" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>{{
-                isResettingFile(row.resetFileId) ? t('book.detail.details.resetting') : t('book.detail.details.resetFileProgress')
-              }}</TooltipContent>
-            </Tooltip>
-          </div>
-          <p v-if="leftColumnProgressOverflow > 0" class="text-[11px] text-muted-foreground">
-            {{ t('book.detail.details.moreCount', { count: leftColumnProgressOverflow }) }}
+        <div class="mt-3 flex items-center gap-2.5 border-t border-border pt-3">
+          <p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {{ t('book.detail.details.yourReview') }}
           </p>
+          <p class="truncate text-[11px] text-muted-foreground">
+            {{ hasPersonalNote ? personalNotePreview : t('book.detail.details.reviewNotWritten') }}
+          </p>
+          <button
+            type="button"
+            class="ml-auto inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-input px-2.5 text-xs font-medium transition-colors hover:bg-muted"
+            @click="startVisiblePersonalNoteEdit"
+          >
+            <Pencil class="size-3" />
+            {{ t('book.detail.details.writeReview') }}
+          </button>
         </div>
-        <div v-for="held in resetHeldDevices" :key="held.deviceId" class="mt-2 flex items-start gap-1.5">
-          <TriangleAlert class="size-3 text-amber-500 shrink-0 mt-0.5" aria-hidden="true" />
-          <div class="min-w-0">
-            <p class="text-[11px] text-amber-500">
-              {{ t('book.detail.details.resetHoldNotice', { device: held.device, percent: formatPercent(held.percentage) }) }}
-            </p>
-            <button
-              class="mt-0.5 text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground focus-visible:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="isReleasingHold(held.deviceId)"
-              @click="handleReleaseResetHold(held.deviceId)"
-            >
-              {{ isReleasingHold(held.deviceId) ? t('book.detail.details.resetHoldReleasing') : t('book.detail.details.resetHoldRelease') }}
-            </button>
-            <p v-if="hasReleaseFailed(held.deviceId)" role="alert" class="text-[11px] text-destructive">
-              {{ t('book.detail.details.resetHoldReleaseFailed') }}
-            </p>
+      </section>
+
+      <BookReadingActivityCard
+        class="@min-[46rem]/book-detail:flex-1"
+        :stats="readingStats"
+        :sessions="readingSessions"
+        :loading="readingLogLoading"
+      />
+    </div>
+
+    <!-- Detail rail -->
+    <div
+      class="flex min-w-0 flex-col gap-3 @min-[46rem]/book-detail:col-start-3 @min-[46rem]/book-detail:row-start-1 @min-[46rem]/book-detail:min-h-0 @min-[46rem]/book-detail:overflow-y-auto"
+    >
+      <section
+        class="flex min-h-0 flex-col rounded-xl border border-border bg-card px-4 pt-3 pb-2 @min-[46rem]/book-detail:flex-1"
+        :aria-label="t('book.detail.details.detailsHeading')"
+      >
+        <h3 class="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {{ t('book.detail.details.detailsHeading') }}
+        </h3>
+
+        <dl class="flex min-h-0 flex-1 flex-col overflow-y-auto">
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.publisher') }}</dt>
+            <template v-if="book.publisher">
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <dd class="truncate text-[13px] font-medium cursor-default">{{ book.publisher }}</dd>
+                </TooltipTrigger>
+                <TooltipContent>{{ book.publisher }}</TooltipContent>
+              </Tooltip>
+            </template>
+            <dd v-else class="truncate text-[13px] font-medium">-</dd>
           </div>
-        </div>
-        <Tooltip v-if="koboAnomaly">
-          <TooltipTrigger as-child>
-            <div class="flex items-center gap-1.5 cursor-help" tabindex="0">
-              <TriangleAlert class="size-3 text-amber-500 shrink-0" />
-              <p class="text-[11px] text-amber-500">{{ koboAnomaly.label }}</p>
-            </div>
-          </TooltipTrigger>
-          <TooltipContent>{{ koboAnomaly.tooltip }}</TooltipContent>
-        </Tooltip>
-      </div>
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.published') }}</dt>
+            <dd class="truncate text-[13px] font-medium">
+              {{ book.publishedDate ? formatDisplayDate(book.publishedDate) : book.publishedYear || '-' }}
+            </dd>
+          </div>
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.language') }}</dt>
+            <dd class="truncate text-[13px] font-medium capitalize">{{ book.language || '-' }}</dd>
+          </div>
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.pages') }}</dt>
+            <dd class="truncate text-[13px] font-medium">{{ book.pageCount || '-' }}</dd>
+          </div>
+          <div
+            v-if="book.audioMetadata?.durationSeconds != null"
+            class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0"
+          >
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.duration') }}</dt>
+            <dd class="truncate text-[13px] font-medium">{{ formatDuration(book.audioMetadata.durationSeconds) }}</dd>
+          </div>
+          <div
+            v-if="book.audioMetadata?.durationSeconds != null"
+            class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0"
+          >
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.edition') }}</dt>
+            <dd class="truncate text-[13px] font-medium">
+              {{ book.audioMetadata.abridged ? t('book.detail.details.abridged') : t('book.detail.details.unabridged') }}
+            </dd>
+          </div>
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.isbn') }}</dt>
+            <dd v-if="book.isbn13 || book.isbn10" class="truncate text-right text-[13px] font-medium font-mono">
+              <div v-if="book.isbn13">{{ book.isbn13 }}</div>
+              <div v-if="book.isbn10" :class="book.isbn13 ? 'text-xs text-muted-foreground' : ''">{{ book.isbn10 }}</div>
+            </dd>
+            <dd v-else class="truncate text-[13px] font-medium">-</dd>
+          </div>
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.fileSize') }}</dt>
+            <dd class="truncate text-[13px] font-medium">{{ formatFileSize(primaryFile?.sizeBytes) }}</dd>
+          </div>
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.library') }}</dt>
+            <dd class="truncate text-[13px] font-medium">{{ book.libraryName || '-' }}</dd>
+          </div>
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.added') }}</dt>
+            <template v-if="editingAddedDate">
+              <dd class="mt-1">
+                <div class="flex items-center gap-1.5">
+                  <input
+                    ref="addedDateInput"
+                    v-model="draftAddedDate"
+                    type="date"
+                    required
+                    :max="todayDateInput"
+                    :aria-label="t('book.detail.details.added')"
+                    :aria-invalid="addedDateError ? 'true' : undefined"
+                    :aria-describedby="addedDateError ? 'added-date-error' : undefined"
+                    class="w-full rounded-xs border border-input bg-background px-2 py-1 text-xs text-foreground"
+                    @input="clearAddedDateError"
+                  />
+                  <button
+                    class="h-6 rounded-xs bg-primary px-2 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                    :disabled="!canSaveAddedDate"
+                    @click="saveAddedDate"
+                  >
+                    {{ savingAddedDate ? t('book.detail.details.saving') : t('common.save') }}
+                  </button>
+                  <button
+                    class="inline-flex h-6 w-6 items-center justify-center rounded-xs border border-destructive/30 text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                    :title="t('book.detail.details.cancelDateAddedEdit')"
+                    :aria-label="t('book.detail.details.cancelDateAddedEdit')"
+                    :disabled="savingAddedDate"
+                    @click="cancelAddedDateEdit"
+                  >
+                    <X class="size-3" />
+                  </button>
+                </div>
+                <p v-if="addedDateError" id="added-date-error" role="alert" class="mt-1 text-[10px] text-destructive">{{ addedDateError }}</p>
+              </dd>
+            </template>
+            <dd v-else class="flex items-center gap-1.5">
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <span class="truncate text-[13px] font-medium cursor-default">{{ formatDate(book.addedAt) }}</span>
+                </TooltipTrigger>
+                <TooltipContent>{{ formatAddedDateTime(book.addedAt) }}</TooltipContent>
+              </Tooltip>
+              <button
+                v-if="canEditMetadata"
+                ref="addedDateEditButton"
+                class="p-0.5 rounded-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                :title="t('book.detail.details.editDateAdded')"
+                :aria-label="t('book.detail.details.editDateAdded')"
+                :disabled="isEditingAnyDate || savingAddedDate || savingReadingDates"
+                @click="startEditingAddedDate"
+              >
+                <Pencil class="size-3" />
+              </button>
+            </dd>
+          </div>
+          <HardcoverBookSyncGridItem :book-id="book.id" />
+          <StorygraphBookSyncGridItem :book-id="book.id" />
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.dateStarted') }}</dt>
+            <template v-if="isEditingReadingDate('startedAt')">
+              <dd class="mt-1">
+                <div class="flex items-center gap-1.5">
+                  <input
+                    v-model="draftReadingDates.startedAt"
+                    type="date"
+                    :max="todayDateInput"
+                    class="w-full rounded-xs border border-input bg-background px-2 py-1 text-xs text-foreground"
+                  />
+                  <button
+                    class="h-6 rounded-xs bg-primary px-2 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                    :disabled="!hasReadingDateFieldChanges('startedAt') || savingReadingDates"
+                    @click="saveReadingDateField('startedAt')"
+                  >
+                    {{ savingReadingDates ? t('book.detail.details.saving') : t('common.save') }}
+                  </button>
+                  <button
+                    class="inline-flex h-6 w-6 items-center justify-center rounded-xs border border-destructive/30 text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                    :title="t('book.detail.details.cancelDateStartedEdit')"
+                    :aria-label="t('book.detail.details.cancelDateStartedEdit')"
+                    :disabled="savingReadingDates"
+                    @click="cancelReadingDateEdit('startedAt')"
+                  >
+                    <X class="size-3" />
+                  </button>
+                </div>
+                <p v-if="readingDatesError" class="mt-1 text-[10px] text-rose-500">{{ readingDatesError }}</p>
+              </dd>
+            </template>
+            <dd v-else class="flex items-center gap-1.5">
+              <span class="text-[13px] font-medium">{{ formatDisplayDate(savedReadingDates.startedAt) }}</span>
+              <button
+                class="p-0.5 rounded-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                :title="t('book.detail.details.editDateStarted')"
+                :disabled="isEditingAnyDate || savingReadingDates"
+                @click="startEditingReadingDate('startedAt')"
+              >
+                <Pencil class="size-3" />
+              </button>
+            </dd>
+          </div>
+          <div class="flex items-baseline justify-between gap-3 border-b border-border py-[6px] last:border-b-0">
+            <dt class="shrink-0 text-[11px] font-medium text-muted-foreground">{{ t('book.detail.details.dateFinished') }}</dt>
+            <template v-if="isEditingReadingDate('finishedAt')">
+              <dd class="mt-1">
+                <div class="flex items-center gap-1.5">
+                  <input
+                    v-model="draftReadingDates.finishedAt"
+                    type="date"
+                    :max="todayDateInput"
+                    class="w-full rounded-xs border border-input bg-background px-2 py-1 text-xs text-foreground"
+                  />
+                  <button
+                    class="h-6 rounded-xs bg-primary px-2 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                    :disabled="!hasReadingDateFieldChanges('finishedAt') || savingReadingDates"
+                    @click="saveReadingDateField('finishedAt')"
+                  >
+                    {{ savingReadingDates ? t('book.detail.details.saving') : t('common.save') }}
+                  </button>
+                  <button
+                    class="inline-flex h-6 w-6 items-center justify-center rounded-xs border border-destructive/30 text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                    :title="t('book.detail.details.cancelDateFinishedEdit')"
+                    :aria-label="t('book.detail.details.cancelDateFinishedEdit')"
+                    :disabled="savingReadingDates"
+                    @click="cancelReadingDateEdit('finishedAt')"
+                  >
+                    <X class="size-3" />
+                  </button>
+                </div>
+                <p v-if="readingDatesError" class="mt-1 text-[10px] text-rose-500">{{ readingDatesError }}</p>
+              </dd>
+            </template>
+            <dd v-else class="flex items-center gap-1.5">
+              <span class="text-[13px] font-medium">{{ formatDisplayDate(savedReadingDates.finishedAt) }}</span>
+              <button
+                class="p-0.5 rounded-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                :title="t('book.detail.details.editDateFinished')"
+                :disabled="isEditingAnyDate || savingReadingDates"
+                @click="startEditingReadingDate('finishedAt')"
+              >
+                <Pencil class="size-3" />
+              </button>
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <BookEditionsCard :book="book" :progress="editionProgress" :resetting-file-ids="resettingFileIds" @reset-progress="handleEditionReset">
+        <template #missing>
+          <BookMissingFormatRequest :book="book" />
+        </template>
+      </BookEditionsCard>
 
       <div v-if="filledCustomMetadata.length > 0" class="mt-6 pt-5 border-t border-border">
         <p class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground mb-3">{{ t('book.detail.details.customMetadata') }}</p>
@@ -2451,29 +2425,13 @@ watch(
           </div>
         </dl>
       </div>
+    </div>
 
-      <!-- Synopsis -->
-      <div class="mt-6 pt-5 border-t border-border">
-        <p class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground mb-3">{{ t('book.detail.details.synopsis') }}</p>
-        <div v-if="book.description">
-          <div
-            class="text-sm leading-relaxed text-foreground transition-all"
-            :class="descriptionExpanded ? '' : 'line-clamp-2'"
-            v-html="safeDescription"
-          />
-          <button
-            class="text-xs text-muted-foreground hover:text-foreground mt-2 transition-colors"
-            @click="descriptionExpanded = !descriptionExpanded"
-          >
-            {{ descriptionExpanded ? t('book.detail.details.showLess') : t('book.detail.details.showMore') }}
-          </button>
-        </div>
-        <p v-else class="text-sm text-muted-foreground italic">{{ t('book.detail.details.noDescription') }}</p>
-      </div>
+    <!-- Discovery shelf -->
+    <div data-test="discovery-shelf" class="min-w-0 @min-[46rem]/book-detail:col-span-3 @min-[46rem]/book-detail:row-start-2">
+      <DiscoverRow class="h-full" :book-id="book.id" :series-name="book.seriesName" :author-count="book.authors.length" size="lg" flush />
     </div>
   </div>
-
-  <DiscoverRow :book-id="book.id" :series-name="book.seriesName" :author-count="book.authors.length" />
 
   <AddToCollectionSheet
     :open="addToCollectionOpen"
@@ -2488,10 +2446,11 @@ watch(
     :selection-payload="{ bookIds: [book.id] }"
     :selected-count="1"
     :book-title="book.title ?? undefined"
+    :book-authors="authorLinks.map((a) => a.name).join(', ') || undefined"
     :book-files="book.files"
   />
 
-  <DeleteBookDialog :open="deleteBookId !== null" :deleting="deletingBook" @confirm="confirmDelete" @cancel="cancelDelete" />
+  <DeleteBookDialog :open="deleteBookId !== null" :deleting="deletingBook" :linked="isLinked" @confirm="confirmDelete" @cancel="cancelDelete" />
 
   <MoveToLibrarySheet
     :open="moveToLibraryOpen"
@@ -2502,6 +2461,28 @@ watch(
     @moved="handleBookMoved"
   />
 
+  <LinkBooksSheet
+    v-if="linkRequested"
+    :open="linkOpen"
+    :book-ids="linkBookIds"
+    :seed-books="linkSeedBooks"
+    :exclude-ids="linkExcludedIds"
+    :picker="linkSeedIds === null"
+    @update:open="handleLinkOpenChange"
+    @linked="handleBooksLinked"
+  />
+
+  <MergeBooksSheet
+    v-if="mergeRequested"
+    :open="mergeOpen"
+    :book-ids="mergeBookIds"
+    :keeper-id="book.id"
+    :picker-library-id="book.libraryId"
+    @update:open="handleMergeOpenChange"
+    @merged="handleBooksMerged"
+    @link-instead="handleMergeLinkInstead"
+  />
+
   <ResetReadingStateDialog
     :open="resetReadingStateDialogOpen"
     :resetting="resettingReadingState"
@@ -2510,22 +2491,26 @@ watch(
     @confirm="handleResetReadingState"
   />
 
-  <!-- Cover lightbox -->
-  <DialogRoot :open="coverLightboxOpen" @update:open="coverLightboxOpen = $event">
-    <DialogPortal>
-      <DialogOverlay
-        class="fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
-      />
-      <DialogContent
-        class="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 max-w-[90vw] max-h-[90vh] outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"
-      >
-        <img :src="coverSrc" :alt="book.title ?? ''" class="max-w-[90vw] max-h-[90vh] rounded-md shadow-2xl object-contain" />
-        <DialogClose
-          class="absolute -top-3 -right-3 p-1 rounded-full bg-background border border-border text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <X class="size-4" />
-        </DialogClose>
-      </DialogContent>
-    </DialogPortal>
-  </DialogRoot>
+  <BookCoverLightbox :open="coverLightboxOpen" :book="book" :medium="coverLightboxMedium" @update:open="handleCoverLightboxOpenChange" />
 </template>
+
+<style scoped>
+.synopsis-copy--clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+@media (min-height: 56rem) {
+  .synopsis-copy--clamped {
+    -webkit-line-clamp: 6;
+  }
+}
+
+@media (min-height: 80rem) {
+  .synopsis-copy--clamped {
+    -webkit-line-clamp: 10;
+  }
+}
+</style>

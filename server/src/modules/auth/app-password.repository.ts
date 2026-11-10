@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
@@ -9,15 +9,11 @@ type AppPasswordRow = typeof schema.appPasswords.$inferSelect;
 type NewAppPassword = Pick<typeof schema.appPasswords.$inferInsert, 'userId' | 'label' | 'selector' | 'secretHash' | 'secretHint' | 'expiresAt'>;
 type RotatedAppPassword = Pick<typeof schema.appPasswords.$inferInsert, 'selector' | 'secretHash' | 'secretHint' | 'expiresAt'>;
 
-const APP_PASSWORD_CREATE_LOCK_NAMESPACE = 4_280_400;
+const APP_PASSWORD_ACTIVE_CAPACITY_LOCK_NAMESPACE = 4_280_400;
 
-export type UsableAppPassword = Omit<AppPasswordRow, 'secretHash'>;
-
-export function omitAppPasswordSecretHash(row: AppPasswordRow): UsableAppPassword {
-  const credential: Partial<AppPasswordRow> = { ...row };
-  delete credential.secretHash;
-  return credential as UsableAppPassword;
-}
+export type VerifiedAppPassword = Pick<AppPasswordRow, 'id' | 'label' | 'selector' | 'expiresAt'>;
+export type UsableAppPassword = Omit<VerifiedAppPassword, 'selector'>;
+export type UsableAppPasswordGeneration = Pick<VerifiedAppPassword, 'id' | 'selector' | 'expiresAt'>;
 
 @Injectable()
 export class AppPasswordRepository {
@@ -26,12 +22,20 @@ export class AppPasswordRepository {
   async listByUserId(userId: number) {
     const activeSessions = this.db
       .select({
-        appPasswordId: schema.refreshTokens.appPasswordId,
+        appPasswordId: schema.authSessions.appPasswordId,
         total: sql<number>`count(*)::int`.as('total'),
       })
-      .from(schema.refreshTokens)
-      .where(and(isNull(schema.refreshTokens.revokedAt), gt(schema.refreshTokens.expiresAt, sql`now()`)))
-      .groupBy(schema.refreshTokens.appPasswordId)
+      .from(schema.authSessions)
+      .innerJoin(schema.users, eq(schema.users.id, schema.authSessions.userId))
+      .where(
+        and(
+          eq(schema.authSessions.userId, userId),
+          isNull(schema.authSessions.revokedAt),
+          gt(schema.authSessions.expiresAt, sql`now()`),
+          eq(schema.authSessions.tokenVersion, schema.users.tokenVersion),
+        ),
+      )
+      .groupBy(schema.authSessions.appPasswordId)
       .as('active_app_password_sessions');
 
     return this.db
@@ -56,11 +60,7 @@ export class AppPasswordRepository {
   }
 
   private usableCondition(userId: number) {
-    return and(
-      eq(schema.appPasswords.userId, userId),
-      isNull(schema.appPasswords.revokedAt),
-      or(isNull(schema.appPasswords.expiresAt), gt(schema.appPasswords.expiresAt, sql`now()`)),
-    );
+    return and(eq(schema.appPasswords.userId, userId), isNull(schema.appPasswords.revokedAt), gt(schema.appPasswords.expiresAt, sql`now()`));
   }
 
   async countActiveByUserId(userId: number): Promise<number> {
@@ -89,12 +89,13 @@ export class AppPasswordRepository {
 
   async createWithinActiveLimit(data: NewAppPassword, activeLimit: number) {
     return this.db.transaction(async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(${APP_PASSWORD_CREATE_LOCK_NAMESPACE}, ${data.userId})`);
+      await tx.execute(sql`select pg_advisory_xact_lock(${APP_PASSWORD_ACTIVE_CAPACITY_LOCK_NAMESPACE}, ${data.userId})`);
+      const activeAt = new Date();
 
       const [countRow] = await tx
         .select({ total: sql<number>`count(*)::int` })
         .from(schema.appPasswords)
-        .where(this.usableCondition(data.userId));
+        .where(and(eq(schema.appPasswords.userId, data.userId), isNull(schema.appPasswords.revokedAt), gt(schema.appPasswords.expiresAt, activeAt)));
       if ((countRow?.total ?? 0) >= activeLimit) return null;
 
       const [row] = await tx.insert(schema.appPasswords).values(data).returning({
@@ -122,21 +123,57 @@ export class AppPasswordRepository {
       where: and(this.usableCondition(userId), eq(schema.appPasswords.id, id)),
     });
 
-    return row ? omitAppPasswordSecretHash(row) : null;
+    return row ? { id: row.id, label: row.label, expiresAt: row.expiresAt } : null;
   }
 
-  async touchLastUsed(id: number, ip?: string): Promise<void> {
-    await this.db
+  async findUsableGenerationById(userId: number, id: number): Promise<UsableAppPasswordGeneration | null> {
+    const row = await this.db.query.appPasswords.findFirst({
+      where: and(this.usableCondition(userId), eq(schema.appPasswords.id, id)),
+    });
+
+    return row ? { id: row.id, selector: row.selector, expiresAt: row.expiresAt } : null;
+  }
+
+  async touchLastUsedGeneration(userId: number, id: number, selector: string, ip?: string): Promise<boolean> {
+    const rows = await this.db
       .update(schema.appPasswords)
       .set({
         lastUsedAt: new Date(),
         ...(ip ? { lastUsedIp: ip } : {}),
       })
-      .where(and(eq(schema.appPasswords.id, id), isNull(schema.appPasswords.revokedAt)));
+      .where(
+        and(
+          eq(schema.appPasswords.userId, userId),
+          eq(schema.appPasswords.id, id),
+          eq(schema.appPasswords.selector, selector),
+          isNull(schema.appPasswords.revokedAt),
+          gt(schema.appPasswords.expiresAt, sql`now()`),
+        ),
+      )
+      .returning({ id: schema.appPasswords.id });
+
+    return rows.length > 0;
   }
 
-  async rotateOwnedWithSessions(userId: number, id: number, data: RotatedAppPassword) {
+  async rotateOwnedWithinActiveLimit(userId: number, id: number, data: RotatedAppPassword, activeLimit: number) {
     return this.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(${APP_PASSWORD_ACTIVE_CAPACITY_LOCK_NAMESPACE}, ${userId})`);
+      const now = new Date();
+      const [existing] = await tx
+        .select({ id: schema.appPasswords.id, expiresAt: schema.appPasswords.expiresAt })
+        .from(schema.appPasswords)
+        .where(and(eq(schema.appPasswords.id, id), eq(schema.appPasswords.userId, userId), isNull(schema.appPasswords.revokedAt)))
+        .for('update');
+      if (!existing) return { status: 'not_found' as const };
+
+      if (existing.expiresAt <= now) {
+        const [countRow] = await tx
+          .select({ total: sql<number>`count(*)::int` })
+          .from(schema.appPasswords)
+          .where(and(eq(schema.appPasswords.userId, userId), isNull(schema.appPasswords.revokedAt), gt(schema.appPasswords.expiresAt, now)));
+        if ((countRow?.total ?? 0) >= activeLimit) return { status: 'active_limit_reached' as const };
+      }
+
       const [credential] = await tx
         .update(schema.appPasswords)
         .set({
@@ -156,13 +193,14 @@ export class AppPasswordRepository {
           createdAt: schema.appPasswords.createdAt,
         });
 
-      if (!credential) return null;
+      if (!credential) return { status: 'not_found' as const };
 
-      // Removing every family prevents an old refresh token from being treated as
-      // a replay attack against the newly rotated secret for this same row ID.
-      await tx.delete(schema.refreshTokens).where(eq(schema.refreshTokens.appPasswordId, id));
+      await tx
+        .update(schema.authSessions)
+        .set({ revokedAt: now })
+        .where(and(eq(schema.authSessions.userId, userId), eq(schema.authSessions.appPasswordId, id), isNull(schema.authSessions.revokedAt)));
 
-      return credential;
+      return { status: 'rotated' as const, credential };
     });
   }
 
@@ -183,9 +221,9 @@ export class AppPasswordRepository {
       if (!credential) return null;
 
       await tx
-        .update(schema.refreshTokens)
+        .update(schema.authSessions)
         .set({ revokedAt })
-        .where(and(eq(schema.refreshTokens.appPasswordId, id), isNull(schema.refreshTokens.revokedAt)));
+        .where(and(eq(schema.authSessions.appPasswordId, id), isNull(schema.authSessions.revokedAt)));
 
       return credential;
     });
@@ -206,9 +244,9 @@ export class AppPasswordRepository {
         });
 
       await tx
-        .update(schema.refreshTokens)
+        .update(schema.authSessions)
         .set({ revokedAt })
-        .where(and(eq(schema.refreshTokens.appPasswordId, id), isNull(schema.refreshTokens.revokedAt)));
+        .where(and(eq(schema.authSessions.appPasswordId, id), isNull(schema.authSessions.revokedAt)));
 
       return credential ?? null;
     });
@@ -218,26 +256,25 @@ export class AppPasswordRepository {
     const revokedAt = new Date();
 
     return this.db.transaction(async (tx) => {
-      const credentials = await tx.select({ id: schema.appPasswords.id }).from(schema.appPasswords).where(eq(schema.appPasswords.userId, userId));
-      const ids = credentials.map(({ id }) => id);
-
       const credentialResult = await tx
         .update(schema.appPasswords)
         .set({ revokedAt })
         .where(and(eq(schema.appPasswords.userId, userId), isNull(schema.appPasswords.revokedAt)));
 
-      let sessionsRevoked = 0;
-      if (ids.length > 0) {
-        const sessionResult = await tx
-          .update(schema.refreshTokens)
-          .set({ revokedAt })
-          .where(and(inArray(schema.refreshTokens.appPasswordId, ids), isNull(schema.refreshTokens.revokedAt)));
-        sessionsRevoked = sessionResult.rowCount ?? 0;
-      }
+      const sessionResult = await tx
+        .update(schema.authSessions)
+        .set({ revokedAt })
+        .where(
+          and(
+            eq(schema.authSessions.userId, userId),
+            eq(schema.authSessions.authenticationMethod, 'app_password'),
+            isNull(schema.authSessions.revokedAt),
+          ),
+        );
 
       return {
         credentialsRevoked: credentialResult.rowCount ?? 0,
-        sessionsRevoked,
+        sessionsRevoked: sessionResult.rowCount ?? 0,
       };
     });
   }

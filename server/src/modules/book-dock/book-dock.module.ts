@@ -6,6 +6,7 @@ import type { StringValue } from 'ms';
 import { AppSettingsModule } from '../app-settings/app-settings.module';
 import { AuthModule } from '../auth/auth.module';
 import { BookModule } from '../book/book.module';
+import { FileWriteModule } from '../file-write/file-write.module';
 import { LibraryModule } from '../library/library.module';
 import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
 import { MetadataModule } from '../metadata/metadata.module';
@@ -17,6 +18,7 @@ import { BookDockEventsService } from './book-dock-events.service';
 import { BookDockFinalizeService } from './book-dock-finalize.service';
 import { BookDockGateway } from './book-dock.gateway';
 import { BookDockIngestService } from './book-dock-ingest.service';
+import { BookDockJoinService } from './book-dock-join.service';
 import { BookDockMetadataService } from './book-dock-metadata.service';
 import { BookDockProcessingStateService } from './book-dock-processing-state.service';
 import { BookDockWatcherService } from './book-dock-watcher.service';
@@ -28,6 +30,7 @@ import { BookDockRepository } from './book-dock.repository';
     UploadModule,
     AuthModule,
     BookModule,
+    FileWriteModule,
     LibraryModule,
     MetadataFetchModule,
     MetadataModule,
@@ -51,9 +54,10 @@ import { BookDockRepository } from './book-dock.repository';
     BookDockMetadataService,
     BookDockProcessingStateService,
     BookDockFinalizeService,
+    BookDockJoinService,
     BookDockWatcherService,
     BookDockGateway,
   ],
-  exports: [BookDockService, BookDockRepository],
+  exports: [BookDockService, BookDockRepository, BookDockEventsService, BookDockFinalizeService, BookDockIngestService],
 })
 export class BookDockModule {}

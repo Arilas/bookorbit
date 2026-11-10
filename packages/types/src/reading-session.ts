@@ -1,10 +1,17 @@
 import type { ReadingSessionSourceDescriptor } from "./reading-session-source-bucket";
 
-export const READING_SESSION_SOURCES = ["web", "koreader", "manual", "kobo"] as const;
+export const READING_SESSION_SOURCES = ["web", "ios", "watchos", "android", "koreader", "manual", "kobo"] as const;
 export type ReadingSessionSource = (typeof READING_SESSION_SOURCES)[number];
+
+export const CLIENT_READING_SESSION_SOURCES = ["ios", "watchos", "android"] as const;
+export type ClientReadingSessionSource = (typeof CLIENT_READING_SESSION_SOURCES)[number];
+
+export const READING_SESSION_TYPES = ["read", "tts", "listen"] as const;
+export type ReadingSessionType = (typeof READING_SESSION_TYPES)[number];
 
 export interface BookReadingSession {
   id: number;
+  bookFileId: number | null;
   startedAt: string;
   endedAt: string;
   durationSeconds: number;
@@ -13,6 +20,12 @@ export interface BookReadingSession {
   format: string | null;
   source: ReadingSessionSource | null;
   sourceAttribution: ReadingSessionSourceDescriptor;
+  // The reading attempt this session was recorded against, when one was open at the time.
+  // Sessions logged before attempts existed, or outside any attempt, carry null.
+  attemptId: number | null;
+  // How the session was spent: reading the text, listening to text to speech, or listening to
+  // audio. Optional because servers before this field omit it; clients fall back to the format.
+  sessionType?: ReadingSessionType;
 }
 
 export interface BookReadingSourceSlice extends ReadingSessionSourceDescriptor {
@@ -37,6 +50,13 @@ export interface BookReadingSessionStats {
   // Reading time/sessions split by built-in source or named App Password.
   // Only sources with activity are included.
   bySource: BookReadingSourceSlice[];
+  // Longest single session in the filtered window. The client only ever holds one page of
+  // sessions, so it cannot find this itself once a book has more sessions than a page.
+  longestSessionSeconds: number;
+  longestSessionAt: string | null;
+  // Sessions whose progress went backwards by more than a rounding error: a reread of an
+  // earlier chapter, or a device that resynchronised to an older position.
+  backtrackCount: number;
 }
 
 export interface BookReadingSessionListResponse {

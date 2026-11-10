@@ -7,7 +7,7 @@ export function usePermissions() {
 
   const isSuperuser = computed(() => user.value?.isSuperuser ?? false)
   const userPermissions = computed(() => user.value?.permissions ?? [])
-  const authMethod = computed(() => user.value?.authMethod)
+  const authenticationMethod = computed(() => user.value?.authenticationMethod)
   const provisioningMethod = computed(() => user.value?.provisioningMethod)
 
   function hasPermission(name: string): boolean {
@@ -20,5 +20,13 @@ export function usePermissions() {
 
   const isDemoRestrictedAccount = computed(() => hasExplicitPermission(Permission.DemoRestricted))
 
-  return { hasPermission, hasExplicitPermission, isDemoRestrictedAccount, isSuperuser, userPermissions, authMethod, provisioningMethod }
+  return {
+    hasPermission,
+    hasExplicitPermission,
+    isDemoRestrictedAccount,
+    isSuperuser,
+    userPermissions,
+    authenticationMethod,
+    provisioningMethod,
+  }
 }

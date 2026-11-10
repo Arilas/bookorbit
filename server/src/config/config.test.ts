@@ -7,18 +7,21 @@ const ORIGINAL_ENV = process.env;
 function resetEnv(): void {
   process.env = { ...ORIGINAL_ENV };
   delete process.env.NODE_ENV;
+  delete process.env.HOST;
   delete process.env.APP_URL;
   delete process.env.APP_VERSION;
   delete process.env.OIDC_ALLOW_LOCAL_ISSUERS;
   delete process.env.SWAGGER_ENABLED;
   delete process.env.KOBO_CLOUDSCRAPER_PYTHON;
   delete process.env.KOREADER_PLUGIN_PATH;
+  delete process.env.METADATA_PROVIDER_DIRECTORY_URL;
   delete process.env.DATABASE_URL;
   delete process.env.JWT_SECRET;
   delete process.env.JWT_EXPIRES_IN;
   delete process.env.JWT_REFRESH_EXPIRES_IN;
   delete process.env.APP_PASSWORD_REFRESH_EXPIRES_IN;
   delete process.env.SETUP_BOOTSTRAP_TOKEN;
+  delete process.env.DISABLE_LOCAL_AUTH;
   delete process.env.APP_DATA_PATH;
   delete process.env.BOOK_DOCK_PATH;
   delete process.env.LIBRARY_BROWSE_ROOT;
@@ -46,10 +49,13 @@ describe('config', () => {
   it('uses app defaults, including local-build fallback version', () => {
     expect(appConfig()).toEqual({
       nodeEnv: 'development',
-      appUrl: 'http://localhost:5173',
+      host: '0.0.0.0',
+      appUrl: 'http://localhost:6263',
+      nativeRedirectUri: 'bookorbit://oauth2-callback',
       version: 'Local build',
       githubReleasesRepo: 'bookorbit/bookorbit',
       githubReleasesToken: undefined,
+      metadataProviderDirectoryUrl: 'https://raw.githubusercontent.com/bookorbit/bookorbit-metadata-providers/main/directory.json',
       oidcAllowLocalIssuers: false,
       swaggerEnabled: false,
       koboCloudscraperPython: undefined,
@@ -59,6 +65,7 @@ describe('config', () => {
 
   it('reads app values from environment when provided', () => {
     process.env.NODE_ENV = 'production';
+    process.env.HOST = '127.0.0.1';
     process.env.APP_URL = 'https://bookorbit.local';
     process.env.APP_VERSION = 'v2.3.4';
     process.env.OIDC_ALLOW_LOCAL_ISSUERS = 'true';
@@ -67,18 +74,33 @@ describe('config', () => {
     process.env.KOREADER_PLUGIN_PATH = '/opt/koreader/bookorbit.koplugin';
     process.env.GITHUB_RELEASES_REPO = 'acme/app';
     process.env.GITHUB_RELEASES_TOKEN = 'ghp_example';
+    process.env.NATIVE_REDIRECT_URI = 'myfork://oauth2-callback';
+    process.env.METADATA_PROVIDER_DIRECTORY_URL = ' OFF ';
 
     expect(appConfig()).toEqual({
       nodeEnv: 'production',
+      host: '127.0.0.1',
       appUrl: 'https://bookorbit.local',
+      nativeRedirectUri: 'myfork://oauth2-callback',
       version: 'v2.3.4',
       githubReleasesRepo: 'acme/app',
       githubReleasesToken: 'ghp_example',
+      metadataProviderDirectoryUrl: null,
       oidcAllowLocalIssuers: true,
       swaggerEnabled: true,
       koboCloudscraperPython: '/opt/bookorbit-python/bin/python',
       koreaderPluginSourcePath: '/opt/koreader/bookorbit.koplugin',
     });
+  });
+
+  it.each(['', '   '])('preserves wildcard binding for blank HOST %j', (host) => {
+    process.env.HOST = host;
+    expect(appConfig().host).toBe('0.0.0.0');
+  });
+
+  it.each(['127.0.0.1', '192.0.2.10', '::1', '::'])('reads and trims bind address %s', (host) => {
+    process.env.HOST = ` ${host} `;
+    expect(appConfig().host).toBe(host);
   });
 
   it('falls back to false when OIDC_ALLOW_LOCAL_ISSUERS is invalid', () => {
@@ -95,9 +117,21 @@ describe('config', () => {
       appPasswordRefreshExpiresIn: '90d',
       setupBootstrapToken: '',
       refreshRotationGraceMs: 30_000,
+      passwordLoginEnabled: true,
     });
     expect(emailConfig().encryptionKey).toBe('');
     expect(migrationConfig()).toEqual({ encryptionKey: '', importRoot: undefined });
+  });
+
+  it('disables password login only for an enabled DISABLE_LOCAL_AUTH flag', () => {
+    for (const value of ['true', '1', 'yes', 'on']) {
+      process.env.DISABLE_LOCAL_AUTH = value;
+      expect(authConfig().passwordLoginEnabled).toBe(false);
+    }
+    for (const value of ['false', '0', 'no', 'off', 'invalid']) {
+      process.env.DISABLE_LOCAL_AUTH = value;
+      expect(authConfig().passwordLoginEnabled).toBe(true);
+    }
   });
 
   it('resolves the configured migration import root', () => {

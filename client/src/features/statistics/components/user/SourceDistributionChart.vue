@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
-import VChart from 'vue-echarts'
+import AppChart from '@/components/charts/AppChart.vue'
 import { MonitorSmartphone } from '@lucide/vue'
 import { breakpointsTailwind, useBreakpoints } from '@vueuse/core'
 
-import { useThemeStore } from '@/stores/theme'
+import { useChartTokens } from '@/composables/useChartTokens'
 import { getReadingSourceDisplayLabels } from '@/lib/reading-source'
 import { escapeHtml } from '../../lib/escape-html'
 import { resolveReadingSourceColor } from '../../lib/source-bucket-colors'
@@ -14,7 +14,7 @@ import ChartCard from '../ChartCard.vue'
 
 const { t } = useI18n()
 
-const themeStore = useThemeStore()
+const chartTokens = useChartTokens()
 const { data, loading, error } = useUserReadingSourceDistribution()
 const { md } = useBreakpoints(breakpointsTailwind)
 
@@ -35,7 +35,7 @@ watchEffect(() => {
   option.value = {}
   if (isEmpty.value) return
 
-  const themeKey = `${themeStore.resolvedTheme}:${themeStore.accent}`
+  const themeKey = chartTokens.value.key
   const displayLabels = getReadingSourceDisplayLabels(data.value.slices)
 
   option.value = {
@@ -83,8 +83,8 @@ watchEffect(() => {
     :error
     :empty="isEmpty"
     :empty-title="t('statistics.charts.sourceDistribution.emptyTitle')"
-    :empty-description="t('statistics.charts.sourceDistribution.emptyDescription')"
+    :empty-description="t('statistics.charts.sourceDistribution.emptyDescriptionWithNativeClients')"
   >
-    <VChart :option autoresize style="height: 100%" />
+    <AppChart :option autoresize style="height: 100%" />
   </ChartCard>
 </template>

@@ -10,13 +10,15 @@ import {
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
-import { basename, dirname, extname, join, resolve } from 'path';
-import { access as fsAccess, readFile, stat, unlink } from 'fs/promises';
-import { eq, inArray } from 'drizzle-orm';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { access as fsAccess, readFile, rmdir, stat, unlink } from 'fs/promises';
+import { eq, inArray, sql, type SQL } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { DatabaseError } from 'pg';
 
 import type {
   AudiobookChapter,
+  AudiobookChapterSource,
   BookDockAutoFinalizeMetadataMode,
   BookDockDiscardDuplicatesResult,
   BookDockFinalizeFileResult,
@@ -24,46 +26,104 @@ import type {
   BookDockFinalizePreviewResult,
   BookDockFinalizePreviewStatus,
   BookDockFinalizeResult,
+  BookDockJoinBook,
+  BookDockJoinErrorCode,
+  BookDockJoinSuggestion,
   BookDockMetadata,
   ComicMetadataFields,
   MetadataSeriesMembership,
 } from '@bookorbit/types';
-import { MetadataProviderKey, NotificationType, resolveDownloadFilename, resolveUploadPath } from '@bookorbit/types';
+import {
+  formatKeyRank,
+  isAudioFormat,
+  MetadataProviderKey,
+  isMetadataProviderKeySyntax,
+  normalizeFormatPriority,
+  NotificationType,
+  parseSeriesIndex,
+  Permission,
+  resolveUploadPath,
+} from '@bookorbit/types';
+import type { BookRequestImportFormats, CoverMedium } from '@bookorbit/types';
+import type { FileRole } from '../scanner/lib/classify';
+import type { RequestUser } from '../../common/types/request-user';
+import { ProviderIdStore } from '../metadata-fetch/provider-ids/provider-id.store';
 import { BookReadService } from '../book/book-read.service';
 import { NotificationService } from '../notification/notification.service';
 import { SeriesIdentityService } from '../../common/services/series-identity.service';
 import { SeriesMembershipService } from '../../common/services/series-membership.service';
+import { chapterProvenance, normalizeAudiobookChapters } from '../../common/utils/audiobook-chapters.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { resolveExistingPathSpelling } from '../../common/utils/path-identity.utils';
+import { resolveSingleFileBookPath } from '../../common/utils/book-path.utils';
 import { normalizePublishedDate, publishedYearFromDateKey } from '../../common/utils/published-date.utils';
-import { formatSeriesIndex } from '../../common/utils/series-index-format.utils';
+import { buildPatternTokens, patternReferencesToken } from '../../common/utils/pattern-tokens.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { bookMetadata, libraries, libraryFolders } from '../../db/schema';
+import { bookMetadata, bookNarrators, libraries, libraryFolders } from '../../db/schema';
 import { AppSettingsService } from '../app-settings/app-settings.service';
+import { FileWriteService } from '../file-write/file-write.service';
 import { LibraryService } from '../library/library.service';
 import { MetadataService } from '../metadata/metadata.service';
 import { MetadataScoreService } from '../metadata-score/metadata-score.service';
-import { UploadProcessorService } from '../upload/upload-processor.service';
+import { UploadProcessorService, type UnitBookFileInput, type UnitBookRecords } from '../upload/upload-processor.service';
 import { UploadStorageService } from '../upload/upload-storage.service';
 import { UploadValidatorService } from '../upload/upload-validator.service';
+import { inspectEpubMediaOverlayFields } from '../reader/epub/epub-media-overlay-capability';
 import { BookDockRepository } from './book-dock.repository';
 import { BookDockEventsService, BOOK_DOCK_FILE_INGESTED } from './book-dock-events.service';
 import { BookDockGateway } from './book-dock.gateway';
+import {
+  BookDockJoinService,
+  hasFolderOfItsOwn,
+  joinError,
+  joinErrorCodeOf,
+  type JoinSuggestionInput,
+  type ResolvedJoinTarget,
+} from './book-dock-join.service';
 import { normalizeBookDockMetadata } from './book-dock-metadata.utils';
 import { BookDockProcessingStateService } from './book-dock-processing-state.service';
 import { BookDockWorkQueue } from './book-dock-work-queue';
-import type { BookDockFileRow } from '../../db/schema';
+import type { BookDockFileRow, BookDockUnitFileRow } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 type LibraryRow = typeof libraries.$inferSelect;
 type LibraryFolderRow = typeof libraryFolders.$inferSelect;
+type NamingLibrary = { name?: string | null; fileNamingPattern?: string | null; organizationMode?: string | null };
+
+type JoinBook = { bookId: number; folderPath: string; coverUrl?: string | null; storedAsFile?: boolean };
+
+/** A per-file override as a finalize request states it. */
+export type FinalizeRequestOverride = {
+  fileId: number;
+  libraryId?: number;
+  folderId?: number;
+  targetFileName?: string;
+  joinBook?: { bookId: number };
+};
 
 type FinalizeOverrideEntry = {
   libraryId?: number;
   folderId?: number;
   targetFileName?: string;
+  /**
+   * An existing book this file should become another format of, by landing in that book's own
+   * folder. Honoured only where a folder is a book; anywhere else the file is filed as usual.
+   * `coverUrl` is the art chosen for this format when it was asked for, used only when the arriving
+   * files carry none of their own.
+   */
+  joinBook?: JoinBook;
+  /**
+   * A book a person picked for this file. Unlike `joinBook`, which another module resolved and
+   * vouches for, this is checked against the person before anything moves, and a refusal holds the
+   * file instead of filing it somewhere else.
+   */
+  requestedJoinBookId?: number;
+  /** A cover the metadata lookup found by itself, rather than one a person picked. See `applyMetadata`. */
+  lookedUpCoverUrl?: string | null;
 };
+
+type PreviewJoinInfo = { canJoinBook: boolean; suggestedJoinBook?: BookDockJoinSuggestion };
 
 const BATCH_SIZE = 100;
 const PREVIEW_ITEM_LIMIT = 200;
@@ -73,7 +133,7 @@ const MAX_PUBLISHED_YEAR = 2200;
 const PUBLISHED_YEAR_RANGE_CONSTRAINT = 'book_metadata_published_year_range_chk';
 const INVALID_PUBLISHED_YEAR_MESSAGE = `Invalid metadata: published year must be between ${MIN_PUBLISHED_YEAR} and ${MAX_PUBLISHED_YEAR}.`;
 const INVALID_METADATA_MESSAGE = 'Invalid metadata values for this file. Review metadata fields and try again.';
-const METADATA_PROVIDER_KEYS = new Set<MetadataProviderKey>(Object.values(MetadataProviderKey));
+const INTERNAL_FAILURE_MESSAGE = 'Filing this book failed inside BookOrbit. Check the server log for the cause.';
 
 type NormalizedFinalizeMetadata = {
   title: string | null;
@@ -87,7 +147,7 @@ type NormalizedFinalizeMetadata = {
   language: string | null;
   pageCount: number | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   authors: string[];
   genres: string[];
   coverUrl: string | null;
@@ -107,7 +167,16 @@ type NormalizedFinalizeMetadata = {
   aladinId: string | null;
   seriesMemberships: MetadataSeriesMembership[] | undefined;
   communityRatings: Array<{ provider: MetadataProviderKey; rating: number; ratingCount: number | null }> | undefined;
+  externalProviderIds: Partial<Record<string, string>> | undefined;
   comicMetadata: ComicMetadataFields | undefined;
+};
+
+type PlacedUnitFile = {
+  sourcePath: string;
+  destPath: string;
+  format: string | null;
+  role: FileRole;
+  sortOrder: number | null;
 };
 
 type FinalizeCandidateAnalysis = {
@@ -122,7 +191,81 @@ type FinalizeCandidateAnalysis = {
   folder?: LibraryFolderRow;
   format?: string;
   destPath?: string;
+  /** Every file this row places, primary first. One entry for an ordinary single-file row. */
+  placement?: PlacedUnitFile[];
+  /**
+   * The folder every file of the unit shares, which is what `books.folderPath` has to be. Not the
+   * primary's own directory: a disc-foldered unit puts the primary inside `CD 1`, and taking the
+   * dirname there would file the book under the disc rather than under the book.
+   */
+  bookFolderPath?: string;
+  /** The existing book this file was placed into the folder of, when it was asked to join one. */
+  joinBook?: JoinBook;
+  /** How a book a person picked reads in the preview. */
+  joinSummary?: BookDockJoinBook;
+  errorCode?: BookDockJoinErrorCode;
+  lookedUpCoverUrl?: string | null;
 };
+
+/**
+ * What of a unit actually gets placed, given the target library and the instance's format setting.
+ *
+ * Two separate rules meet here. A `book_per_file` library cannot hold a multi-file book at all:
+ * `folderPath` is the file's own path, and `findLooseFileCandidates` emits one candidate per
+ * primary file while intentionally discarding covers and sidecars, so placing a folder there is
+ * not a preference but data loss on the next scan. The format setting is the operator's own
+ * choice about editions, and applies in both modes.
+ *
+ * Multipart audio is never reduced by either: its parts are one book, not competing editions, so
+ * where it cannot be represented it holds for a human rather than importing a third of a book.
+ */
+function reduceUnitForLibrary(
+  unitFiles: BookDockUnitFileRow[],
+  library: LibraryRow,
+  importFormats: BookRequestImportFormats,
+): { files: BookDockUnitFileRow[]; hold?: string } {
+  if (unitFiles.length === 0) return { files: unitFiles };
+
+  const content = unitFiles.filter((file) => file.role === 'content');
+  const looseFileLibrary = library.organizationMode === 'book_per_file';
+  // Sidecars have nowhere to live in a loose-file library, which is exactly what the scanner does
+  // with them there too.
+  const kept = looseFileLibrary ? content : unitFiles;
+  if (content.length <= 1) return { files: kept };
+
+  const multipartAudio = content.every((file) => file.format !== null && isAudioFormat(file.format));
+  if (multipartAudio) {
+    if (!looseFileLibrary) return { files: kept };
+    return {
+      files: content,
+      hold: `This is one audiobook in ${content.length} parts, and "${library.name}" stores one book per file. Choose a library that stores one book per folder.`,
+    };
+  }
+
+  if (importFormats === 'all') return { files: kept };
+
+  const priority = normalizeFormatPriority(library.formatPriority);
+  const best = [...content].sort((a, b) => formatRank(a.format, priority) - formatRank(b.format, priority))[0]!;
+  // The chosen format keeps the artwork and sidecars that came with the unit; the other formats go.
+  return { files: looseFileLibrary ? [best] : [best, ...unitFiles.filter((file) => file.role !== 'content')] };
+}
+
+/** Dock files are not inspected for media overlays yet, so an EPUB ranks by the plain `epub` entry. */
+function formatRank(format: string | null, priority: readonly string[]): number {
+  return format ? formatKeyRank(format.toLowerCase(), priority) : Number.MAX_SAFE_INTEGER;
+}
+
+/**
+ * The folder a unit lands in. Normally the directory of the pattern result, but a pattern with no
+ * path separator resolves to a bare filename whose `dirname()` is the library folder root - which
+ * would drop every unit there and merge unrelated books into one. So a directoryless result falls
+ * back to a folder named for the file, matching what `book_per_folder` does by default.
+ */
+function unitDestinationFolder(destPath: string, folderPath: string): string {
+  const parent = dirname(destPath);
+  if (resolve(parent) !== resolve(folderPath)) return parent;
+  return join(folderPath, basename(destPath, extname(destPath)));
+}
 
 @Injectable()
 export class BookDockFinalizeService implements OnModuleInit, OnApplicationBootstrap, OnModuleDestroy {
@@ -144,8 +287,11 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     private readonly gateway: BookDockGateway,
     private readonly notificationService: NotificationService,
     private readonly processingState: BookDockProcessingStateService,
+    private readonly fileWriteService: FileWriteService,
     @Optional() private readonly seriesIdentity?: SeriesIdentityService,
     @Optional() private readonly seriesMemberships?: SeriesMembershipService,
+    @Optional() private readonly providerIdStore?: ProviderIdStore,
+    @Optional() private readonly joinService?: BookDockJoinService,
   ) {
     this.autoFinalizeQueue = new BookDockWorkQueue(
       AUTO_FINALIZE_QUEUE_CONCURRENCY,
@@ -179,13 +325,15 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     excludedIds: number[] | undefined,
     defaultLibraryId: number | undefined,
     defaultFolderId: number | undefined,
-    overrides?: Array<{ fileId: number } & FinalizeOverrideEntry>,
+    overrides?: FinalizeRequestOverride[],
     status?: string,
     search?: string,
     needsReview?: boolean,
+    readyToFile?: boolean,
+    requester?: RequestUser,
   ): Promise<BookDockFinalizeResult> {
     const ids = selectAll ? [] : dedupeIds(fileIds ?? []);
-    const overrideMap = new Map((overrides ?? []).map((o) => [o.fileId, o]));
+    const overrideMap = toOverrideMap(overrides);
 
     const results: BookDockFinalizeFileResult[] = [];
     let succeeded = 0;
@@ -201,12 +349,13 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
           status,
           search,
           needsReview,
+          readyToFile,
           userId,
           canManageAll,
         });
         if (rows.length === 0) break;
 
-        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser);
+        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser, requester);
         for (const analysis of prepared.analyses) {
           const result = await this.finalizePreparedCandidate(analysis, prepared.existingDestinations);
           results.push(result);
@@ -220,7 +369,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       for (let i = 0; i < ids.length; i += BATCH_SIZE) {
         const batch = ids.slice(i, i + BATCH_SIZE);
         const rows = await this.repo.findByIds(batch, userId, canManageAll);
-        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser);
+        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser, requester);
         const analysisById = new Map(prepared.analyses.map((analysis) => [analysis.fileId, analysis]));
 
         for (const fileId of batch) {
@@ -248,8 +397,8 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
 
     this.notificationService
       .notify({
-        type: NotificationType.BookDockFinalized,
-        title: 'Book Dock finalization completed',
+        type: failed > 0 ? NotificationType.BookDockFinalizedWithErrors : NotificationType.BookDockFinalized,
+        title: failed > 0 ? 'Book Dock finalization completed with errors' : 'Book Dock finalization completed',
         message: `${succeeded} succeeded, ${failed} failed`,
         scope: { kind: 'user', userId },
         meta: { total: results.length, succeeded, failed },
@@ -284,42 +433,84 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       const analysis = await this.classifyDestination(preparedAnalysis, existingDestinations);
       if (analysis.status !== 'ready') return this.analysisToFileResult(analysis);
 
-      const { destPath, folder, library, format } = analysis;
-      if (!destPath || !folder || !library || !format) {
+      const { destPath, folder, library, format, placement } = analysis;
+      if (!destPath || !folder || !library || !format || !placement) {
         return { fileId: row.id, fileName: row.fileName, success: false, message: 'Finalization target could not be resolved' };
       }
 
-      await this.storage.moveToPath(row.absolutePath, destPath);
-      const persistedDestPath = (await resolveExistingPathSpelling(destPath, folder.path)) ?? destPath;
+      // Every file of the unit, or the single file that is the whole unit. Moved one at a time and
+      // remembered as they land, so a failure part-way can put back exactly what was moved.
+      const moved: Array<{ from: string; to: string }> = [];
+      const placeAndRecord = async () => {
+        try {
+          for (const file of placement) {
+            await this.storage.moveToPath(file.sourcePath, file.destPath);
+            moved.push({ from: file.destPath, to: file.sourcePath });
+          }
+          const persistedPath = (await resolveExistingPathSpelling(destPath, folder.path)) ?? destPath;
+          // The primary is first and the siblings after, because the book row that carries
+          // `primaryFileId` is the one created for the first file. Ordering here is the whole
+          // mechanism by which a 31-track audiobook points at track one rather than at whichever
+          // row happened to insert first.
+          const records = await this.createUnitBookRecord(library, folder, placement, persistedPath, format, preparedAnalysis.bookFolderPath);
+          return { persistedPath, records };
+        } catch (err) {
+          await this.undoMoves(moved);
+          throw err;
+        }
+      };
+      // A folder-per-book unit shares one folder, which may already be a book's: this file joining
+      // it, or the naming pattern leading there. The files land in it under that book's lock.
+      const sharedFolder = library.organizationMode === 'book_per_file' ? undefined : preparedAnalysis.bookFolderPath;
+      const { persistedPath: persistedDestPath, records: written } = sharedFolder
+        ? await this.processor.withFolderBookLock(library.id, sharedFolder, placeAndRecord, analysis.joinBook?.bookId)
+        : await placeAndRecord();
 
       let bookId: number;
       try {
-        const { size } = await stat(persistedDestPath);
-        const bookFolderPath = library.organizationMode === 'book_per_file' ? persistedDestPath : dirname(persistedDestPath);
-        ({ bookId } = await this.processor.createBookRecord(
-          library.id,
-          folder.id,
-          bookFolderPath,
-          persistedDestPath,
-          persistedDestPath.substring(folder.path.length + 1),
-          format,
-          size,
-        ));
-        await this.applyMetadata(bookId, row);
+        bookId = written.bookIds[0]!;
+        // Several ids only in a loose-file library, where each format is its own book. They are the
+        // same work, so they get the same metadata rather than one of them getting all of it.
+        for (const created of written.bookIds) {
+          // Only a book this import created takes the file's metadata. One already on the shelf,
+          // whether this file was asked to join it or the naming pattern just led to its folder,
+          // keeps what it has, and the new format brings only what belongs to that format (#1568).
+          if (!written.createdBookIds.includes(created)) {
+            const requestedCoverUrl = created === analysis.joinBook?.bookId ? (analysis.joinBook.coverUrl ?? null) : null;
+            await this.applyJoinedMetadata(created, row, requestedCoverUrl, analysis.lookedUpCoverUrl ?? null);
+          } else await this.applyMetadata(created, row, created === bookId, analysis.lookedUpCoverUrl ?? null);
+        }
       } catch (err) {
-        await this.storage.moveToPath(destPath, row.absolutePath).catch(() => {});
+        // The books committed before the failure, and metadata runs against services that cannot
+        // join that transaction, so the compensation is explicit: take back exactly what this unit
+        // wrote, then put the files back where they came from.
+        await this.undoUnitBookRecords(written, row.id);
+        await this.undoMoves(moved);
         throw err;
       }
 
+      // After the metadata, whose duration it supersedes, and before any write-back touches the files.
+      await this.measureAudioDurations(written.bookIds, row.id);
+      this.processor.reconcileCoversAsync(written.bookIds);
       await this.cleanupBookDockRecord(row);
+      if (library.fileWriteEnabled) {
+        for (const created of written.bookIds) {
+          this.fileWriteService.scheduleWrite(created, 'auto', row.uploadedBy ?? undefined);
+        }
+      }
       existingDestinations.set(this.destinationKey(library.id, destPath), bookId);
       existingDestinations.set(this.destinationKey(library.id, persistedDestPath), bookId);
+      if (analysis.joinSummary) {
+        this.logger.log(
+          `[book_dock.join_book] [end] fileId=${row.id} bookId=${analysis.joinSummary.bookId} landedBookId=${bookId} files=${placement.length} - filed as another format of an existing book`,
+        );
+      }
 
       const newName = persistedDestPath.substring(folder.path.length + 1);
       return { fileId: row.id, fileName: row.fileName, newName, success: true, bookId };
     } catch (err) {
       const message = resolveFinalizeErrorMessage(err);
-      this.logger.warn(`Finalize failed for Book Dock file ${row.id}: ${message}`);
+      this.logFinalizeFailure(row.id, 'filing', err);
       return { fileId: row.id, fileName: row.fileName, success: false, message };
     }
   }
@@ -333,13 +524,16 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     excludedIds: number[] | undefined,
     defaultLibraryId: number | undefined,
     defaultFolderId: number | undefined,
-    overrides?: Array<{ fileId: number } & FinalizeOverrideEntry>,
+    overrides?: FinalizeRequestOverride[],
     status?: string,
     search?: string,
     needsReview?: boolean,
+    readyToFile?: boolean,
+    requester?: RequestUser,
   ): Promise<BookDockFinalizePreviewResult> {
     const summary = createFinalizePreviewSummary();
-    const overrideMap = new Map((overrides ?? []).map((o) => [o.fileId, o]));
+    const overrideMap = toOverrideMap(overrides);
+    const joinAccess = new Map<number, Promise<boolean>>();
 
     await this.processFinalizeSelection(
       userId,
@@ -350,12 +544,17 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       status,
       search,
       needsReview,
+      readyToFile,
       async (rows, missingIds) => {
-        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser);
+        const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser, requester);
+        const analyses: FinalizeCandidateAnalysis[] = [];
         for (const candidate of prepared.analyses) {
-          const analysis = await this.classifyDestination(candidate, prepared.existingDestinations);
-          addFinalizePreviewAnalysis(summary, analysis);
+          analyses.push(await this.classifyDestination(candidate, prepared.existingDestinations));
         }
+        // Only what the preview lists is worth a lookup: past the item limit nobody sees it.
+        const listed = analyses.slice(0, Math.max(0, PREVIEW_ITEM_LIMIT - summary.items.length));
+        const joinInfo = await this.describeJoins(listed, requester, joinAccess);
+        for (const analysis of analyses) addFinalizePreviewAnalysis(summary, analysis, joinInfo.get(analysis.fileId));
         for (const fileId of missingIds) {
           addFinalizePreviewItem(summary, {
             fileId,
@@ -379,15 +578,17 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     excludedIds: number[] | undefined,
     defaultLibraryId: number | undefined,
     defaultFolderId: number | undefined,
-    overrides?: Array<{ fileId: number } & FinalizeOverrideEntry>,
+    overrides?: FinalizeRequestOverride[],
     status?: string,
     search?: string,
     needsReview?: boolean,
+    readyToFile?: boolean,
+    requester?: RequestUser,
   ): Promise<BookDockDiscardDuplicatesResult> {
     const startedAt = Date.now();
     this.logger.log(`[book_dock.discard_duplicates] [start] userId=${userId} selectAll=${selectAll === true} - duplicate discard started`);
 
-    const overrideMap = new Map((overrides ?? []).map((o) => [o.fileId, o]));
+    const overrideMap = toOverrideMap(overrides);
     let total = 0;
     let discarded = 0;
     const discardedFileIds: number[] = [];
@@ -402,9 +603,10 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
         status,
         search,
         needsReview,
+        readyToFile,
         async (rows, missingIds) => {
           total += rows.length + missingIds.length;
-          const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser);
+          const prepared = await this.prepareFinalizeBatch(rows, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser, requester);
           const duplicateRows: BookDockFileRow[] = [];
 
           for (const candidate of prepared.analyses) {
@@ -446,11 +648,16 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     overrideMap: Map<number, FinalizeOverrideEntry>,
     userId: number,
     isSuperuser: boolean,
+    requester?: RequestUser,
   ): Promise<FinalizeCandidateAnalysis> {
     try {
       const override = overrideMap.get(row.id);
-      const libraryId = override?.libraryId ?? row.targetLibraryId ?? defaultLibraryId ?? null;
-      const folderId = override?.folderId ?? row.targetFolderId ?? defaultFolderId ?? null;
+      const requestedJoin =
+        override?.requestedJoinBookId !== undefined ? await this.resolveRequestedJoin(override.requestedJoinBookId, row, requester) : null;
+      // The book decides the folder: its own lives under exactly one of the library's folders. A
+      // file with no destination of its own takes the book's library too.
+      const libraryId = override?.libraryId ?? row.targetLibraryId ?? defaultLibraryId ?? requestedJoin?.libraryId ?? null;
+      const folderId = requestedJoin?.libraryFolderId ?? override?.folderId ?? row.targetFolderId ?? defaultFolderId ?? null;
 
       if (libraryId === null || folderId === null) {
         return {
@@ -464,10 +671,22 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
 
       const library = await this.findLibraryOrFail(libraryId);
       await this.libraryService.verifyUserAccess(userId, libraryId, isSuperuser);
+      if (requestedJoin && requestedJoin.libraryId !== libraryId) {
+        throw joinError('BOOK_DOCK_JOIN_OTHER_LIBRARY', 'The book this file was meant to join is in a different library');
+      }
+      if (requestedJoin && library.organizationMode !== 'book_per_folder') {
+        throw joinError('BOOK_DOCK_JOIN_FILE_PER_BOOK', `"${library.name}" stores one book per file, so a file cannot be added to an existing book`);
+      }
 
       const folder = await this.findFolderOrFail(folderId, libraryId);
       const format = row.format ?? extname(row.fileName).toLowerCase().slice(1);
       this.validator.validateFormat(row.fileName, library.allowedFormats);
+
+      const unitFiles = await this.repo.findUnitFiles(row.id);
+      const reduced = reduceUnitForLibrary(unitFiles, library, await this.appSettings.getBookRequestImportFormats());
+      if (reduced.hold) {
+        return { fileId: row.id, fileName: row.fileName, row, status: 'unsupported_layout', message: reduced.hold };
+      }
 
       const patternDestPath = await this.resolveDestination(library, folder.path, row, format);
       let destPath = patternDestPath;
@@ -481,18 +700,103 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
         destPath = candidate;
       }
 
+      // Another format of a book already on the shelf goes into that book's folder under the name
+      // the pattern gave it, so the scan and the importer agree it is one book. The pattern's own
+      // folder would follow this file's metadata, and an m4b tagged "Dune (Unabridged)" names a
+      // different folder from the epub called "Dune".
+      const requestedJoinBook = requestedJoin
+        ? { bookId: requestedJoin.bookId, folderPath: requestedJoin.folderPath, storedAsFile: requestedJoin.storedAsFile }
+        : undefined;
+      const joinBook = this.resolveJoinBook(requestedJoinBook ?? override?.joinBook, library, folder);
+      if (requestedJoin && !joinBook) {
+        throw joinError('BOOK_DOCK_JOIN_ROOT_LEVEL', 'The book this file was meant to join has no folder of its own to share');
+      }
+      if (joinBook) destPath = join(joinBook.folderPath, basename(destPath));
+
+      const { files: placement, bookFolderPath } = this.resolvePlacement(row, reduced.files, destPath, folder.path, library);
+      // The primary's own destination follows the placement, which for a unit means it sits inside
+      // the unit folder rather than at the path the naming pattern produced directly.
+      destPath = placement[0]!.destPath;
+
       const newName = destPath.substring(folder.path.length + 1);
 
-      return { fileId: row.id, fileName: row.fileName, row, status: 'ready', newName, library, folder, format, destPath };
-    } catch (error) {
       return {
         fileId: row.id,
         fileName: row.fileName,
         row,
-        status: classifyFinalizePreviewError(error),
+        status: 'ready',
+        newName,
+        library,
+        folder,
+        format,
+        destPath,
+        placement,
+        bookFolderPath,
+        ...(joinBook ? { joinBook } : {}),
+        ...(requestedJoin ? { joinSummary: requestedJoin.summary } : {}),
+        ...(override?.lookedUpCoverUrl ? { lookedUpCoverUrl: override.lookedUpCoverUrl } : {}),
+      };
+    } catch (error) {
+      const status = classifyFinalizePreviewError(error);
+      if (status === 'error') this.logFinalizeFailure(row.id, 'target_resolution', error);
+      const errorCode = joinErrorCodeOf(error);
+      return {
+        fileId: row.id,
+        fileName: row.fileName,
+        row,
+        status,
         message: resolveFinalizeErrorMessage(error),
+        ...(errorCode ? { errorCode } : {}),
       };
     }
+  }
+
+  private async resolveRequestedJoin(bookId: number, row: BookDockFileRow, requester: RequestUser | undefined): Promise<ResolvedJoinTarget> {
+    if (!this.joinService) throw new Error('Joining an existing book is not available');
+    const unitFiles = await this.repo.findUnitFiles(row.id);
+    const contentFormats = unitFiles.length
+      ? unitFiles.filter((file) => file.role === 'content').map((file) => file.format ?? extname(file.fileName).slice(1))
+      : [row.format ?? extname(row.fileName).slice(1)];
+    return this.joinService.resolveRequested(
+      bookId,
+      requester,
+      contentFormats.map((format) => format.toLowerCase()),
+    );
+  }
+
+  /**
+   * What the preview says about adding each listed file to an existing book: whether it may, and
+   * which book it looks like another format of. One suggestion lookup per batch, not per file.
+   */
+  private async describeJoins(
+    analyses: FinalizeCandidateAnalysis[],
+    requester: RequestUser | undefined,
+    access: Map<number, Promise<boolean>>,
+  ): Promise<Map<number, PreviewJoinInfo>> {
+    const info = new Map<number, PreviewJoinInfo>();
+    if (!requester || !this.joinService) return info;
+
+    const inputs: JoinSuggestionInput[] = [];
+    for (const analysis of analyses) {
+      if (!analysis.library) continue;
+      const canJoinBook = await this.joinService.canJoinIn(analysis.library, requester, access);
+      info.set(analysis.fileId, { canJoinBook });
+      if (!canJoinBook || analysis.status !== 'ready' || analysis.joinBook) continue;
+      inputs.push({
+        fileId: analysis.fileId,
+        libraryId: analysis.library.id,
+        metadata: normalizeBookDockMetadata(analysis.row.selectedMetadata ?? analysis.row.embeddedMetadata),
+        formats: (analysis.placement ?? [])
+          .filter((file) => file.role === 'content')
+          .map((file) => (file.format ?? extname(file.destPath).slice(1)).toLowerCase()),
+      });
+    }
+
+    for (const [fileId, suggestion] of await this.joinService.suggest(inputs, requester)) {
+      const entry = info.get(fileId);
+      if (entry) entry.suggestedJoinBook = suggestion;
+    }
+    return info;
   }
 
   private async prepareFinalizeBatch(
@@ -502,10 +806,11 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     overrideMap: Map<number, FinalizeOverrideEntry>,
     userId: number,
     isSuperuser: boolean,
+    requester?: RequestUser,
   ): Promise<{ analyses: FinalizeCandidateAnalysis[]; existingDestinations: Map<string, number> }> {
     const analyses: FinalizeCandidateAnalysis[] = [];
     for (const row of rows) {
-      analyses.push(await this.resolveFinalizeCandidate(row, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser));
+      analyses.push(await this.resolveFinalizeCandidate(row, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser, requester));
     }
 
     const destinationPaths = analyses.filter((analysis) => analysis.status === 'ready' && analysis.destPath).map((analysis) => analysis.destPath!);
@@ -517,16 +822,197 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     return { analyses, existingDestinations };
   }
 
+  /**
+   * The book to join, when joining one is possible: the library keeps one book per folder, and the
+   * book has a folder of its own inside the one being filed into (see `hasFolderOfItsOwn`).
+   */
+  private resolveJoinBook(joinBook: FinalizeOverrideEntry['joinBook'], library: LibraryRow, folder: LibraryFolderRow): JoinBook | null {
+    if (!joinBook || library.organizationMode !== 'book_per_folder') return null;
+    return hasFolderOfItsOwn(joinBook, folder.path) ? joinBook : null;
+  }
+
+  /**
+   * Where each file of the unit lands. A single-file row keeps today's rename-by-pattern exactly,
+   * so nothing about an ordinary upload changes. A unit takes the **directory** of the pattern
+   * result and keeps the original file names inside it: the scanner recovers track order from
+   * those names, and renaming tracks by pattern would need an index token for no gain.
+   */
+  private resolvePlacement(
+    row: BookDockFileRow,
+    unitFiles: BookDockUnitFileRow[],
+    destPath: string,
+    folderPath: string,
+    library: LibraryRow,
+  ): { files: PlacedUnitFile[]; bookFolderPath: string } {
+    if (unitFiles.length === 0) {
+      return {
+        files: [{ sourcePath: row.absolutePath, destPath, format: row.format, role: 'content', sortOrder: 0 }],
+        bookFolderPath: resolveSingleFileBookPath(destPath, folderPath, library.organizationMode),
+      };
+    }
+
+    const primaryIndex = unitFiles.findIndex((file) => file.absolutePath === row.absolutePath);
+    // Primary first: `createBookRecord` sets `primaryFileId` only on the call that creates the book.
+    const ordered = primaryIndex > 0 ? [unitFiles[primaryIndex]!, ...unitFiles.filter((_, index) => index !== primaryIndex)] : unitFiles;
+
+    // A loose-file library has no folder to put a unit in: what survives the reduction lands flat,
+    // each file taking the pattern's own name with its own extension, so the formats stay siblings
+    // rather than one of them keeping a name that belongs to another.
+    if (library.organizationMode === 'book_per_file') {
+      const stem = basename(destPath, extname(destPath));
+      return {
+        files: ordered.map((file, index) => ({
+          sourcePath: file.absolutePath,
+          destPath: index === 0 ? destPath : join(dirname(destPath), this.validator.sanitizeFilename(`${stem}${extname(file.fileName)}`)),
+          format: file.format,
+          role: (file.role as FileRole) ?? 'content',
+          sortOrder: file.sortOrder,
+        })),
+        bookFolderPath: destPath,
+      };
+    }
+
+    // Shared folders have no exclusive owner, but disc paths must still survive placement.
+    let root = row.unitDirectory ?? dirname(row.absolutePath);
+    if (!row.unitDirectory) {
+      for (const member of unitFiles) {
+        while (!member.absolutePath.startsWith(root + sep) && dirname(root) !== root) root = dirname(root);
+      }
+    }
+    const destinationFolder = unitDestinationFolder(destPath, folderPath);
+    return {
+      files: ordered.map((file) => ({
+        sourcePath: file.absolutePath,
+        // The path *within* the unit, not the bare file name: a two-disc audiobook holds two files
+        // called `track01.mp3`, and flattening them makes the second overwrite the first.
+        destPath: join(destinationFolder, this.unitRelativeName(root, file)),
+        format: file.format,
+        role: (file.role as FileRole) ?? 'content',
+        sortOrder: file.sortOrder,
+      })),
+      bookFolderPath: destinationFolder,
+    };
+  }
+
+  /** Each segment sanitized on its own, so the subdirectory survives rather than the separator. */
+  private unitRelativeName(root: string, file: BookDockUnitFileRow): string {
+    const within = relative(root, file.absolutePath);
+    if (!within || within.startsWith('..') || isAbsolute(within)) return this.validator.sanitizeFilename(file.fileName);
+    return within
+      .split(sep)
+      .map((segment) => this.validator.sanitizeFilename(segment))
+      .join(sep);
+  }
+
+  /**
+   * The audiobook player derives progress from each audio file's own duration, and nothing else
+   * measures a filed file before the library's next scan; without one, listening stays at 0%.
+   * Never throws: the book is already filed, and a scan repairs whatever this could not measure.
+   */
+  private async measureAudioDurations(bookIds: number[], fileId: number): Promise<void> {
+    for (const bookId of bookIds) {
+      const startedAt = Date.now();
+      try {
+        const { measured, failed } = await this.metadataService.measureMissingAudioDurations(bookId);
+        if (failed > 0) {
+          this.logger.warn(
+            `[book_dock.measure_audio_durations] [end] fileId=${fileId} bookId=${bookId} durationMs=${Date.now() - startedAt} measured=${measured} failed=${failed} - some audio durations could not be measured`,
+          );
+        }
+      } catch (err) {
+        this.logger.warn(
+          `[book_dock.measure_audio_durations] [fail] fileId=${fileId} bookId=${bookId} durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - audio duration measurement failed`,
+        );
+      }
+    }
+  }
+
+  /** Undoes a part-placed unit. Never throws: it runs while another error is on its way up. */
+  private async undoMoves(moved: Array<{ from: string; to: string }>): Promise<void> {
+    for (const move of moved) {
+      await this.storage.moveToPath(move.from, move.to).catch(() => {});
+    }
+  }
+
+  /**
+   * Turns a placed unit into book rows. In `book_per_folder` every file shares one `folderPath`,
+   * so `createBookRecord` folds them into a single book. In `book_per_file` each file *is* its own
+   * folderPath, so several formats become several books - which is that mode's normal state, and
+   * what its next scan would produce anyway.
+   *
+   * Returns every book created, primary first, so the caller can give each one the metadata: two
+   * extra books with the same title and none of its metadata would be worse than not importing
+   * them at all.
+   */
+  private async createUnitBookRecord(
+    library: LibraryRow,
+    folder: LibraryFolderRow,
+    placement: PlacedUnitFile[],
+    persistedPrimaryPath: string,
+    primaryFormat: string,
+    bookFolderPath: string | undefined,
+  ): Promise<UnitBookRecords> {
+    if (placement.length === 0) throw new Error('Finalization placed no files');
+
+    const loose = library.organizationMode === 'book_per_file';
+    const sharedFolderPath = bookFolderPath === placement[0]!.destPath ? persistedPrimaryPath : (bookFolderPath ?? dirname(persistedPrimaryPath));
+    const files: UnitBookFileInput[] = [];
+
+    for (const [index, file] of placement.entries()) {
+      const absolutePath = index === 0 ? persistedPrimaryPath : file.destPath;
+      const format = index === 0 ? primaryFormat : (file.format ?? extname(absolutePath).toLowerCase().slice(1));
+      const { size } = await stat(absolutePath);
+      files.push({
+        folderPath: loose ? absolutePath : sharedFolderPath,
+        absolutePath,
+        relPath: absolutePath.substring(folder.path.length + 1),
+        format,
+        sizeBytes: size,
+        role: file.role,
+        sortOrder: file.sortOrder,
+      });
+    }
+
+    return this.processor.createUnitBookRecords(library.id, folder.id, files);
+  }
+
+  /** Never throws: it runs while the error that caused it is already on its way up. */
+  private async undoUnitBookRecords(written: UnitBookRecords, dockFileId: number): Promise<void> {
+    try {
+      await this.processor.deleteUnitBookRecords(written);
+    } catch (err) {
+      this.logger.error(
+        `[book_dock.finalize_rollback] [fail] dockFileId=${dockFileId} bookIds=${written.createdBookIds.join(',')} error="${sanitizeLogValue(
+          err instanceof Error ? err.message : String(err),
+        )}" - could not take back the book rows this unit created`,
+      );
+    }
+  }
+
   private async classifyDestination(
     analysis: FinalizeCandidateAnalysis,
     existingDestinations: Map<string, number>,
   ): Promise<FinalizeCandidateAnalysis> {
     if (analysis.status !== 'ready' || !analysis.destPath || !analysis.library) return analysis;
 
+    // Every target path of a unit, not only the primary's: a folder that collides on track 7 is
+    // just as unplaceable as one that collides on track 1.
+    for (const file of analysis.placement ?? []) {
+      if (file.destPath === analysis.destPath) continue;
+      const taken = await fsAccess(file.destPath).then(
+        () => true,
+        () => false,
+      );
+      if (taken) {
+        return { ...analysis, status: 'destination_conflict', message: 'A file with this name already exists at the target location' };
+      }
+    }
+
     try {
       await fsAccess(analysis.destPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return analysis;
+      this.logFinalizeFailure(analysis.fileId, 'destination_check', error);
       return {
         ...analysis,
         status: 'error',
@@ -549,6 +1035,13 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       status: 'destination_conflict',
       message: 'A file with this name already exists at the target location',
     };
+  }
+
+  private logFinalizeFailure(fileId: number, stage: string, error: unknown): void {
+    const details = finalizeErrorLogDetails(error);
+    this.logger.warn(
+      `[book_dock.finalize] [fail] fileId=${fileId} stage=${stage} errorClass=${details.errorClass} errorCode=${details.errorCode} error="${sanitizeLogValue(details.message)}" - Book Dock file finalization failed`,
+    );
   }
 
   private destinationKey(libraryId: number, absolutePath: string): string {
@@ -574,6 +1067,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       newName: analysis.newName,
       success: false,
       message: analysis.message,
+      ...(analysis.errorCode ? { errorCode: analysis.errorCode } : {}),
     };
   }
 
@@ -586,6 +1080,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     status: string | undefined,
     search: string | undefined,
     needsReview: boolean | undefined,
+    readyToFile: boolean | undefined,
     processBatch: (rows: BookDockFileRow[], missingIds: number[]) => Promise<void>,
   ): Promise<void> {
     if (selectAll) {
@@ -598,6 +1093,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
           status,
           search,
           needsReview,
+          readyToFile,
           userId,
           canManageAll,
         });
@@ -630,9 +1126,15 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
 
     const row = await this.repo.findById(fileId);
     if (!row) return;
+    // Another module put this row here and runs its own checks before filing it. Racing it would
+    // either file the wrong book into the right library or file it before those checks ran.
+    if (row.autoFinalizeSuppressed) return;
     if (!shouldAutoFinalize(row, settings.metadataMode, settings.threshold)) return;
 
-    const autoFinalizeMetadata = resolveAutoFinalizeMetadata(settings.metadataMode, row.embeddedMetadata, row.fetchedMetadata, row.selectedMetadata);
+    const { metadata: autoFinalizeMetadata, lookedUpCoverUrl } = separateLookedUpCover(
+      resolveAutoFinalizeMetadata(settings.metadataMode, row.embeddedMetadata, row.fetchedMetadata, row.selectedMetadata),
+      row.selectedMetadata,
+    );
     const rowForFinalize = autoFinalizeMetadata
       ? {
           ...row,
@@ -640,7 +1142,8 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
         }
       : row;
 
-    const result = await this.finalizeFile(rowForFinalize, settings.libraryId, settings.folderId, new Map(), 0, true);
+    const overrideMap = new Map<number, FinalizeOverrideEntry>(lookedUpCoverUrl ? [[row.id, { lookedUpCoverUrl }]] : []);
+    const result = await this.finalizeFile(rowForFinalize, settings.libraryId, settings.folderId, overrideMap, 0, true);
     if (result.success) {
       this.logger.log(`Auto-finalized Book Dock file ${fileId} -> book ${result.bookId} (confidence ${row.confidence}%)`);
       this.emitChange();
@@ -650,13 +1153,47 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
           type: NotificationType.BookDockFinalized,
           title: 'Book auto-finalized',
           message: `"${row.fileName}" was added to your library`,
-          scope: row.uploadedBy ? { kind: 'user', userId: row.uploadedBy } : { kind: 'all' },
+          scope: row.uploadedBy ? { kind: 'user', userId: row.uploadedBy } : { kind: 'permission', permission: Permission.ManageBookDock },
           meta: { fileId, bookId: result.bookId },
         })
         .catch(() => {});
     } else {
       this.logger.warn(`Auto-finalize skipped for Book Dock file ${fileId}: ${result.message}`);
     }
+  }
+
+  /**
+   * Finalize one row on behalf of the module that owns it, after that module's own verification
+   * has passed. Deliberately not the public `finalize()`: that one is a user-initiated batch and
+   * announces itself with a "finalization completed" notification, which is not what a request
+   * landing in a library should say.
+   *
+   * Metadata is merged the same way the standard path merges it, rather than following the Book
+   * Dock's auto-finalize metadata mode: that mode is an operator preference about unattended dock
+   * files, and it does not govern a file another module vouched for.
+   */
+  async finalizeManagedFile(
+    fileId: number,
+    override: { libraryId?: number; folderId?: number; joinBook?: JoinBook },
+  ): Promise<BookDockFinalizeFileResult> {
+    const row = await this.repo.findById(fileId);
+    if (!row) {
+      return { fileId, fileName: `book-dock-file-${fileId}`, success: false, message: 'Book Dock file not found' };
+    }
+
+    const { metadata: merged, lookedUpCoverUrl } = separateLookedUpCover(
+      mergeBookDockMetadata(row.embeddedMetadata, row.fetchedMetadata, row.selectedMetadata),
+      row.selectedMetadata,
+    );
+    const rowForFinalize = merged ? { ...row, selectedMetadata: merged } : row;
+
+    const overrideMap = new Map<number, FinalizeOverrideEntry>([
+      [fileId, { libraryId: override.libraryId, folderId: override.folderId, joinBook: override.joinBook, lookedUpCoverUrl }],
+    ]);
+
+    const result = await this.finalizeFile(rowForFinalize, undefined, undefined, overrideMap, 0, true);
+    if (result.success) this.emitChange();
+    return result;
   }
 
   private enqueueAutoFinalize(fileId: number): void {
@@ -692,6 +1229,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       if (rows.length === 0) break;
 
       for (const row of rows) {
+        if (row.autoFinalizeSuppressed) continue;
         if (shouldAutoFinalize(row, settings.metadataMode, settings.threshold) && this.autoFinalizeQueue.enqueue(row.id)) {
           queued++;
         }
@@ -720,8 +1258,9 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
     status?: string,
     search?: string,
     needsReview?: boolean,
+    readyToFile?: boolean,
   ): Promise<{ fileId: number; fileName: string; newName: string }[]> {
-    const ids = selectAll ? await this.repo.findAllIds(excludedIds, status, search, userId, canManageAll, needsReview) : (fileIds ?? []);
+    const ids = selectAll ? await this.repo.findAllIds(excludedIds, status, search, userId, canManageAll, needsReview, readyToFile) : (fileIds ?? []);
     if (!ids.length) return [];
 
     const rows = await this.repo.findByIds(ids, userId, canManageAll);
@@ -733,97 +1272,226 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       ? new Map((await this.db.select().from(libraries).where(inArray(libraries.id, libraryIds))).map((lib) => [lib.id, lib]))
       : new Map<number, typeof libraries.$inferSelect>();
 
-    return rows.map((row) => {
-      const format = row.format ?? extname(row.fileName).toLowerCase().slice(1);
-      const meta = row.selectedMetadata ?? row.embeddedMetadata ?? {};
-      const effectiveLibraryId = row.targetLibraryId ?? defaultLibraryId ?? null;
-      const lib = effectiveLibraryId !== null ? libraryMap.get(effectiveLibraryId) : undefined;
-      let newName = lib?.organizationMode === 'book_per_folder' ? join(basename(row.fileName, extname(row.fileName)), row.fileName) : row.fileName;
-      const libraryPattern = lib?.fileNamingPattern ?? null;
-      const appPattern = lib?.organizationMode === 'book_per_folder' ? appPatternFolder : appPatternFile;
-      const pattern = libraryPattern ?? appPattern;
+    return Promise.all(
+      rows.map(async (row) => {
+        const format = row.format ?? extname(row.fileName).toLowerCase().slice(1);
+        const effectiveLibraryId = row.targetLibraryId ?? defaultLibraryId ?? null;
+        const lib = effectiveLibraryId !== null ? libraryMap.get(effectiveLibraryId) : undefined;
+        const pattern = lib?.fileNamingPattern ?? (lib?.organizationMode === 'book_per_folder' ? appPatternFolder : appPatternFile);
+        const newName = await this.resolveRelativeDestination(lib, row, format, pattern, sanitizeForCrossPlatform);
 
-      if (pattern) {
-        const tokens = this.buildPatternTokens(meta, row.fileName, format, lib?.name);
-        const resolved =
-          lib?.organizationMode === 'book_per_file'
-            ? resolveDownloadFilename(pattern, tokens, format, { sanitizeForCrossPlatform })
-            : resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
-        if (resolved) newName = resolved;
-      }
-
-      return { fileId: row.id, fileName: row.fileName, newName };
-    });
+        return { fileId: row.id, fileName: row.fileName, newName };
+      }),
+    );
   }
 
-  private async resolveDestination(
-    library: { name?: string | null; fileNamingPattern?: string | null; organizationMode?: string | null },
-    folderPath: string,
-    row: BookDockFileRow,
-    format: string,
-  ): Promise<string> {
+  private async resolveDestination(library: NamingLibrary, folderPath: string, row: BookDockFileRow, format: string): Promise<string> {
     const pattern =
       library.fileNamingPattern ??
       (library.organizationMode === 'book_per_folder'
         ? await this.appSettings.getUploadPatternBookPerFolder()
         : await this.appSettings.getUploadPattern());
     const sanitizeForCrossPlatform = await this.appSettings.isCrossPlatformPathSanitizationEnabled();
-    const meta = row.selectedMetadata ?? row.embeddedMetadata ?? {};
 
+    return join(folderPath, await this.resolveRelativeDestination(library, row, format, pattern, sanitizeForCrossPlatform));
+  }
+
+  /**
+   * Where a docked file belongs under its library folder. The finalize move and the name
+   * preview both go through here so they cannot disagree about the destination.
+   *
+   * Both organization modes keep the pattern's folder segments, matching the rename and move
+   * services; `book_per_file` differs only in that the file itself is the book, so without a
+   * pattern it stays where it is instead of gaining a folder of its own.
+   */
+  private async resolveRelativeDestination(
+    library: NamingLibrary | undefined,
+    row: BookDockFileRow,
+    format: string,
+    pattern: string | null,
+    sanitizeForCrossPlatform: boolean,
+  ): Promise<string> {
     if (pattern) {
-      const tokens = this.buildPatternTokens(meta, row.fileName, format, library.name);
-      const resolved =
-        library.organizationMode === 'book_per_file'
-          ? resolveDownloadFilename(pattern, tokens, format, { sanitizeForCrossPlatform })
-          : resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
-      if (resolved) return join(folderPath, resolved);
+      const meta = row.selectedMetadata ?? row.embeddedMetadata ?? {};
+      const mediaOverlayAvailable = patternReferencesToken(pattern, 'readaloud')
+        ? await this.inspectMediaOverlayAvailable(row.absolutePath, format)
+        : false;
+      const tokens = this.buildFilePatternTokens(meta, row.fileName, format, library?.name, mediaOverlayAvailable);
+      const resolved = resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
+      if (resolved) return resolved;
     }
 
-    if (library.organizationMode === 'book_per_file') return join(folderPath, row.fileName);
-
-    const stem = basename(row.fileName, extname(row.fileName));
-    return join(folderPath, stem, row.fileName);
-  }
-
-  private buildPatternTokens(meta: BookDockMetadata, fileName: string, format: string, libraryName?: string | null): Record<string, string> {
-    const stem = basename(fileName, extname(fileName));
-    const tokens: Record<string, string> = { originalFilename: stem, extension: format };
-
-    if (libraryName) tokens['library'] = libraryName;
-    if (meta.title) tokens['title'] = meta.title;
-    if (meta.subtitle) tokens['subtitle'] = meta.subtitle;
-    if (meta.publisher) tokens['publisher'] = meta.publisher;
-    if (meta.language) tokens['language'] = meta.language;
-    if (meta.isbn13) tokens['isbn'] = meta.isbn13;
-    if (meta.publishedYear) tokens['year'] = String(meta.publishedYear);
-    if (meta.seriesName) tokens['series'] = meta.seriesName;
-    const seriesIndex = formatSeriesIndex(meta.seriesIndex ?? null);
-    if (seriesIndex) tokens['seriesIndex'] = seriesIndex;
-    if (meta.authors && meta.authors.length > 0) {
-      tokens['authors'] = meta.authors.join(', ');
+    if (library?.organizationMode === 'book_per_folder') {
+      return join(basename(row.fileName, extname(row.fileName)), row.fileName);
     }
 
-    return tokens;
+    return row.fileName;
   }
 
-  private async applyMetadata(bookId: number, row: BookDockFileRow): Promise<void> {
+  private buildFilePatternTokens(
+    meta: BookDockMetadata,
+    fileName: string,
+    format: string,
+    libraryName?: string | null,
+    mediaOverlayAvailable = false,
+  ): Record<string, string> {
+    return buildPatternTokens({
+      metadata: meta,
+      authors: meta.authors,
+      narrators: meta.narrators,
+      originalStem: basename(fileName, extname(fileName)),
+      format,
+      libraryName,
+      mediaOverlayAvailable,
+    });
+  }
+
+  private async inspectMediaOverlayAvailable(absolutePath: string, format: string): Promise<boolean> {
+    const startedAt = Date.now();
+    const fields = await inspectEpubMediaOverlayFields(absolutePath, format, (err) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[book_dock.media_overlay_capability] [fail] path="${sanitizeLogValue(absolutePath)}" durationMs=${Date.now() - startedAt} errorClass=${error.constructor.name} error="${sanitizeLogValue(error.message)}" - EPUB media-overlay inspection failed`,
+      );
+    });
+    return fields.mediaOverlayAvailable;
+  }
+
+  /**
+   * What a new format adds to a book that already exists: its own cover slot while that is empty,
+   * and the audio facts and identifiers the book does not have yet, unless they are locked. Nothing
+   * the book already says is overwritten - the title, authors and description were settled before
+   * this file arrived, and an audiobook's tags routinely disagree with them ("Unabridged", the
+   * narrator as author).
+   */
+  private async applyJoinedMetadata(
+    bookId: number,
+    row: BookDockFileRow,
+    requestedCoverUrl: string | null,
+    lookedUpCoverUrl: string | null,
+  ): Promise<void> {
     const meta = normalizeFinalizeMetadata(row.selectedMetadata ?? row.embeddedMetadata);
     const audio = resolveAudioFinalizeFields(row.embeddedMetadata, row.selectedMetadata);
-    let selectedCoverApplied = false;
+    const medium = row.format && isAudioFormat(row.format) ? 'audio' : 'ebook';
 
-    const selectedCoverUrl = meta.coverUrl;
-    if (selectedCoverUrl) {
-      selectedCoverApplied = await this.metadataService.downloadAndSaveCover(selectedCoverUrl, bookId);
+    // A cover picked in the Book Dock for this file is used as it is. Otherwise only an empty slot is
+    // filled: a cover the book already holds for this medium stays, a custom one resting dormant
+    // since the last copy of this format went away included. The requested art comes last.
+    const picked = meta.coverUrl
+      ? await this.metadataService.downloadAndSaveCover([{ url: meta.coverUrl }], bookId, medium, { userChosen: true })
+      : false;
+    if (!picked && (await this.metadataService.coverSlotIsEmpty(bookId, medium))) {
+      await this.applyUnpickedCover(bookId, row, medium, true, lookedUpCoverUrl, requestedCoverUrl);
     }
 
-    if (!selectedCoverApplied && row.coverPath) {
+    const [current] = await this.db
+      .select({
+        lockedFields: bookMetadata.lockedFields,
+        durationSeconds: bookMetadata.durationSeconds,
+        abridged: bookMetadata.abridged,
+        chapters: bookMetadata.chapters,
+      })
+      .from(bookMetadata)
+      .where(eq(bookMetadata.bookId, bookId))
+      .limit(1);
+    const locked = new Set(current?.lockedFields ?? []);
+
+    const identifiers = {
+      googleBooksId: meta.googleBooksId,
+      goodreadsId: meta.goodreadsId,
+      amazonId: meta.amazonId,
+      hardcoverId: meta.hardcoverId,
+      openLibraryId: meta.openLibraryId,
+      itunesId: meta.itunesId,
+      audibleId: meta.audibleId,
+      librofmId: meta.librofmId,
+      koboId: meta.koboId,
+    } as const;
+    const fillMissing: Record<string, SQL> = {};
+    for (const [field, value] of Object.entries(identifiers)) {
+      if (value && !locked.has(field)) fillMissing[field] = sql`coalesce(${bookMetadata[field as keyof typeof identifiers]}, ${value})`;
+    }
+
+    const audioPatch = medium === 'audio' ? buildAudioMetadataPatch(audio) : {};
+    const audioFill = {
+      ...(audioPatch.durationSeconds !== undefined && current?.durationSeconds == null && !locked.has('durationSeconds')
+        ? { durationSeconds: audioPatch.durationSeconds }
+        : {}),
+      ...(audioPatch.abridged !== undefined && current?.abridged == null && !locked.has('abridged') ? { abridged: audioPatch.abridged } : {}),
+      ...(audioPatch.chapters !== undefined && !(Array.isArray(current?.chapters) && current.chapters.length > 0)
+        ? { chapters: audioPatch.chapters }
+        : {}),
+    };
+    if (Object.keys(fillMissing).length > 0 || Object.keys(audioFill).length > 0) {
+      await this.db
+        .update(bookMetadata)
+        .set({ ...fillMissing, ...audioFill, updatedAt: new Date() })
+        .where(eq(bookMetadata.bookId, bookId));
+    }
+
+    if (medium === 'audio' && audio.narrators.length > 0 && !locked.has('narrators') && !(await this.hasNarrators(bookId))) {
+      await this.metadataService.replaceNarrators(
+        bookId,
+        audio.narrators.map((name) => ({ name, sortName: null })),
+      );
+    }
+
+    await this.metadataScoreService.calculateAndSave(bookId);
+  }
+
+  private async hasNarrators(bookId: number): Promise<boolean> {
+    const [row] = await this.db.select({ bookId: bookNarrators.bookId }).from(bookNarrators).where(eq(bookNarrators.bookId, bookId)).limit(1);
+    return row !== undefined;
+  }
+
+  /**
+   * One cover slot for a file nobody picked a cover for, filled the way a metadata refresh fills it.
+   * The file's own art goes in first. The cover the field rules chose in the metadata lookup then
+   * replaces it only if it fits the slot, so the rules decide between providers while a portrait
+   * jacket can never displace the square art an m4b carries. `fallbackUrl` is tried only while the
+   * slot is still empty.
+   */
+  private async applyUnpickedCover(
+    bookId: number,
+    row: BookDockFileRow,
+    medium: CoverMedium,
+    ownsStagedCover: boolean,
+    lookedUpCoverUrl: string | null,
+    fallbackUrl: string | null,
+  ): Promise<void> {
+    let staged = false;
+    if (ownsStagedCover && row.coverPath) {
       try {
-        const bytes = await readFile(row.coverPath);
-        await this.metadataService.saveExtractedCoverBytes(bookId, bytes);
+        await this.metadataService.saveExtractedCoverBytes(bookId, await readFile(row.coverPath), medium);
+        staged = true;
       } catch (err) {
         this.logger.warn(`Failed to copy Book Dock cover to book ${bookId}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    const urls = [lookedUpCoverUrl, staged ? null : fallbackUrl].filter((url, index, all): url is string => !!url && all.indexOf(url) === index);
+    if (urls.length > 0)
+      await this.metadataService.downloadAndSaveCover(
+        urls.map((url) => ({ url })),
+        bookId,
+        medium,
+      );
+  }
+
+  /**
+   * `lookedUpCoverUrl`: see `applyUnpickedCover`. A cover picked in the Book Dock is used as it is.
+   * The staged cover was read from the unit's primary file, so it fills only that file's medium on
+   * the book that owns it (`ownsStagedCover`); the other books of a loose-file unit get their own
+   * art from reconcile.
+   */
+  private async applyMetadata(bookId: number, row: BookDockFileRow, ownsStagedCover = true, lookedUpCoverUrl: string | null = null): Promise<void> {
+    const meta = normalizeFinalizeMetadata(row.selectedMetadata ?? row.embeddedMetadata);
+    const audio = resolveAudioFinalizeFields(row.embeddedMetadata, row.selectedMetadata);
+
+    const medium = row.format && isAudioFormat(row.format) ? 'audio' : 'ebook';
+    const picked = meta.coverUrl
+      ? await this.metadataService.downloadAndSaveCover([{ url: meta.coverUrl }], bookId, medium, { userChosen: true })
+      : false;
+    if (!picked) await this.applyUnpickedCover(bookId, row, medium, ownsStagedCover, lookedUpCoverUrl, null);
 
     const scalarFields = {
       title: meta.title ?? null,
@@ -866,6 +1534,7 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       await this.seriesMemberships?.syncPrimaryFromMetadata(bookId);
     }
 
+    if (meta.externalProviderIds) await this.providerIdStore?.write(bookId, meta.externalProviderIds);
     if (meta.communityRatings !== undefined) {
       await this.bookReadService.replaceCommunityRatings(bookId, meta.communityRatings);
     }
@@ -901,10 +1570,18 @@ export class BookDockFinalizeService implements OnModuleInit, OnApplicationBoots
       const thumbPath = row.coverPath.replace(/\.\w+$/, '_thumb.jpg');
       await safeUnlink(thumbPath);
     }
+    // The unit's files have all been moved into the library by now, so what is left is the empty
+    // directory they came out of. The child rows go with the anchor via the cascade.
+    if (row.unitDirectory) await removeEmptyDirectory(row.unitDirectory);
     await this.repo.deleteById(row.id);
   }
 
+  /** Discarding a unit throws away every file in it. Discarding track 1 of 31 is not a thing. */
   private async cleanupDiscardedBookDockFile(row: BookDockFileRow): Promise<void> {
+    for (const file of await this.repo.findUnitFiles(row.id)) await safeUnlink(file.absolutePath);
+    if (row.unitDirectory) {
+      await removeEmptyDirectory(row.unitDirectory);
+    }
     await safeUnlink(row.absolutePath);
     if (row.coverPath) {
       await safeUnlink(row.coverPath);
@@ -938,10 +1615,19 @@ async function safeUnlink(path: string): Promise<void> {
   }
 }
 
+/**
+ * Deliberately non-recursive. A directory that still holds files is one the dock did not fully
+ * account for, and leaving it for a human to look at is far better than deleting what is in it.
+ */
+async function removeEmptyDirectory(path: string): Promise<void> {
+  await rmdir(path).catch(() => {});
+}
+
 function createFinalizePreviewSummary(): BookDockFinalizePreviewResult {
   return {
     total: 0,
     ready: 0,
+    joining: 0,
     duplicates: 0,
     destinationConflicts: 0,
     missingDestination: 0,
@@ -952,7 +1638,7 @@ function createFinalizePreviewSummary(): BookDockFinalizePreviewResult {
   };
 }
 
-function addFinalizePreviewAnalysis(summary: BookDockFinalizePreviewResult, analysis: FinalizeCandidateAnalysis): void {
+function addFinalizePreviewAnalysis(summary: BookDockFinalizePreviewResult, analysis: FinalizeCandidateAnalysis, join?: PreviewJoinInfo): void {
   addFinalizePreviewItem(summary, {
     fileId: analysis.fileId,
     fileName: analysis.fileName,
@@ -960,11 +1646,17 @@ function addFinalizePreviewAnalysis(summary: BookDockFinalizePreviewResult, anal
     status: analysis.status,
     existingBookId: analysis.existingBookId,
     message: analysis.message,
+    ...(analysis.errorCode ? { errorCode: analysis.errorCode } : {}),
+    ...(analysis.library ? { libraryId: analysis.library.id } : {}),
+    ...(join ? { canJoinBook: join.canJoinBook } : {}),
+    ...(analysis.joinSummary && analysis.status === 'ready' ? { joinsBook: analysis.joinSummary } : {}),
+    ...(join?.suggestedJoinBook ? { suggestedJoinBook: join.suggestedJoinBook } : {}),
   });
 }
 
 function addFinalizePreviewItem(summary: BookDockFinalizePreviewResult, item: BookDockFinalizePreviewItem): void {
   summary.total++;
+  if (item.status === 'ready' && item.joinsBook) summary.joining = (summary.joining ?? 0) + 1;
   if (item.status === 'ready') summary.ready++;
   else if (item.status === 'duplicate') summary.duplicates++;
   else if (item.status === 'destination_conflict') summary.destinationConflicts++;
@@ -1007,12 +1699,6 @@ function normalizePublishedYear(value: unknown): number | null {
   const parsed = normalizeInteger(value);
   if (parsed === null) return null;
   if (parsed < MIN_PUBLISHED_YEAR || parsed > MAX_PUBLISHED_YEAR) return null;
-  return parsed;
-}
-
-function normalizeReal(value: unknown): number | null {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number.parseFloat(value.trim()) : NaN;
-  if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return parsed;
 }
 
@@ -1063,7 +1749,7 @@ function normalizeFinalizeMetadata(meta: BookDockMetadata | null | undefined): N
     language: normalizeLanguage(normalizedMeta?.language),
     pageCount: normalizeInteger(normalizedMeta?.pageCount),
     seriesName: normalizeText(normalizedMeta?.seriesName, 500),
-    seriesIndex: normalizeReal(normalizedMeta?.seriesIndex),
+    seriesIndex: parseSeriesIndex(normalizedMeta?.seriesIndex),
     authors: normalizeStringArray(normalizedMeta?.authors, 500),
     genres: normalizeStringArray(normalizedMeta?.genres, 200),
     coverUrl: normalizeText(normalizedMeta?.coverUrl),
@@ -1083,6 +1769,7 @@ function normalizeFinalizeMetadata(meta: BookDockMetadata | null | undefined): N
     aladinId: normalizeText(normalizedMeta?.aladinId, 20),
     seriesMemberships: normalizeSeriesMemberships(normalizedMeta?.seriesMemberships),
     communityRatings: normalizeCommunityRatings(normalizedMeta?.communityRatings),
+    externalProviderIds: normalizedMeta?.externalProviderIds ?? undefined,
     comicMetadata: normalizeComicMetadata(normalizedMeta?.comicMetadata),
   };
 }
@@ -1099,7 +1786,7 @@ function normalizeSeriesMemberships(value: BookDockMetadata['seriesMemberships']
     const key = seriesName.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    memberships.push({ seriesName, seriesIndex: normalizeReal(item.seriesIndex) });
+    memberships.push({ seriesName, seriesIndex: parseSeriesIndex(item.seriesIndex) });
   }
   return memberships;
 }
@@ -1112,7 +1799,7 @@ function normalizeCommunityRatings(
 
   const ratings = new Map<MetadataProviderKey, { provider: MetadataProviderKey; rating: number; ratingCount: number | null }>();
   for (const item of value) {
-    if (!item || !METADATA_PROVIDER_KEYS.has(item.provider)) continue;
+    if (!item || !isMetadataProviderKeySyntax(item.provider)) continue;
     if (!Number.isFinite(item.rating) || item.rating < 0 || item.rating > 5) continue;
     const ratingCount = Number.isInteger(item.ratingCount) && item.ratingCount! >= 0 ? item.ratingCount! : null;
     ratings.set(item.provider, { provider: item.provider, rating: item.rating, ratingCount });
@@ -1141,6 +1828,7 @@ function normalizeComicMetadata(value: BookDockMetadata['comicMetadata']): Comic
 type AudioFinalizeFields = {
   durationSeconds: number | null;
   chapters: AudiobookChapter[] | null;
+  chaptersSource: AudiobookChapterSource;
   narrators: string[];
   abridged: boolean | null;
 };
@@ -1156,15 +1844,18 @@ function resolveAudioFinalizeFields(
       normalizedSelected?.durationSeconds !== undefined ? normalizedSelected.durationSeconds : normalizedEmbedded?.durationSeconds,
     ),
     chapters: normalizeChapters(normalizedSelected?.chapters !== undefined ? normalizedSelected.chapters : normalizedEmbedded?.chapters),
+    chaptersSource: normalizedSelected?.chapters !== undefined ? 'provider' : 'embedded',
     narrators: normalizeStringArray(normalizedSelected?.narrators !== undefined ? normalizedSelected.narrators : normalizedEmbedded?.narrators, 500),
     abridged: normalizeAbridged(normalizedSelected?.abridged !== undefined ? normalizedSelected.abridged : normalizedEmbedded?.abridged),
   };
 }
 
-function buildAudioMetadataPatch(audio: AudioFinalizeFields): { durationSeconds?: number; chapters?: AudiobookChapter[]; abridged?: boolean } {
-  const patch: { durationSeconds?: number; chapters?: AudiobookChapter[]; abridged?: boolean } = {};
+function buildAudioMetadataPatch(
+  audio: AudioFinalizeFields,
+): { durationSeconds?: number; chapters?: AudiobookChapter[]; abridged?: boolean } & Partial<ReturnType<typeof chapterProvenance>> {
+  const patch: { durationSeconds?: number; chapters?: AudiobookChapter[]; abridged?: boolean } & Partial<ReturnType<typeof chapterProvenance>> = {};
   if (audio.durationSeconds !== null) patch.durationSeconds = audio.durationSeconds;
-  if (audio.chapters !== null) patch.chapters = audio.chapters;
+  if (audio.chapters !== null) Object.assign(patch, { chapters: audio.chapters }, chapterProvenance(audio.chapters, audio.chaptersSource));
   if (audio.abridged !== null) patch.abridged = audio.abridged;
   return patch;
 }
@@ -1195,7 +1886,7 @@ function normalizeChapters(value: unknown): AudiobookChapter[] | null {
     const title = typeof candidate.title === 'string' ? candidate.title : '';
     chapters.push({ title, startMs: Math.round(startMs) });
   }
-  return chapters.length > 0 ? chapters : null;
+  return chapters.length > 0 ? normalizeAudiobookChapters(chapters) : null;
 }
 
 function resolveFinalizeErrorMessage(error: unknown): string {
@@ -1205,10 +1896,46 @@ function resolveFinalizeErrorMessage(error: unknown): string {
   if (isBookMetadataConstraintViolation(error)) {
     return INVALID_METADATA_MESSAGE;
   }
+  // Infrastructure errors can contain SQL and absolute filesystem paths. They belong in the
+  // sanitized server log, not in the request drawer of the person who asked for the book.
+  if (isDatabaseError(error) || hasNodeStyleErrorCode(error)) {
+    return INTERNAL_FAILURE_MESSAGE;
+  }
   if (error instanceof Error && error.message) {
     return error.message;
   }
   return 'Finalization failed';
+}
+
+/**
+ * Drizzle wraps the driver's `DatabaseError` in a `DrizzleQueryError`, so the chain is walked
+ * rather than relying on the outermost error. Checking the concrete error type avoids mistaking
+ * five-character Node codes such as `EPERM` and `EXDEV` for SQLSTATE values.
+ */
+function isDatabaseError(error: unknown): boolean {
+  for (const entry of iterateErrorChain(error)) {
+    if (entry instanceof DatabaseError) return true;
+  }
+  return false;
+}
+
+function hasNodeStyleErrorCode(error: unknown): boolean {
+  for (const entry of iterateErrorChain(error)) {
+    if (/^E[A-Z0-9_]+$/.test(asString(entry.code))) return true;
+  }
+  return false;
+}
+
+function finalizeErrorLogDetails(error: unknown): { errorClass: string; errorCode: string; message: string } {
+  let selected: Record<string, unknown> | undefined;
+  for (const entry of iterateErrorChain(error)) selected = entry;
+
+  const errorCode = asString(selected?.code) || 'none';
+  const errorClass =
+    selected instanceof Error ? selected.constructor.name : asString(selected?.name) || (error instanceof Error ? error.constructor.name : 'Error');
+  const message = hasNodeStyleErrorCode(error) ? errorCode : asString(selected?.message) || (error instanceof Error ? error.message : String(error));
+
+  return { errorClass, errorCode, message };
 }
 
 function isPublishedYearConstraintViolation(error: unknown): boolean {
@@ -1261,6 +1988,20 @@ function mergeBookDockMetadata(
   return Object.keys(merged).length > 0 ? merged : null;
 }
 
+/**
+ * Splits off a cover the merge took from the metadata lookup. A cover in the row's own selection
+ * was picked by a person and stays; anything else the merge carried was found unattended.
+ */
+function separateLookedUpCover(
+  metadata: BookDockMetadata | null,
+  selected: BookDockMetadata | null | undefined,
+): { metadata: BookDockMetadata | null; lookedUpCoverUrl: string | null } {
+  const picked = normalizeBookDockMetadata(selected)?.coverUrl ?? null;
+  if (!metadata?.coverUrl || metadata.coverUrl === picked) return { metadata, lookedUpCoverUrl: null };
+  const { coverUrl, ...rest } = metadata;
+  return { metadata: Object.keys(rest).length > 0 ? rest : null, lookedUpCoverUrl: coverUrl };
+}
+
 function resolveAutoFinalizeMetadata(
   mode: BookDockAutoFinalizeMetadataMode,
   embedded: BookDockMetadata | null | undefined,
@@ -1277,6 +2018,12 @@ function shouldAutoFinalize(row: BookDockFileRow, mode: BookDockAutoFinalizeMeta
     return row.status === 'ready';
   }
   return row.confidence !== null && row.confidence >= threshold;
+}
+
+function toOverrideMap(overrides: FinalizeRequestOverride[] | undefined): Map<number, FinalizeOverrideEntry> {
+  return new Map(
+    (overrides ?? []).map(({ joinBook, ...rest }) => [rest.fileId, joinBook ? { ...rest, requestedJoinBookId: joinBook.bookId } : rest]),
+  );
 }
 
 function dedupeIds(ids: number[]): number[] {

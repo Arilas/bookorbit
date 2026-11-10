@@ -16,6 +16,7 @@ function makeSmartScope(overrides: Partial<SmartScope> = {}): SmartScope {
     filter: null,
     defaultSort: [],
     isPublic: false,
+    coverAspectRatio: '2/3',
     syncToKobo: false,
     koboSyncEnabled: false,
     isOwner: true,
@@ -39,27 +40,30 @@ describe('useSmartScopes', () => {
     apiMock.mockReset()
   })
 
-  it('replaces the smartScope array when creating a smartScope', async () => {
-    const created = makeSmartScope()
+  it('adds the created scope and its book count to the shared sidebar state', async () => {
+    const created = makeSmartScope({ bookCount: 7 })
     apiMock.mockResolvedValueOnce(makeResponse(created))
 
     const { useSmartScopes } = await import('../useSmartScopes')
     const { smartScopes, createSmartScope } = useSmartScopes()
     const previous = smartScopes.value
+    const sidebar = useSmartScopes()
 
     await createSmartScope({ name: created.name, icon: 'Aperture', defaultSort: [] })
 
     expect(smartScopes.value).toEqual([created])
     expect(smartScopes.value).not.toBe(previous)
+    expect(sidebar.smartScopes.value[0]?.bookCount).toBe(7)
   })
 
-  it('replaces the smartScope array when updating a smartScope', async () => {
-    const created = makeSmartScope()
-    const updated = makeSmartScope({ name: 'Updated SmartScope' })
+  it('replaces the cached book count with the count returned after an update', async () => {
+    const created = makeSmartScope({ bookCount: 7 })
+    const updated = makeSmartScope({ name: 'Updated SmartScope', bookCount: 3 })
     apiMock.mockResolvedValueOnce(makeResponse(created)).mockResolvedValueOnce(makeResponse(updated))
 
     const { useSmartScopes } = await import('../useSmartScopes')
     const { smartScopes, createSmartScope, updateSmartScope } = useSmartScopes()
+    const sidebar = useSmartScopes()
 
     await createSmartScope({ name: created.name, icon: 'Aperture', defaultSort: [] })
     const previous = smartScopes.value
@@ -67,6 +71,7 @@ describe('useSmartScopes', () => {
 
     expect(smartScopes.value).toEqual([updated])
     expect(smartScopes.value).not.toBe(previous)
+    expect(sidebar.smartScopes.value[0]?.bookCount).toBe(3)
   })
 
   it('patches the sharing flag and reflects the shared scope returned by the server', async () => {
@@ -116,7 +121,8 @@ describe('useSmartScopes', () => {
     const { smartScopes, fetchSmartScopes, setKoboSync } = useSmartScopes()
 
     await fetchSmartScopes()
-    await expect(setKoboSync(11, true)).rejects.toThrow('HTTP 403')
+    // The thrown message is user-facing copy; the status stays reachable for callers that branch on it.
+    await expect(setKoboSync(11, true)).rejects.toMatchObject({ status: 403, name: 'ApiError' })
 
     expect(smartScopes.value).toEqual([shared])
   })

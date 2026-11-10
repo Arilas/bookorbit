@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
-import VChart from 'vue-echarts'
+import AppChart from '@/components/charts/AppChart.vue'
 import { Calendar } from '@lucide/vue'
-import { useThemeStore } from '@/stores/theme'
+import { useChartTokens } from '@/composables/useChartTokens'
 
 import { buildHeatmapPalette } from '@/lib/heatmap-palette'
+import { getReadingSourceDisplayLabels } from '@/lib/reading-source'
 import { useUserReadingHeatmap } from '../../composables/useUserReadingHeatmap'
 import { escapeHtml } from '../../lib/escape-html'
 import ChartCard from '../ChartCard.vue'
@@ -13,7 +14,7 @@ import ChartEmptyState from '../ChartEmptyState.vue'
 
 const MIN_ACTIVE_DAYS = 5
 
-const themeStore = useThemeStore()
+const chartTokens = useChartTokens()
 const { t } = useI18n()
 
 const { data, loading, error } = useUserReadingHeatmap()
@@ -24,8 +25,8 @@ const activeDays = computed(() => data.value.filter((item) => item.eventsCount >
 const isEmpty = computed(() => totalEvents.value === 0)
 const lowConfidence = computed(() => totalEvents.value > 0 && activeDays.value < MIN_ACTIVE_DAYS)
 const heatmapPaletteState = computed(() => ({
-  accent: themeStore.accent,
-  palette: buildHeatmapPalette({ theme: themeStore.resolvedTheme, profile: 'github' }),
+  key: chartTokens.value.key,
+  palette: buildHeatmapPalette({ theme: chartTokens.value.dark ? 'dark' : 'light', profile: 'github' }),
 }))
 
 function buildContributionPieces(scale: string[]) {
@@ -56,6 +57,7 @@ watchEffect(() => {
   const palette = heatmapPaletteState.value.palette
 
   const byDay = new Map(data.value.map((item) => [item.day, item]))
+  const sourceDisplayLabels = getReadingSourceDisplayLabels(data.value.flatMap((item) => item.bySource ?? []))
   const values: Array<readonly [string, number, number]> = []
   for (const cursor = new Date(yearStart); cursor <= yearEnd; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
     const day = cursor.toISOString().slice(0, 10)
@@ -79,7 +81,7 @@ watchEffect(() => {
         const sourceRows = bySource
           ? bySource
               .filter((source) => source.readingSeconds > 0)
-              .map((source) => `${escapeHtml(source.label)}: ${Math.round(source.readingSeconds / 60)}m`)
+              .map((source) => `${escapeHtml(sourceDisplayLabels.get(source.key) ?? source.label)}: ${Math.round(source.readingSeconds / 60)}m`)
               .join('<br/>')
           : ''
         const base = `${day}<br/><strong>${minutes}</strong> ${minuteLabel}<br/>${events} ${eventLabel}`
@@ -155,7 +157,7 @@ watchEffect(() => {
       :description="t('statistics.charts.readingHeatmap.notEnoughData', { count: MIN_ACTIVE_DAYS })"
     />
     <div v-else class="h-full min-h-0 rounded-md px-2 py-2">
-      <VChart :option autoresize class="h-full w-full" />
+      <AppChart :option autoresize class="h-full w-full" />
     </div>
   </ChartCard>
 </template>

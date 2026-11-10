@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 import { SeriesRepository } from './series.repository';
 
@@ -29,14 +31,25 @@ function makeChain(result: unknown) {
   return chain;
 }
 
-function makeFindPageDb(countResult: unknown, dataResult: unknown) {
+const NO_FACETS = { all: 0, notStarted: 0, inProgress: 0, complete: 0, hasGaps: 0 };
+
+function makeFindPageDb(facetResult: unknown, dataResult: unknown) {
   const baseChain = makeChain([]);
-  const countChain = makeChain(countResult);
+  const facetChain = makeChain(facetResult);
   const dataChain = makeChain(dataResult);
 
-  const select = vi.fn().mockReturnValueOnce(baseChain).mockReturnValueOnce(countChain).mockReturnValueOnce(dataChain);
+  const select = vi.fn().mockReturnValueOnce(baseChain).mockReturnValueOnce(facetChain).mockReturnValueOnce(dataChain);
 
-  return { select, baseChain, countChain, dataChain };
+  return { select, baseChain, facetChain, dataChain };
+}
+
+function stubPageHelpers(
+  repo: SeriesRepository,
+  maps?: { authors?: Map<number, string[]>; covers?: Map<number, number[]>; members?: Map<number, unknown> },
+) {
+  vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(maps?.authors ?? new Map());
+  vi.spyOn(repo as never, 'fetchCoverBookIds').mockResolvedValue(maps?.covers ?? new Map());
+  vi.spyOn(repo as never, 'fetchSeriesMembers').mockResolvedValue(maps?.members ?? new Map());
 }
 
 function makeDb() {
@@ -69,24 +82,23 @@ describe('SeriesRepository', () => {
 
   describe('findPage', () => {
     it('returns empty page when no series rows found', async () => {
-      const { select, dataChain } = makeFindPageDb([{ total: 0 }], []);
+      const { select, dataChain } = makeFindPageDb([{ ...NO_FACETS }], []);
       dataChain.then = (resolve: (v: unknown) => unknown) => Promise.resolve([]).then(resolve);
       db.select = select;
 
-      vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(new Map());
-      vi.spyOn(repo as never, 'fetchCoverBookIds').mockResolvedValue(new Map());
+      stubPageHelpers(repo);
 
       const result = await repo.findPage(BASE_PARAMS);
 
-      expect(result).toEqual({ items: [], total: 0, page: 0, size: 25 });
+      expect(result).toEqual({ items: [], total: 0, facets: NO_FACETS, page: 0, size: 25 });
     });
 
     it('returns items with authors and coverBookIds when rows found', async () => {
       const seriesRows = [
-        { id: 10, name: 'Dune', bookCount: 6, readCount: 3, lastAddedAt: '2024-01-01' },
-        { id: 11, name: 'Foundation', bookCount: 7, readCount: 0, lastAddedAt: '2023-06-15' },
+        { id: 10, name: 'Dune', bookCount: 6, readCount: 3, readingCount: 1, expectedBookCount: 6, lastAddedAt: '2024-01-01' },
+        { id: 11, name: 'Foundation', bookCount: 7, readCount: 0, readingCount: 0, expectedBookCount: null, lastAddedAt: '2023-06-15' },
       ];
-      const { select } = makeFindPageDb([{ total: 2 }], seriesRows);
+      const { select } = makeFindPageDb([{ ...NO_FACETS, all: 2 }], seriesRows);
       db.select = select;
 
       const authorsMap = new Map([
@@ -97,9 +109,11 @@ describe('SeriesRepository', () => {
         [10, [100, 101]],
         [11, [200]],
       ]);
+      const membersMap = new Map<number, unknown>([
+        [10, { rows: [{ bookId: 100, seriesIndex: '1', title: 'Dune', status: 'read' }], truncated: false, libraryNames: ['Novels'] }],
+      ]);
 
-      vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(authorsMap);
-      vi.spyOn(repo as never, 'fetchCoverBookIds').mockResolvedValue(coversMap);
+      stubPageHelpers(repo, { authors: authorsMap, covers: coversMap, members: membersMap });
 
       const result = await repo.findPage(BASE_PARAMS);
 
@@ -110,27 +124,39 @@ describe('SeriesRepository', () => {
         name: 'Dune',
         bookCount: 6,
         readCount: 3,
+        readingCount: 1,
+        expectedBookCount: 6,
         authors: ['Frank Herbert'],
         coverBookIds: [100, 101],
         lastAddedAt: '2024-01-01',
+        members: [{ bookId: 100, seriesIndex: '1', title: 'Dune', status: 'read' }],
+        membersTruncated: false,
+        libraryNames: ['Novels'],
       });
       expect(result.items[1]).toEqual({
         id: 11,
         name: 'Foundation',
         bookCount: 7,
         readCount: 0,
+        readingCount: 0,
+        expectedBookCount: null,
         authors: ['Isaac Asimov'],
         coverBookIds: [200],
         lastAddedAt: '2023-06-15',
+        members: [],
+        membersTruncated: false,
+        libraryNames: [],
       });
     });
 
     it('uses empty arrays for authors and covers when maps have no entry', async () => {
-      const { select } = makeFindPageDb([{ total: 1 }], [{ id: 99, name: 'Unknown', bookCount: 1, readCount: 0, lastAddedAt: null }]);
+      const { select } = makeFindPageDb(
+        [{ ...NO_FACETS, all: 1 }],
+        [{ id: 99, name: 'Unknown', bookCount: 1, readCount: 0, readingCount: 0, expectedBookCount: null, lastAddedAt: null }],
+      );
       db.select = select;
 
-      vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(new Map());
-      vi.spyOn(repo as never, 'fetchCoverBookIds').mockResolvedValue(new Map());
+      stubPageHelpers(repo);
 
       const result = await repo.findPage(BASE_PARAMS);
 
@@ -140,11 +166,10 @@ describe('SeriesRepository', () => {
     });
 
     it('calls having() when completionStatus is provided', async () => {
-      const { select, dataChain } = makeFindPageDb([{ total: 0 }], []);
+      const { select, dataChain } = makeFindPageDb([{ ...NO_FACETS }], []);
       db.select = select;
 
-      vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(new Map());
-      vi.spyOn(repo as never, 'fetchCoverBookIds').mockResolvedValue(new Map());
+      stubPageHelpers(repo);
 
       await repo.findPage({ ...BASE_PARAMS, completionStatus: 'complete' });
 
@@ -152,11 +177,10 @@ describe('SeriesRepository', () => {
     });
 
     it('does not call having() when completionStatus is undefined', async () => {
-      const { select, dataChain } = makeFindPageDb([{ total: 0 }], []);
+      const { select, dataChain } = makeFindPageDb([{ ...NO_FACETS }], []);
       db.select = select;
 
-      vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(new Map());
-      vi.spyOn(repo as never, 'fetchCoverBookIds').mockResolvedValue(new Map());
+      stubPageHelpers(repo);
 
       await repo.findPage({ ...BASE_PARAMS, completionStatus: undefined });
 
@@ -164,11 +188,10 @@ describe('SeriesRepository', () => {
     });
 
     it('passes correct pagination values to limit and offset', async () => {
-      const { select, dataChain } = makeFindPageDb([{ total: 0 }], []);
+      const { select, dataChain } = makeFindPageDb([{ ...NO_FACETS }], []);
       db.select = select;
 
-      vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(new Map());
-      vi.spyOn(repo as never, 'fetchCoverBookIds').mockResolvedValue(new Map());
+      stubPageHelpers(repo);
 
       await repo.findPage({ ...BASE_PARAMS, page: 2, size: 10 });
 
@@ -176,12 +199,23 @@ describe('SeriesRepository', () => {
       expect(dataChain.offset).toHaveBeenCalledWith(20);
     });
 
+    it('reports the facet matching the active completion filter as the total', async () => {
+      const { select } = makeFindPageDb([{ all: 40, notStarted: 25, inProgress: 9, complete: 6, hasGaps: 4 }], []);
+      db.select = select;
+      stubPageHelpers(repo);
+
+      await expect(repo.findPage({ ...BASE_PARAMS, completionStatus: 'has_gaps' })).resolves.toMatchObject({ total: 4 });
+      db.select = makeFindPageDb([{ all: 40, notStarted: 25, inProgress: 9, complete: 6, hasGaps: 4 }], []).select;
+      await expect(repo.findPage({ ...BASE_PARAMS, completionStatus: 'complete' })).resolves.toMatchObject({ total: 6 });
+      db.select = makeFindPageDb([{ all: 40, notStarted: 25, inProgress: 9, complete: 6, hasGaps: 4 }], []).select;
+      await expect(repo.findPage(BASE_PARAMS)).resolves.toMatchObject({ total: 40 });
+    });
+
     it('handles total fallback to 0 when count row is missing', async () => {
       const { select } = makeFindPageDb([], []);
       db.select = select;
 
-      vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(new Map());
-      vi.spyOn(repo as never, 'fetchCoverBookIds').mockResolvedValue(new Map());
+      stubPageHelpers(repo);
 
       const result = await repo.findPage(BASE_PARAMS);
 
@@ -189,16 +223,29 @@ describe('SeriesRepository', () => {
     });
 
     it('returns correct page and size in result', async () => {
-      const { select } = makeFindPageDb([{ total: 0 }], []);
+      const { select } = makeFindPageDb([{ ...NO_FACETS }], []);
       db.select = select;
 
-      vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(new Map());
-      vi.spyOn(repo as never, 'fetchCoverBookIds').mockResolvedValue(new Map());
+      stubPageHelpers(repo);
 
       const result = await repo.findPage({ ...BASE_PARAMS, page: 3, size: 15 });
 
       expect(result.page).toBe(3);
       expect(result.size).toBe(15);
+    });
+
+    it('uses containment rather than trigram expansion for multi-word searches', async () => {
+      const { select, baseChain } = makeFindPageDb([{ ...NO_FACETS }], []);
+      db.select = select;
+      stubPageHelpers(repo);
+
+      await repo.findPage({ ...BASE_PARAMS, q: 'The Wax Child', sort: 'relevance', order: 'desc' });
+
+      const where = (baseChain.where as ReturnType<typeof vi.fn>).mock.calls[0]![0] as SQL;
+      const query = new PgDialect().sqlToQuery(where);
+      expect(query.sql).toContain(' ILIKE ');
+      expect(query.sql).not.toContain(' % ');
+      expect(query.params).toContain('%The Wax Child%');
     });
   });
 
@@ -228,8 +275,12 @@ describe('SeriesRepository', () => {
 
     it('returns detail row with authors and indices when series is found', async () => {
       const mainChain = makeChain([{ id: 42, name: 'Dune', bookCount: 6, readCount: 2 }]);
-      const indicesChain = makeChain([{ idx: 1 }, { idx: 2 }, { idx: 3 }]);
-      db.select.mockReturnValueOnce(mainChain).mockReturnValueOnce(indicesChain);
+      const membersChain = makeChain([
+        { seriesIndex: '1', status: 'read' },
+        { seriesIndex: '2', status: 'reading' },
+        { seriesIndex: null, status: null },
+      ]);
+      db.select.mockReturnValueOnce(mainChain).mockReturnValueOnce(membersChain);
 
       const authorsMap = new Map([[42, ['Frank Herbert']]]);
       vi.spyOn(repo as never, 'fetchAuthorsForSeries').mockResolvedValue(authorsMap);
@@ -242,7 +293,12 @@ describe('SeriesRepository', () => {
       expect(result!.bookCount).toBe(6);
       expect(result!.readCount).toBe(2);
       expect(result!.authors).toEqual(['Frank Herbert']);
-      expect(result!.indices).toEqual([1, 2, 3]);
+      expect(result!.indices).toEqual(['1', '2']);
+      expect(result!.members).toEqual([
+        { seriesIndex: '1', status: 'read' },
+        { seriesIndex: '2', status: 'reading' },
+        { seriesIndex: null, status: null },
+      ]);
     });
 
     it('returns empty authors when map has no entry for seriesId', async () => {
@@ -256,6 +312,7 @@ describe('SeriesRepository', () => {
 
       expect(result!.authors).toEqual([]);
       expect(result!.indices).toEqual([]);
+      expect(result!.members).toEqual([]);
     });
   });
 

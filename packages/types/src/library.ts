@@ -1,7 +1,10 @@
+import type { RegexMetadataConfig } from "./regex-metadata";
 import type { LibraryLastScan } from "./scanner";
 
 export type OrganizationMode = "book_per_file" | "book_per_folder";
-export type CoverAspectRatio = "2/3" | "1/1";
+export const COVER_ASPECT_RATIOS = ["2/3", "1/1"] as const;
+export type CoverAspectRatio = (typeof COVER_ASPECT_RATIOS)[number];
+export type AddedAtSource = "imported" | "file_modified" | "file_created";
 
 export function normalizeCoverAspectRatio(value: unknown): CoverAspectRatio {
   return value === "1/1" ? "1/1" : "2/3";
@@ -18,6 +21,7 @@ export const DEFAULT_FORMAT_PRIORITY = [
   "azw3",
   "azw",
   "fb2",
+  "djvu",
   "m4b",
   "mp3",
   "m4a",
@@ -26,24 +30,6 @@ export const DEFAULT_FORMAT_PRIORITY = [
   "flac",
 ] as const;
 
-export const FORMAT_LABELS: Record<string, string> = {
-  epub: "EPUB e-book",
-  kepub: "KEPUB e-book",
-  pdf: "PDF document",
-  cbz: "CBZ comic",
-  cbr: "CBR comic",
-  cb7: "CB7 comic",
-  mobi: "MOBI e-book",
-  azw3: "AZW3 e-book",
-  azw: "AZW e-book",
-  fb2: "FictionBook",
-  m4b: "M4B audiobook",
-  mp3: "MP3 audio",
-  m4a: "M4A audio",
-  opus: "Opus audio",
-  ogg: "OGG audio",
-  flac: "FLAC audio",
-};
 export type AccessLevel = "viewer" | "editor" | "owner";
 
 export interface LibraryFolder {
@@ -54,6 +40,7 @@ export interface LibraryFolder {
 
 export interface Library {
   id: number;
+  accessLevel?: AccessLevel | null;
   name: string;
   icon?: string | null;
   displayOrder: number;
@@ -61,9 +48,11 @@ export interface Library {
   watch: boolean;
   autoScanCronExpression?: string | null;
   metadataPrecedence: string[];
+  regexMetadata?: RegexMetadataConfig | null;
   formatPriority: string[];
   allowedFormats: string[];
   organizationMode: OrganizationMode;
+  addedAtSource: AddedAtSource;
   excludePatterns: string[];
   readingThreshold: number;
   markAsFinishedPercentComplete: number;
@@ -82,11 +71,32 @@ export interface Library {
   fileWriteKindleMaxFileSizeMb: number;
   fileWriteAudioEnabled: boolean;
   fileWriteAudioMaxFileSizeMb: number;
+  /** Write metadata into every content file of a book, not just its primary file or audio tracks. */
+  fileWriteAllFiles: boolean;
+  /** EPUBs with synced narration have their own toggle and limit: they embed audio and run large. */
+  fileWriteReadAlongEnabled: boolean;
+  fileWriteReadAlongMaxFileSizeMb: number;
   fileRenameEnabled: boolean;
   folders: LibraryFolder[];
   bookCount?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export type AddedAtRecomputeFailureCode = "file_unavailable" | "unsafe_path" | "database_error";
+
+export interface AddedAtRecomputeJob {
+  id: string;
+  libraryId: number;
+  source: AddedAtSource;
+  status: "running" | "completed" | "failed";
+  total: number;
+  processed: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  failureSamples: { bookId: number; code: AddedAtRecomputeFailureCode }[];
 }
 
 export interface LibraryStats {
@@ -121,6 +131,11 @@ export interface LibraryAccessEntry {
   userId: number;
   username: string;
   name: string;
+  accessLevel: AccessLevel;
+}
+
+export interface UserLibraryGrant {
+  libraryId: number;
   accessLevel: AccessLevel;
 }
 

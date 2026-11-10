@@ -2,13 +2,21 @@ import { BadRequestException } from '@nestjs/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   Accent,
+  BookRequestPreferences,
   CoverSearchPreferences,
   DisplayPreferences,
   LocalePreferences,
   ServerFontPreferences,
   ThemePreferences,
 } from '@bookorbit/types';
-import { MAX_SERVER_FONTS, SUPPORTED_LOCALES } from '@bookorbit/types';
+import {
+  ANNOTATION_COLOR_NAME_MAX_ENTRIES,
+  ANNOTATION_COLOR_NAME_PREFERENCES_DEFAULTS,
+  MAX_SERVER_FONTS,
+  STYLE_IDS,
+  SUPPORTED_LOCALES,
+  SURFACE_PALETTE_IDS,
+} from '@bookorbit/types';
 
 import { UserPreferencesRepository } from './user-preferences.repository';
 import { UserPreferencesService } from './user-preferences.service';
@@ -67,10 +75,13 @@ const validDisplayPreferences: DisplayPreferences = {
   squareGridGap: 20,
   viewMode: 'grid',
   cardOverlays: ['progress-bar', 'format', 'rating'],
+  formatBadgeStyle: 'primary',
   showJumpRails: true,
   smartScopeFilterExpanded: true,
   authorCoverSize: 140,
   authorCoverShape: 'circle',
+  authorRowDensity: 'comfortable',
+  authorCoverFallback: false,
   tableZebraStriping: false,
   tableDensity: 'comfortable',
   bookSpineOverlay: 'subtle',
@@ -83,6 +94,7 @@ const validDisplayPreferences: DisplayPreferences = {
   gridCardSecondaryLabel: 'hidden',
   cardInfoMode: 'hover-overlay',
   thumbnailClickAction: 'reader',
+  placeholderCoverStyle: 'bauhaus',
 };
 
 const validLocalePreferences: LocalePreferences = {
@@ -93,13 +105,17 @@ const validCoverSearchPreferences: CoverSearchPreferences = {
   defaultProvider: 'itunes',
 };
 
+const validBookRequestPreferences: BookRequestPreferences = { defaultLanguage: 'de' };
+
 const repo = {
-  findByCategory:
-    vi.fn<
-      (
-        ...args: [number, string]
-      ) => Promise<{ data: ThemePreferences | DisplayPreferences | LocalePreferences | ServerFontPreferences | CoverSearchPreferences } | undefined>
-    >(),
+  findByCategory: vi.fn<
+    (...args: [number, string]) => Promise<
+      | {
+          data: ThemePreferences | DisplayPreferences | LocalePreferences | ServerFontPreferences | CoverSearchPreferences | BookRequestPreferences;
+        }
+      | undefined
+    >
+  >(),
   upsert: vi.fn<(...args: [number, string, Record<string, unknown>]) => Promise<void>>(),
   delete: vi.fn<(...args: [number, string]) => Promise<void>>(),
 };
@@ -165,6 +181,94 @@ describe('UserPreferencesService', () => {
 
   it('upsertCoverSearchPreferences rejects unknown fields', async () => {
     await expect(service.upsertCoverSearchPreferences(11, { ...validCoverSearchPreferences, unexpected: true })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('getReadAloudPreferences returns no language when nothing was saved', async () => {
+    await expect(service.getReadAloudPreferences(7)).resolves.toEqual({ defaultLanguage: null });
+    expect(repo.findByCategory).toHaveBeenCalledWith(7, 'read-aloud');
+  });
+
+  it('getReadAloudPreferences returns the saved language, and none when the stored row is malformed', async () => {
+    repo.findByCategory.mockResolvedValueOnce({ data: { defaultLanguage: 'fr' } } as never);
+    await expect(service.getReadAloudPreferences(7)).resolves.toEqual({ defaultLanguage: 'fr' });
+
+    repo.findByCategory.mockResolvedValueOnce({ data: { defaultLanguage: 'English' } } as never);
+    await expect(service.getReadAloudPreferences(7)).resolves.toEqual({ defaultLanguage: null });
+  });
+
+  it('upsertReadAloudPreferences saves and clears the default language', async () => {
+    await expect(service.upsertReadAloudPreferences(11, { defaultLanguage: 'de' })).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'read-aloud', { defaultLanguage: 'de' });
+
+    await expect(service.upsertReadAloudPreferences(11, { defaultLanguage: null })).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenLastCalledWith(11, 'read-aloud', { defaultLanguage: null });
+  });
+
+  it('upsertReadAloudPreferences rejects a language name, a full tag and unknown fields', async () => {
+    for (const settings of [{ defaultLanguage: 'English' }, { defaultLanguage: 'en-US' }, { defaultLanguage: 'en', unexpected: true }]) {
+      await expect(service.upsertReadAloudPreferences(11, settings)).rejects.toBeInstanceOf(BadRequestException);
+    }
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('getBookRequestPreferences returns no language when nothing was saved', async () => {
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual({ defaultLanguage: null });
+    expect(repo.findByCategory).toHaveBeenCalledWith(7, 'book-requests');
+  });
+
+  it('getBookRequestPreferences returns the pinned language', async () => {
+    repo.findByCategory.mockResolvedValueOnce({ data: validBookRequestPreferences });
+
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual(validBookRequestPreferences);
+  });
+
+  it('getBookRequestPreferences falls back safely when stored data is malformed', async () => {
+    repo.findByCategory.mockResolvedValueOnce({ data: { defaultLanguage: 'klingon' } } as never);
+
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual({ defaultLanguage: null });
+  });
+
+  it('upsertBookRequestPreferences saves a pinned language', async () => {
+    await expect(service.upsertBookRequestPreferences(11, { ...validBookRequestPreferences })).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'book-requests', validBookRequestPreferences);
+  });
+
+  /**
+   * Destinations lived in this category under two different shapes before the instance default
+   * replaced them. Rows written by either build still exist, and both must keep their language
+   * rather than failing strict validation and reverting the whole category to the defaults.
+   */
+  it('getBookRequestPreferences drops a destination pinned before the instance default existed', async () => {
+    repo.findByCategory.mockResolvedValueOnce({ data: { defaultLibraryId: 4, defaultFolderId: 9, defaultLanguage: 'de' } } as never);
+
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual({ defaultLanguage: 'de' });
+  });
+
+  it('getBookRequestPreferences drops a per-medium destination too', async () => {
+    repo.findByCategory.mockResolvedValueOnce({
+      data: { destinations: { ebook: { libraryId: 4, folderId: 9 } }, defaultLanguage: 'de' },
+    } as never);
+
+    await expect(service.getBookRequestPreferences(7)).resolves.toEqual({ defaultLanguage: 'de' });
+  });
+
+  it('upsertBookRequestPreferences drops a destination a stale client still sends', async () => {
+    await expect(service.upsertBookRequestPreferences(11, { defaultLibraryId: 4, defaultLanguage: 'de' })).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'book-requests', { defaultLanguage: 'de' });
+  });
+
+  it('upsertBookRequestPreferences rejects a language no release could be matched against', async () => {
+    await expect(service.upsertBookRequestPreferences(11, { ...validBookRequestPreferences, defaultLanguage: 'klingon' })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upsertBookRequestPreferences rejects unknown fields', async () => {
+    await expect(service.upsertBookRequestPreferences(11, { ...validBookRequestPreferences, unexpected: true })).rejects.toBeInstanceOf(
       BadRequestException,
     );
     expect(repo.upsert).not.toHaveBeenCalled();
@@ -238,6 +342,46 @@ describe('UserPreferencesService', () => {
 
   it.each([79, 101, 50.5])('upsertThemePreferences rejects surfaceOpacity %s', async (surfaceOpacity) => {
     await expect(service.upsertThemePreferences(11, { ...validThemePreferences, surfaceOpacity })).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(STYLE_IDS)('upsertThemePreferences accepts the %s style', async (style) => {
+    const preferences = { ...validThemePreferences, style };
+
+    await expect(service.upsertThemePreferences(11, preferences)).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'theme', preferences);
+  });
+
+  it.each(SURFACE_PALETTE_IDS)('upsertThemePreferences accepts the %s surface palette', async (surfacePalette) => {
+    const preferences = { ...validThemePreferences, style: 'nostalgia', surfacePalette } as const;
+
+    await expect(service.upsertThemePreferences(11, preferences)).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'theme', preferences);
+  });
+
+  it.each([0, 100, 200])('upsertThemePreferences accepts glowReach %i', async (glowReach) => {
+    const preferences = { ...validThemePreferences, glowReach };
+
+    await expect(service.upsertThemePreferences(11, preferences)).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'theme', preferences);
+  });
+
+  it.each([-10, 201, 50.5, 'off'])('upsertThemePreferences rejects glowReach %s', async (glowReach) => {
+    await expect(service.upsertThemePreferences(11, { ...validThemePreferences, glowReach } as never)).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upsertThemePreferences rejects an unknown style', async () => {
+    await expect(service.upsertThemePreferences(11, { ...validThemePreferences, style: 'retro' } as never)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upsertThemePreferences rejects an unknown surface palette', async () => {
+    await expect(service.upsertThemePreferences(11, { ...validThemePreferences, surfacePalette: 'teal' } as never)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
     expect(repo.upsert).not.toHaveBeenCalled();
   });
 
@@ -330,6 +474,55 @@ describe('UserPreferencesService', () => {
     expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ thumbnailClickAction: 'reader' }));
   });
 
+  it('upsertDisplayPreferences defaults formatBadgeStyle to underline when omitted', async () => {
+    const { formatBadgeStyle, ...withoutStyle } = validDisplayPreferences;
+    void formatBadgeStyle;
+    await service.upsertDisplayPreferences(11, withoutStyle as unknown as Record<string, unknown>);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ formatBadgeStyle: 'underline' }));
+  });
+
+  it('upsertDisplayPreferences keeps the primary format badge style when it is chosen', async () => {
+    await service.upsertDisplayPreferences(11, { ...validDisplayPreferences, formatBadgeStyle: 'primary' } as unknown as Record<string, unknown>);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ formatBadgeStyle: 'primary' }));
+  });
+
+  it('upsertDisplayPreferences keeps a chosen formatBadgeStyle', async () => {
+    await service.upsertDisplayPreferences(11, { ...validDisplayPreferences, formatBadgeStyle: 'seal' } as unknown as Record<string, unknown>);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ formatBadgeStyle: 'seal' }));
+  });
+
+  it('upsertDisplayPreferences rejects unknown formatBadgeStyle values', async () => {
+    await expect(
+      service.upsertDisplayPreferences(11, { ...validDisplayPreferences, formatBadgeStyle: 'stack' } as unknown as Record<string, unknown>),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('upsertDisplayPreferences defaults placeholderCoverStyle to bauhaus when omitted', async () => {
+    const { placeholderCoverStyle, ...withoutStyle } = validDisplayPreferences;
+    void placeholderCoverStyle;
+    await service.upsertDisplayPreferences(11, withoutStyle as unknown as Record<string, unknown>);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ placeholderCoverStyle: 'bauhaus' }));
+  });
+
+  it('upsertDisplayPreferences keeps a chosen placeholderCoverStyle', async () => {
+    await service.upsertDisplayPreferences(11, { ...validDisplayPreferences, placeholderCoverStyle: 'marbled' } as unknown as Record<
+      string,
+      unknown
+    >);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ placeholderCoverStyle: 'marbled' }));
+  });
+
+  it('upsertDisplayPreferences rejects unknown placeholderCoverStyle values', async () => {
+    await expect(
+      service.upsertDisplayPreferences(11, { ...validDisplayPreferences, placeholderCoverStyle: 'lattice' } as unknown as Record<string, unknown>),
+    ).rejects.toThrow(BadRequestException);
+  });
+
   it('upsertDisplayPreferences rejects invalid thumbnailClickAction values', async () => {
     await expect(
       service.upsertDisplayPreferences(11, { ...validDisplayPreferences, thumbnailClickAction: 'preview' } as unknown as Record<string, unknown>),
@@ -401,6 +594,49 @@ describe('UserPreferencesService', () => {
     await expect(
       service.upsertDisplayPreferences(11, { ...validDisplayPreferences, showJumpRails: 'yes' } as unknown as Record<string, unknown>),
     ).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upsertDisplayPreferences accepts and persists author display preferences', async () => {
+    const preferences = {
+      ...validDisplayPreferences,
+      authorRowDensity: 'compact',
+      authorCoverFallback: true,
+    } satisfies DisplayPreferences;
+
+    await expect(service.upsertDisplayPreferences(11, preferences)).resolves.toBeUndefined();
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', preferences);
+  });
+
+  it('upsertDisplayPreferences accepts the complete client payload for fill-crop covers', async () => {
+    const preferences = {
+      ...validDisplayPreferences,
+      authorRowDensity: 'comfortable',
+      authorCoverFallback: false,
+      bookCoverDisplayMode: 'fill-crop',
+    } satisfies DisplayPreferences;
+
+    await expect(service.upsertDisplayPreferences(11, preferences)).resolves.toBeUndefined();
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', preferences);
+  });
+
+  it('upsertDisplayPreferences defaults author display preferences omitted by older clients', async () => {
+    const { authorRowDensity, authorCoverFallback, ...olderPreferences } = validDisplayPreferences;
+    void authorRowDensity;
+    void authorCoverFallback;
+
+    await expect(service.upsertDisplayPreferences(11, olderPreferences)).resolves.toBeUndefined();
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ authorRowDensity: 'comfortable', authorCoverFallback: false }));
+  });
+
+  it.each([
+    ['authorRowDensity', 'dense'],
+    ['authorCoverFallback', 'yes'],
+  ])('upsertDisplayPreferences rejects invalid %s values', async (field, value) => {
+    await expect(service.upsertDisplayPreferences(11, { ...validDisplayPreferences, [field]: value })).rejects.toBeInstanceOf(BadRequestException);
     expect(repo.upsert).not.toHaveBeenCalled();
   });
 
@@ -628,6 +864,70 @@ describe('UserPreferencesService', () => {
     it('rejects unknown keys', async () => {
       await expect(service.upsertServerFontPreferences(11, { hiddenFamilies: [], sneaky: true })).rejects.toBeInstanceOf(BadRequestException);
       expect(repo.upsert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('annotation colour name preferences', () => {
+    const hexKey = (i: number) => `#${i.toString(16).padStart(6, '0').toUpperCase()}`;
+
+    it('defaults to no names when the reader has never set any', async () => {
+      repo.findByCategory.mockResolvedValue(undefined);
+
+      const result = await service.getAnnotationColorNamePreferences(11);
+
+      expect(result).toEqual({ names: {} });
+      expect(repo.findByCategory).toHaveBeenCalledWith(11, 'annotation-colors');
+      result.names['#FFFFFF'] = 'mutated';
+      expect(ANNOTATION_COLOR_NAME_PREFERENCES_DEFAULTS).toEqual({ names: {} });
+    });
+
+    it('returns the stored names', async () => {
+      repo.findByCategory.mockResolvedValue({ data: { names: { '#FACC15': 'Ideas', '#4ADE80': 'Quotes' } } } as never);
+
+      await expect(service.getAnnotationColorNamePreferences(11)).resolves.toEqual({ names: { '#FACC15': 'Ideas', '#4ADE80': 'Quotes' } });
+    });
+
+    it('falls back to the defaults when the stored payload no longer validates', async () => {
+      repo.findByCategory.mockResolvedValue({ data: { names: { yellow: 'Ideas' } } as never });
+
+      await expect(service.getAnnotationColorNamePreferences(11)).resolves.toEqual({ names: {} });
+    });
+
+    it('normalises keys to uppercase, trims labels and drops blank ones', async () => {
+      await service.upsertAnnotationColorNamePreferences(11, { names: { '#facc15': '  Ideas  ', '#4ade80': '   ', '#38BDF8': 'Quotes' } });
+
+      expect(repo.upsert).toHaveBeenCalledWith(11, 'annotation-colors', { names: { '#FACC15': 'Ideas', '#38BDF8': 'Quotes' } });
+    });
+
+    it('stores an empty map, which clears every name', async () => {
+      await service.upsertAnnotationColorNamePreferences(11, { names: {} });
+
+      expect(repo.upsert).toHaveBeenCalledWith(11, 'annotation-colors', { names: {} });
+    });
+
+    it.each([
+      ['a named colour that is not #RRGGBB', { names: { yellow: 'Ideas' } }],
+      ['a three-digit hex colour', { names: { '#FC1': 'Ideas' } }],
+      ['a label longer than the cap', { names: { '#FACC15': 'x'.repeat(41) } }],
+      ['a non-string label', { names: { '#FACC15': 7 } }],
+      ['two keys naming the same colour', { names: { '#facc15': 'One', '#FACC15': 'Two' } }],
+      ['a missing names map', {}],
+      ['an unknown key', { names: {}, extra: true }],
+    ])('rejects %s with 400', async (_label, settings) => {
+      await expect(service.upsertAnnotationColorNamePreferences(11, settings as Record<string, unknown>)).rejects.toBeInstanceOf(BadRequestException);
+      expect(repo.upsert).not.toHaveBeenCalled();
+    });
+
+    it('accepts a label exactly at the length cap', async () => {
+      await expect(service.upsertAnnotationColorNamePreferences(11, { names: { '#FACC15': 'x'.repeat(40) } })).resolves.toBeUndefined();
+    });
+
+    it('caps the number of named colours, counting only labels that are kept', async () => {
+      const atCap = Object.fromEntries(Array.from({ length: ANNOTATION_COLOR_NAME_MAX_ENTRIES }, (_, i) => [hexKey(i), `Name ${i}`]));
+      await expect(service.upsertAnnotationColorNamePreferences(11, { names: { ...atCap, '#ABCDEF': ' ' } })).resolves.toBeUndefined();
+
+      const overCap = { ...atCap, '#ABCDEF': 'One too many' };
+      await expect(service.upsertAnnotationColorNamePreferences(11, { names: overCap })).rejects.toBeInstanceOf(BadRequestException);
     });
   });
 });

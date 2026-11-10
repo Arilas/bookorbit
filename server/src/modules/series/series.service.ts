@@ -1,15 +1,20 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 
-import type { BooksPage, SeriesBooksPage, SeriesDetail, SeriesPage, SeriesSummary } from '@bookorbit/types';
+import type { BooksPage, SeriesBooksPage, SeriesDetail, SeriesNextBookResponse, SeriesPage, SeriesSummary } from '@bookorbit/types';
+import { READER_OPENABLE_FORMATS, SERIES_GAP_PREVIEW_LIMIT, getOpenableFormatsForGroup, isOptInReaderFormat } from '@bookorbit/types';
 import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import type { RequestUser } from '../../common/types/request-user';
-import { MAX_SERIES_TOTAL_BOOKS, normalizeSeriesTotalBooks } from '../../common/utils/series-total-books.utils';
+import { normalizeSeriesTotalBooks } from '../../common/utils/series-total-books.utils';
 import { assembleBookCards } from '../book/utils/assemble-book-cards';
 import { BookReadService } from '../book/book-read.service';
+import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
 import { LibraryService } from '../library/library.service';
+import { FindNextSeriesBookDto } from './dto/find-next-series-book.dto';
 import { ListSeriesBooksDto } from './dto/list-series-books.dto';
 import { ListSeriesDto } from './dto/list-series.dto';
 import { SeriesRepository } from './series.repository';
+import { computeSeriesGaps } from './utils/series-gaps.utils';
+import { buildVolumeLadder, countSeriesVolumes } from './utils/series-ladder.utils';
 
 @Injectable()
 export class SeriesService {
@@ -19,6 +24,7 @@ export class SeriesService {
     private readonly seriesRepo: SeriesRepository,
     private readonly bookReadService: BookReadService,
     private readonly libraryService: LibraryService,
+    private readonly coverStore: BookCoverStore,
   ) {}
 
   private assertPaginationWindow(page: number, size: number): void {
@@ -34,7 +40,7 @@ export class SeriesService {
 
     const libraryIds = await this.resolveLibraryIds(user, dto.libraryId);
     if (libraryIds.length === 0) {
-      return { items: [], total: 0, page, size };
+      return { items: [], total: 0, page, size, facets: { all: 0, notStarted: 0, inProgress: 0, complete: 0, hasGaps: 0 } };
     }
 
     const result = await this.seriesRepo.findPage({
@@ -50,17 +56,40 @@ export class SeriesService {
       contentFilters: user.isSuperuser ? undefined : user.contentFilters,
     });
 
-    const items: SeriesSummary[] = result.items.map((row) => ({
-      id: row.id,
-      name: row.name,
-      bookCount: row.bookCount,
-      readCount: row.readCount,
-      authors: row.authors,
-      coverBookIds: row.coverBookIds,
-      lastAddedAt: row.lastAddedAt ?? null,
-    }));
+    const items: SeriesSummary[] = result.items.map((row) => {
+      const ladder = buildVolumeLadder({
+        members: row.members,
+        truncated: row.membersTruncated,
+        bookCount: row.bookCount,
+        expectedBookCount: row.expectedBookCount,
+      });
+      const counts = ladder.counts ?? { ownedVolumeCount: row.bookCount, readVolumeCount: row.readCount, readingVolumeCount: row.readingCount };
 
-    return { items, total: result.total, page: result.page, size: result.size };
+      return {
+        id: row.id,
+        name: row.name,
+        bookCount: row.bookCount,
+        readCount: row.readCount,
+        readingCount: row.readingCount,
+        authors: row.authors,
+        coverBookIds: row.coverBookIds,
+        lastAddedAt: row.lastAddedAt ?? null,
+        libraryNames: row.libraryNames,
+        expectedBookCount: normalizeSeriesTotalBooks(row.expectedBookCount) ?? null,
+        ownedVolumeCount: counts.ownedVolumeCount,
+        readVolumeCount: counts.readVolumeCount,
+        readingVolumeCount: counts.readingVolumeCount,
+        volumes: ladder.volumes,
+        volumesTruncated: ladder.truncated,
+        gaps: ladder.gaps.slice(0, SERIES_GAP_PREVIEW_LIMIT),
+        gapCount: ladder.gaps.length,
+        nextBookId: ladder.next?.bookId ?? null,
+        nextIndex: ladder.next?.index ?? null,
+        nextTitle: ladder.next?.title ?? null,
+      };
+    });
+
+    return { items, total: result.total, facets: result.facets, page: result.page, size: result.size };
   }
 
   /** Total series the user can browse; matches the unfiltered total of {@link findAll}. */
@@ -113,6 +142,8 @@ export class SeriesService {
             name: existsInAnyLibrary.name,
             bookCount: 0,
             readCount: 0,
+            ownedVolumeCount: 0,
+            readVolumeCount: 0,
             authors: existsInAnyLibrary.authors,
             possibleGaps: [],
             expectedBookCount: existsInAnyLibrary.expectedBookCount ?? null,
@@ -123,7 +154,10 @@ export class SeriesService {
       throw new NotFoundException('Series not found');
     }
 
-    const possibleGaps = this.computeGaps(detail.indices, detail.bookCount, detail.expectedBookCount);
+    const possibleGaps = computeSeriesGaps(detail.indices, detail.bookCount, detail.expectedBookCount);
+    const volumeCounts = detail.members
+      ? countSeriesVolumes({ members: detail.members, bookCount: detail.bookCount, expectedBookCount: detail.expectedBookCount })
+      : { ownedVolumeCount: detail.bookCount, readVolumeCount: detail.readCount };
 
     let items: BooksPage['items'] = [];
     if (bookPage.bookIds.length > 0) {
@@ -139,6 +173,7 @@ export class SeriesService {
         cardData.tagRows,
         cardData.seriesMembershipRows,
       );
+      await this.coverStore.enrichCardFaces(cards);
       const orderMap = new Map(bookPage.bookIds.map((id, i) => [id, i]));
       items = cards
         .map((card) => {
@@ -160,6 +195,8 @@ export class SeriesService {
       name: detail.name,
       bookCount: detail.bookCount,
       readCount: detail.readCount,
+      ownedVolumeCount: volumeCounts.ownedVolumeCount,
+      readVolumeCount: volumeCounts.readVolumeCount,
       authors: detail.authors,
       possibleGaps,
       expectedBookCount: detail.expectedBookCount ?? null,
@@ -168,57 +205,36 @@ export class SeriesService {
     return { items, total: bookPage.total, page, size, seriesInfo };
   }
 
-  private computeGaps(indices: number[], bookCount: number, expectedBookCount: number | null): number[] {
-    const integerIndices = indices.filter((idx) => Math.abs(Math.round(idx) - idx) < 0.01).map((idx) => Math.round(idx));
-    if (integerIndices.length === 0) return [];
-
-    const min = Math.min(...integerIndices);
-    const max = Math.max(...integerIndices);
-    if (min < 1 || max > MAX_SERIES_TOTAL_BOOKS) return [];
-
-    const expectedMax = this.resolveTrustedExpectedMax(indices, bookCount, integerIndices, expectedBookCount);
-
-    // With no trusted total only interior holes are knowable, and one book has no interior.
-    if (expectedMax === undefined) {
-      if (integerIndices.length < 2) return [];
-      return this.collectMissing(integerIndices, min, max);
-    }
-
-    return this.collectMissing(integerIndices, 1, expectedMax);
-  }
-
   /**
-   * A provider total turns "the books you own" into "the books the series has", which is the whole
-   * point, but it also lets us name books as missing. Only trust it when nothing about the local
-   * data contradicts it, because a false "you are missing #5" is worse than staying quiet.
+   * Backs the reader's end-of-book handoff. A neighbour the user cannot see, a book with no
+   * readable file, and a book outside any series all resolve to null rather than an error, so
+   * the reader can ask about every book it opens.
    */
-  private resolveTrustedExpectedMax(
-    indices: number[],
-    bookCount: number,
-    integerIndices: number[],
-    expectedBookCount: number | null,
-  ): number | undefined {
-    const expected = normalizeSeriesTotalBooks(expectedBookCount);
-    if (expected === undefined) return undefined;
+  async findNextBook(user: RequestUser, seriesId: number, bookId: number, dto: FindNextSeriesBookDto): Promise<SeriesNextBookResponse> {
+    const libraryIds = await this.resolveLibraryIds(user);
+    if (libraryIds.length === 0) return { next: null };
 
-    // An owned book with no usable index would be reported missing, so every book must be numbered.
-    if (indices.length !== bookCount || integerIndices.length !== indices.length) return undefined;
+    const row = await this.seriesRepo.findNextReadableBook({
+      seriesId,
+      bookId,
+      libraryIds,
+      formats: (dto.formatGroup ? getOpenableFormatsForGroup(dto.formatGroup) : [...READER_OPENABLE_FORMATS]).filter(
+        (format) => dto.includeDjvu === true || !isOptInReaderFormat(format),
+      ),
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+    });
 
-    // Owning a book numbered past the total means the total is stale or matched the wrong series.
-    if (Math.max(...integerIndices) > expected) return undefined;
+    if (!row?.format) return { next: null };
 
-    return expected;
-  }
-
-  private collectMissing(integerIndices: number[], from: number, to: number): number[] {
-    const present = new Set(integerIndices);
-    const gaps: number[] = [];
-    for (let i = from; i <= to; i++) {
-      if (!present.has(i)) {
-        gaps.push(i);
-      }
-    }
-    return gaps;
+    return {
+      next: {
+        bookId: row.bookId,
+        fileId: row.fileId,
+        format: row.format,
+        title: row.title,
+        seriesIndex: row.seriesIndex,
+      },
+    };
   }
 
   private async resolveLibraryIds(user: RequestUser, scopedLibraryId?: number): Promise<number[]> {

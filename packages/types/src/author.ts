@@ -1,4 +1,5 @@
 import type { BooksPage } from "./book";
+import type { MetadataCandidateCacheInfo } from "./metadata-cache";
 import type { MergeStrategy } from "./metadata-preferences";
 
 export type AuthorSummary = {
@@ -9,6 +10,18 @@ export type AuthorSummary = {
   imageUrl?: string | null;
   bookCount: number;
   lastAddedAt: string | null;
+  /**
+   * A book of theirs that has cover art, most recently added first. Only 19% of a
+   * typical library's authors have a portrait, so the grid falls back to this
+   * before it falls back to a monogram. Null when none of their books has a cover.
+   */
+  coverBookId?: number | null;
+};
+
+/** One bucket of the authors A-Z rail. `letter` is "#" for anything non-alphabetic. */
+export type AuthorLetterCount = {
+  letter: string;
+  count: number;
 };
 
 export type AuthorDetail = AuthorSummary & {
@@ -22,6 +35,8 @@ export type AuthorDetail = AuthorSummary & {
   influences: string[];
   metadataProvider: AuthorMetadataProviderKey | null;
   metadataProviderId: string | null;
+  /** True when a user chose the provider match; refreshes then look that id up instead of searching by name. */
+  metadataProviderPinned: boolean;
 };
 
 export type AuthorsPage = {
@@ -31,7 +46,15 @@ export type AuthorsPage = {
   size: number;
 };
 
-export type AuthorBooksPage = BooksPage;
+/**
+ * `total` counts rows in the page's own unit, so it is the number of cards once
+ * `collapseSeries` folds a series into one card - that is what paginating and "is there more"
+ * have to be driven by. `bookTotal` stays the number of books behind those rows, for the
+ * places that count books rather than cards. The two are equal while the list is flat.
+ */
+export type AuthorBooksPage = BooksPage & {
+  bookTotal: number;
+};
 
 export type MergeAuthorsResult = {
   target: AuthorDetail;
@@ -61,6 +84,9 @@ export type AuthorMetadataCandidate = {
   genres?: string[];
   influences?: string[];
 };
+
+/** An author candidate as a search response or stream sends it; `cache` only when the cache answered. */
+export type AuthorMetadataSearchCandidateEvent = AuthorMetadataCandidate & { cache?: MetadataCandidateCacheInfo };
 
 export type AuthorMetadataProviderInfo = {
   key: AuthorMetadataProviderKey;

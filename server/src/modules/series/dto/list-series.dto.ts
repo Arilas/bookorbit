@@ -1,13 +1,13 @@
 import { Transform, Type } from 'class-transformer';
 import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 
-export const SERIES_LIST_SORTS = ['name', 'bookCount', 'lastAddedAt', 'readProgress'] as const;
+export const SERIES_LIST_SORTS = ['relevance', 'name', 'bookCount', 'lastAddedAt', 'readProgress'] as const;
 export type SeriesListSort = (typeof SERIES_LIST_SORTS)[number];
 
 export const SORT_DIRECTIONS = ['asc', 'desc'] as const;
 export type SortDirection = (typeof SORT_DIRECTIONS)[number];
 
-export const COMPLETION_STATUSES = ['not_started', 'in_progress', 'complete'] as const;
+export const COMPLETION_STATUSES = ['not_started', 'in_progress', 'complete', 'has_gaps'] as const;
 export type CompletionStatus = (typeof COMPLETION_STATUSES)[number];
 
 export class ListSeriesDto {

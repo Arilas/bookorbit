@@ -1,6 +1,8 @@
 import { Transform, Type } from 'class-transformer';
 import { ArrayMaxSize, ArrayMinSize, IsArray, IsBoolean, IsIn, IsInt, IsISO8601, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 
+import { ANNOTATION_BULK_ACTIONS, type AnnotationBulkAction } from '@bookorbit/types';
+
 import { ANNOTATION_POSITION_FORMATS, ANNOTATION_STYLES, type AnnotationPositionFormat } from '../annotation.constants';
 
 export class AnnotationHubQueryDto {
@@ -66,12 +68,17 @@ export class AnnotationHubQueryDto {
   hasNote?: boolean;
 
   @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  needsReview?: boolean;
+
+  @IsOptional()
   @IsIn(['active', 'trashed'])
   status?: 'active' | 'trashed';
 
   @IsOptional()
-  @IsIn(['createdAt', 'book'])
-  sortBy?: 'createdAt' | 'book';
+  @IsIn(['createdAt', 'book', 'color', 'origin'])
+  sortBy?: 'createdAt' | 'book' | 'color' | 'origin';
 
   @IsOptional()
   @IsIn(['asc', 'desc'])
@@ -120,8 +127,8 @@ export class AnnotationBulkDto {
   @Min(1, { each: true })
   ids!: number[];
 
-  @IsIn(['trash', 'restore', 'restyle'])
-  action!: 'trash' | 'restore' | 'restyle';
+  @IsIn(ANNOTATION_BULK_ACTIONS)
+  action!: AnnotationBulkAction;
 
   @IsOptional()
   @IsString()

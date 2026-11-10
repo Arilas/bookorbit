@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
-import VChart from 'vue-echarts'
+import AppChart from '@/components/charts/AppChart.vue'
 import { Clock } from '@lucide/vue'
 
-import { useThemeStore } from '@/stores/theme'
+import { useChartTokens } from '@/composables/useChartTokens'
 import { DEFAULT_BREAKDOWN_DIMENSION, getBreakdownSeries, getReadingSecondsForSource, type BreakdownDimension } from '../../lib/breakdown'
 import { escapeHtml } from '../../lib/escape-html'
 import { useUserPeakReadingHours } from '../../composables/useUserPeakReadingHours'
@@ -22,7 +22,7 @@ const HOUR_LABELS = [
 
 const MIN_EVENTS = 20
 
-const themeStore = useThemeStore()
+const chartTokens = useChartTokens()
 const { t } = useI18n()
 
 const { data, loading, error } = useUserPeakReadingHours()
@@ -54,7 +54,7 @@ watchEffect(() => {
 
   const formatKeys = [...new Set(data.value.flatMap((d) => Object.keys(d.byFormat)))].sort()
   const sourceDescriptors = data.value.flatMap((item) => item.bySource)
-  const seriesMeta = getBreakdownSeries(dimension.value, `${themeStore.resolvedTheme}:${themeStore.accent}`, formatKeys, sourceDescriptors)
+  const seriesMeta = getBreakdownSeries(dimension.value, chartTokens.value.key, formatKeys, sourceDescriptors)
 
   const series = seriesMeta.map((meta) => ({
     id: meta.key,
@@ -142,7 +142,7 @@ watchEffect(() => {
       <div v-if="peakHour" class="text-muted-foreground mb-1 text-center text-xs">
         Peak: <span class="text-foreground font-medium">{{ HOUR_LABELS[peakHour.hour] }}</span>
       </div>
-      <VChart :option autoresize style="height: calc(100% - 20px)" />
+      <AppChart :option autoresize style="height: calc(100% - 20px)" />
     </template>
   </ChartCard>
 </template>

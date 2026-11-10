@@ -3,14 +3,18 @@ import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import type { StringValue } from 'ms';
 
+import { CommonModule } from '../../common/common.module';
 import { SelfWriteRegistryModule } from '../../common/self-write-registry.module';
 import { AchievementModule } from '../achievement/achievement.module';
 import { AuthModule } from '../auth/auth.module';
 import { BookMetadataFetchModule } from '../book-metadata-fetch/book-metadata-fetch.module';
+import { BookConsolidationModule } from '../book-consolidation/book-consolidation.module';
+import { BookCoverStoreModule } from '../book-cover-store/book-cover-store.module';
 import { MetadataModule } from '../metadata/metadata.module';
 import { NotificationModule } from '../notification/notification.module';
 import { FileEventProcessorService } from './file-event-processor.service';
 import { FileWatcherService } from './file-watcher.service';
+import { RegexMetadataReapplyService } from './regex-metadata-reapply.service';
 import { ScanGateway } from './scan.gateway';
 import { ScanJobStore } from './scan-job-store.service';
 import { ScannerController } from './scanner.controller';
@@ -20,9 +24,11 @@ import { ScannerService } from './scanner.service';
 @Module({
   imports: [
     MetadataModule,
+    BookCoverStoreModule,
     AuthModule,
     AchievementModule,
     SelfWriteRegistryModule,
+    CommonModule,
     forwardRef(() => NotificationModule),
     forwardRef(() => BookMetadataFetchModule),
     JwtModule.registerAsync({
@@ -32,9 +38,18 @@ import { ScannerService } from './scanner.service';
         signOptions: { expiresIn: config.getOrThrow<StringValue | number>('auth.jwtExpiresIn') },
       }),
     }),
+    BookConsolidationModule,
   ],
   controllers: [ScannerController],
-  providers: [ScannerService, ScannerRepository, ScanGateway, ScanJobStore, FileEventProcessorService, FileWatcherService],
+  providers: [
+    ScannerService,
+    ScannerRepository,
+    ScanGateway,
+    ScanJobStore,
+    FileEventProcessorService,
+    FileWatcherService,
+    RegexMetadataReapplyService,
+  ],
   exports: [ScannerService, FileWatcherService, ScanGateway],
 })
 export class ScannerModule {}

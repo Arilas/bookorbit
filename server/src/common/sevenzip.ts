@@ -1,13 +1,27 @@
-// Shared 7z-wasm singleton — one WASM instance for the server lifetime.
-// Both the comic reader service and metadata extraction use this.
+// Shared 7z-wasm singleton - one WASM instance for the server lifetime.
+// The comic reader, metadata extraction and release archives all use this.
+
+import { randomUUID } from 'crypto';
 
 export interface SevenZipFS {
+  filesystems: { NODEFS: unknown };
+  mount(type: unknown, opts: { root: string }, mountpoint: string): unknown;
+  unmount(mountpoint: string): void;
   open(path: string, flags: string): number;
   write(fd: number, buf: Uint8Array, offset: number, length: number): number;
   close(fd: number): void;
   mkdir(path: string): void;
   readdir(path: string): string[];
   readFile(path: string): Uint8Array;
+  /** An entry's size and kind without reading it, which is what bounds an extraction. */
+  stat(path: string): { mode: number; size: number };
+  /** Like `stat`, but describes a symbolic link itself rather than what it points at. */
+  lstat(path: string): { mode: number; size: number };
+  /** Resolves a path; with `follow`, the returned path is the final target of any links. */
+  lookupPath(path: string, opts?: { follow?: boolean }): { path: string };
+  isDir(mode: number): boolean;
+  isFile(mode: number): boolean;
+  isLink(mode: number): boolean;
   unlink(path: string): void;
   rmdir(path: string): void;
 }
@@ -39,4 +53,15 @@ export async function getSevenZip(): Promise<SevenZipModule> {
       });
   }
   return _instancePromise;
+}
+
+/**
+ * A name for one caller's scratch directory in the shared WASM filesystem.
+ *
+ * There is one instance for the whole server, so two extractions running at once share a
+ * filesystem: anything derived from the clock collides, and a collision means one of them removes
+ * the other's tree while it is still being read.
+ */
+export function createSevenZipTempId(prefix: string): string {
+  return `${prefix}_${randomUUID()}`;
 }

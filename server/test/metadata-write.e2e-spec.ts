@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 
 import { eq } from 'drizzle-orm';
@@ -8,6 +8,7 @@ import { Permission, type LibraryFileSyncProgressEvent } from '@bookorbit/types'
 import * as schema from '../src/db/schema';
 import { BookService, type MetadataUpdateFailpoint } from '../src/modules/book/book.service';
 import { FileWriteService } from '../src/modules/file-write/file-write.service';
+import { FileRenameService } from '../src/modules/file-write/file-rename.service';
 import { extractCb7Metadata, extractCbzMetadata } from '../src/modules/metadata/lib/cbz-metadata';
 import { extractEpubMetadata } from '../src/modules/metadata/lib/epub';
 import { parseFb2File } from '../src/modules/metadata/lib/fb2-parser';
@@ -28,11 +29,14 @@ import {
   type MetadataWriteE2EContext,
 } from './e2e/metadata-write/metadata-write-harness';
 import {
+  bundledFfmpegPaths,
   createCb7Fixture,
   createCbzFixture,
   createEpubFixture,
   createFb2Fixture,
+  createM4bFixture,
   createPdfFixture,
+  readAudioTags,
   writeFixtureFile,
 } from './e2e/metadata-write/metadata-write-fixture-builder';
 
@@ -60,7 +64,7 @@ interface ExpectedWritePayload {
   language: string;
   pageCount: number;
   seriesName: string;
-  seriesIndex: number;
+  seriesIndex: string;
   isbn10: string;
   isbn13: string;
   rating: number;
@@ -84,7 +88,7 @@ const MATRIX_SET_PAYLOAD = {
   language: 'en',
   pageCount: 321,
   seriesName: 'Matrix Series',
-  seriesIndex: 3.5,
+  seriesIndex: '5.10',
   isbn10: '123456789X',
   isbn13: '9781234567890',
   rating: 5,
@@ -142,7 +146,7 @@ const ATOMICITY_BASELINE_PAYLOAD = {
   language: 'en',
   pageCount: 111,
   seriesName: 'Atomic Baseline Series',
-  seriesIndex: 1.5,
+  seriesIndex: '1.5',
   isbn10: '1111111111',
   isbn13: '9781111111111',
   rating: 4,
@@ -256,7 +260,7 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
           publishedYear: 2005,
           language: 'en',
           seriesName: 'DB Series',
-          seriesIndex: 2,
+          seriesIndex: '5.10',
           isbn13: '9781234567890',
           rating: 4,
           authors: ['DB Author A', 'DB Author B'],
@@ -292,7 +296,7 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
         publishedYear: 2005,
         language: 'en',
         seriesName: 'DB Series',
-        seriesIndex: 2,
+        seriesIndex: '5.10',
         isbn13: '9781234567890',
         rating: 4,
       });
@@ -1002,7 +1006,7 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
         language: 'en',
         pageCount: 203,
         seriesName: 'Parallel Patch Series A',
-        seriesIndex: 1.1,
+        seriesIndex: '1.1',
         isbn10: '1234500001',
         isbn13: '9781234500001',
         rating: 4,
@@ -1026,7 +1030,7 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
         language: 'fr',
         pageCount: 204,
         seriesName: 'Parallel Patch Series B',
-        seriesIndex: 2.2,
+        seriesIndex: '2.2',
         isbn10: '1234500002',
         isbn13: '9781234500002',
         rating: 5,
@@ -1134,7 +1138,7 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
         language: 'es',
         pageCount: 417,
         seriesName: 'Overlap Final Series',
-        seriesIndex: 7.7,
+        seriesIndex: '7.7',
         isbn10: '7654321098',
         isbn13: '9787654321098',
         rating: 5,
@@ -1294,6 +1298,71 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
     });
   });
 
+  describe('multi-file write-back', () => {
+    it('writes an audiobook beside its ebook only once the library opts in', async () => {
+      const { ffmpeg, ffprobe } = bundledFfmpegPaths();
+      vi.stubEnv('FFMPEG_PATH', ffmpeg);
+      vi.stubEnv('FFPROBE_PATH', ffprobe);
+      try {
+        const library = await createLibraryWithFolder(context, { mode: 'book_per_folder', fileWriteEnabled: true, fileWriteWriteCover: false });
+        await setLibraryFileWriteSettings(context.db, library.libraryId, { fileWriteAudioEnabled: true });
+        await createEpubFixture(library.folderPath, 'Mixed Book/book.epub', { title: 'Mixed Original' });
+        await createM4bFixture(library.folderPath, 'Mixed Book/book.m4b', { title: 'Mixed Original' });
+        await triggerAndWaitForLibraryScan(context, library.libraryId);
+
+        const epub = await locateBookFileByRelPath(context, library.libraryId, 'Mixed Book/book.epub');
+        const m4b = await locateBookFileByRelPath(context, library.libraryId, 'Mixed Book/book.m4b');
+        expect(m4b.bookId).toBe(epub.bookId);
+        const [bookRow] = await context.db
+          .select({ primaryFileId: schema.books.primaryFileId })
+          .from(schema.books)
+          .where(eq(schema.books.id, epub.bookId))
+          .limit(1);
+        expect(bookRow?.primaryFileId).toBe(epub.bookFileId);
+
+        const syncWithTitle = async (title: string) => {
+          await context.db.update(schema.bookMetadata).set({ title }).where(eq(schema.bookMetadata.bookId, epub.bookId));
+          const response = await context.app.inject({
+            method: 'POST',
+            url: `/api/v1/libraries/${library.libraryId}/write-metadata-to-files`,
+            headers: authHeader(context.adminToken),
+          });
+          expect(response.statusCode).toBe(200);
+          return parseSseEvents(response.body).find((event) => 'done' in event && event.done === true);
+        };
+
+        await expect(syncWithTitle('Primary Only Title')).resolves.toMatchObject({ processed: 1, succeeded: 1, failed: 0 });
+        expect((await extractEpubMetadata(epub.absolutePath))?.title).toBe('Primary Only Title');
+        expect(await readAudioTags(m4b.absolutePath)).toMatchObject({ title: 'Mixed Original', album: 'Mixed Original' });
+
+        await setLibraryFileWriteSettings(context.db, library.libraryId, { fileWriteAllFiles: true });
+        const detail = await context.app.inject({ method: 'GET', url: `/api/v1/books/${epub.bookId}`, headers: authHeader(context.adminToken) });
+        expect(detail.statusCode).toBe(200);
+        expect(detail.json().fileWriteStatus).toMatchObject({ enabled: true, reason: null });
+        expect(detail.json().fileWriteStatus.writableFormats).toEqual(expect.arrayContaining(['epub', 'm4b']));
+        expect(detail.json().fileWriteStatus.targets).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ fileId: epub.bookFileId, format: 'epub', writable: true }),
+            expect.objectContaining({ fileId: m4b.bookFileId, format: 'm4b', writable: true }),
+          ]),
+        );
+
+        await expect(syncWithTitle('Every File Title')).resolves.toMatchObject({ processed: 1, succeeded: 1, failed: 0 });
+        expect((await extractEpubMetadata(epub.absolutePath))?.title).toBe('Every File Title');
+        // A single audio file is the whole recording, so it takes the book title rather than a file name.
+        expect(await readAudioTags(m4b.absolutePath)).toMatchObject({ title: 'Every File Title', album: 'Every File Title' });
+
+        const logs = await context.db
+          .select({ bookFileId: schema.fileWriteLog.bookFileId, status: schema.fileWriteLog.status, triggeredBy: schema.fileWriteLog.triggeredBy })
+          .from(schema.fileWriteLog)
+          .where(eq(schema.fileWriteLog.bookId, epub.bookId));
+        expect(logs).toEqual(expect.arrayContaining([{ bookFileId: m4b.bookFileId, status: 'success', triggeredBy: 'sync' }]));
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
+
   describe('per-library file write settings', () => {
     it('only auto-writes for the library that has file write enabled', async () => {
       const enabledLibrary = await createLibraryWithFolder(context, { mode: 'book_per_file', fileWriteEnabled: true });
@@ -1345,7 +1414,7 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
         method: 'PATCH',
         url: `/api/v1/books/${book.bookId}/metadata`,
         headers: authHeader(context.adminToken),
-        payload: { title: 'FB2 Written Title', seriesName: 'FB2 Series', seriesIndex: 2 },
+        payload: { title: 'FB2 Written Title', seriesName: 'FB2 Series', seriesIndex: '5.10' },
       });
       expect(patchResponse.statusCode).toBe(200);
 
@@ -1355,7 +1424,7 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
 
       const updated = await readFile(book.absolutePath, 'utf8');
       expect(updated).toContain('<book-title>FB2 Written Title</book-title>');
-      expect(updated).toContain('<sequence name="FB2 Series" number="2"/>');
+      expect(updated).toContain('<sequence name="FB2 Series" number="5.10"/>');
 
       const bodyOf = (text: string) => text.slice(text.indexOf('<body'), text.lastIndexOf('</body>') + '</body>'.length);
       expect(bodyOf(updated)).toBe(bodyOf(originalBytes.toString('utf8')));
@@ -1364,7 +1433,7 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
       const reparsed = await parseFb2File(book.absolutePath);
       expect(reparsed?.title).toBe('FB2 Written Title');
       expect(reparsed?.seriesName).toBe('FB2 Series');
-      expect(reparsed?.seriesIndex).toBe(2);
+      expect(reparsed?.seriesIndex).toBe('5.10');
     });
 
     it('skips fb2 book when the fb2 format is disabled for the library', async () => {
@@ -1435,25 +1504,11 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
         fileWriteEpubMaxFileSizeMb: 1,
       });
 
-      await createEpubFixture(library.folderPath, 'per-size/book.epub', { title: 'Large EPUB' });
+      // The limit is checked against the file on disk, so the fixture has to be genuinely over it.
+      const epubPath = await createEpubFixture(library.folderPath, 'per-size/book.epub', { title: 'Large EPUB', paddingBytes: 1.5 * 1024 * 1024 });
+      expect((await stat(epubPath)).size).toBeGreaterThan(1024 * 1024);
       await triggerAndWaitForLibraryScan(context, library.libraryId);
       const book = await locateBookFileByRelPath(context, library.libraryId, 'per-size/book.epub');
-
-      const [fileRow] = await context.db
-        .select({ sizeBytes: schema.bookFiles.sizeBytes })
-        .from(schema.bookFiles)
-        .where(eq(schema.bookFiles.id, book.bookFileId))
-        .limit(1);
-
-      const fileSizeBytes = fileRow?.sizeBytes ?? 0;
-      const limitBytes = 1 * 1024 * 1024;
-
-      if (fileSizeBytes <= limitBytes) {
-        await context.db
-          .update(schema.bookFiles)
-          .set({ sizeBytes: limitBytes + 1 })
-          .where(eq(schema.bookFiles.id, book.bookFileId));
-      }
 
       await setLibraryFileWriteSettings(context.db, library.libraryId, { fileWriteEpubMaxFileSizeMb: 1 });
 
@@ -1546,6 +1601,147 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
   });
 
   describe('access control', () => {
+    it('rejects viewer forced renames and keeps personal ratings free of shared file effects', async () => {
+      const library = await createLibraryWithFolder(context, { mode: 'book_per_file' });
+      await createEpubFixture(library.folderPath, 'access/viewer.epub');
+      await triggerAndWaitForLibraryScan(context, library.libraryId);
+      const book = await locateBookFileByRelPath(context, library.libraryId, 'access/viewer.epub');
+      const before = await readFile(book.absolutePath);
+      const metadataBefore = await context.db.query.bookMetadata.findFirst({ where: eq(schema.bookMetadata.bookId, book.bookId) });
+      const caller = await createUserAndLogin(context, { permissions: [Permission.LibraryEditMetadata] });
+      await grantLibraryAccess(context, caller.userId, library.libraryId, 'viewer');
+      await setLibraryFileWriteSettings(context.db, library.libraryId, { fileWriteEnabled: true, fileWriteEpubEnabled: true });
+      await context.db.update(schema.libraries).set({ fileRenameEnabled: true }).where(eq(schema.libraries.id, library.libraryId));
+      const renameService = context.app.get(FileRenameService);
+      const writeService = context.app.get(FileWriteService);
+      const performRename = vi.spyOn(renameService, 'performRename');
+      const scheduleRename = vi.spyOn(renameService, 'scheduleRename');
+      const scheduleWrite = vi.spyOn(writeService, 'scheduleWrite');
+      try {
+        const rename = await context.app.inject({
+          method: 'POST',
+          url: `/api/v1/books/${book.bookId}/rename-files`,
+          headers: authHeader(caller.accessToken),
+        });
+        expect(rename.statusCode).toBe(403);
+        expect(performRename).not.toHaveBeenCalled();
+        for (const rating of [4, null]) {
+          const response = await context.app.inject({
+            method: 'POST',
+            url: '/api/v1/books/bulk-set-rating',
+            headers: authHeader(caller.accessToken),
+            payload: { bookIds: [book.bookId], rating },
+          });
+          expect(response.statusCode).toBe(204);
+          const personal = await context.db.query.userBookRatings.findFirst({ where: eq(schema.userBookRatings.userId, caller.userId) });
+          expect(personal).toMatchObject({ bookId: book.bookId, rating });
+        }
+        expect(scheduleWrite).not.toHaveBeenCalled();
+        expect(scheduleRename).not.toHaveBeenCalled();
+        expect(await readFile(book.absolutePath)).toEqual(before);
+        const metadataAfter = await context.db.query.bookMetadata.findFirst({ where: eq(schema.bookMetadata.bookId, book.bookId) });
+        expect(metadataAfter).toEqual(metadataBefore);
+      } finally {
+        performRename.mockRestore();
+        scheduleRename.mockRestore();
+        scheduleWrite.mockRestore();
+      }
+    });
+
+    it('enforces editor access for every manual metadata save and rejects mixed-library bulk writes atomically', async () => {
+      const editor = await createLibraryWithFolder(context, { mode: 'book_per_folder' });
+      const viewer = await createLibraryWithFolder(context, { mode: 'book_per_folder' });
+      const caller = await createUserAndLogin(context, { permissions: [Permission.LibraryEditMetadata] });
+      await grantLibraryAccess(context, caller.userId, editor.libraryId, 'editor');
+      await grantLibraryAccess(context, caller.userId, viewer.libraryId, 'viewer');
+      const bookIds: number[] = [];
+      for (const library of [editor, viewer]) {
+        const [book] = await context.db
+          .insert(schema.books)
+          .values({
+            libraryId: library.libraryId,
+            libraryFolderId: library.libraryFolderId,
+            folderPath: library.folderPath,
+          })
+          .returning({ id: schema.books.id });
+        await context.db.insert(schema.bookMetadata).values({ bookId: book.id, title: 'Original', publisher: 'Original publisher' });
+        bookIds.push(book.id);
+      }
+      const routes = [
+        { path: 'metadata', payload: { title: 'Forbidden title' } },
+        { path: 'metadata-and-locks', payload: { metadata: { title: 'Forbidden title' }, lockedFields: ['title'] } },
+        { path: 'metadata-locks', payload: { lockedFields: ['title'] } },
+      ];
+      for (const route of routes) {
+        const response = await context.app.inject({
+          method: 'PATCH',
+          url: `/api/v1/books/${bookIds[1]}/${route.path}`,
+          headers: authHeader(caller.accessToken),
+          payload: route.payload,
+        });
+        expect(response.statusCode).toBe(403);
+        const metadata = await context.db.query.bookMetadata.findFirst({ where: eq(schema.bookMetadata.bookId, bookIds[1]) });
+        expect(metadata?.title).toBe('Original');
+        expect(metadata?.lockedFields).toEqual([]);
+      }
+      for (const route of ['bulk-refresh-metadata', 'bulk-re-extract-cover']) {
+        const response = await context.app.inject({
+          method: 'POST',
+          url: `/api/v1/books/${route}`,
+          headers: authHeader(caller.accessToken),
+          payload: { bookIds },
+        });
+        expect(response.statusCode).toBe(403);
+        expect(response.headers['content-type']).not.toContain('text/event-stream');
+      }
+      const mixed = await context.app.inject({
+        method: 'POST',
+        url: '/api/v1/books/bulk-set-metadata',
+        headers: authHeader(caller.accessToken),
+        payload: { bookIds, field: 'publisher', value: 'Forbidden publisher' },
+      });
+      expect(mixed.statusCode).toBe(403);
+      for (const bookId of bookIds) {
+        const metadata = await context.db.query.bookMetadata.findFirst({ where: eq(schema.bookMetadata.bookId, bookId) });
+        expect(metadata?.publisher).toBe('Original publisher');
+      }
+      for (const level of ['editor', 'owner'] as const) {
+        await grantLibraryAccess(context, caller.userId, viewer.libraryId, level);
+        const rename = await context.app.inject({
+          method: 'POST',
+          url: `/api/v1/books/${bookIds[1]}/rename-files`,
+          headers: authHeader(caller.accessToken),
+        });
+        expect(rename.statusCode).toBe(204);
+        const response = await context.app.inject({
+          method: 'PATCH',
+          url: `/api/v1/books/${bookIds[1]}/metadata-and-locks`,
+          headers: authHeader(caller.accessToken),
+          payload: { metadata: { title: `Allowed ${level}` }, lockedFields: [] },
+        });
+        expect(response.statusCode).toBe(200);
+        const metadata = await context.db.query.bookMetadata.findFirst({ where: eq(schema.bookMetadata.bookId, bookIds[1]) });
+        expect(metadata?.title).toBe(`Allowed ${level}`);
+      }
+      await grantLibraryAccess(context, caller.userId, viewer.libraryId, 'viewer');
+      const downgraded = await context.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/books/${bookIds[1]}/metadata`,
+        headers: authHeader(caller.accessToken),
+        payload: { title: 'Forbidden after downgrade' },
+      });
+      expect(downgraded.statusCode).toBe(403);
+      const renameAfterDowngrade = await context.app.inject({
+        method: 'POST',
+        url: `/api/v1/books/${bookIds[1]}/rename-files`,
+        headers: authHeader(caller.accessToken),
+      });
+      expect(renameAfterDowngrade.statusCode).toBe(403);
+      const readable = await context.app.inject({ method: 'GET', url: `/api/v1/books/${bookIds[1]}`, headers: authHeader(caller.accessToken) });
+      expect(readable.statusCode).toBe(200);
+      expect(readable.json().title).toBe('Allowed owner');
+    });
+
     it('enforces permission and library access for PATCH /books/:id/metadata', async () => {
       const library = await createLibraryWithFolder(context, { mode: 'book_per_file' });
       await createPdfFixture(library.folderPath, 'access/patch.pdf');
@@ -1573,7 +1769,8 @@ describe('Metadata write operations (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, ()
         headers: authHeader(withPermissionUser.accessToken),
         payload: { title: 'Should Fail Access' },
       });
-      expect(missingAccess.statusCode).toBe(403);
+      // A book in a library the user cannot access is reported as missing, not forbidden.
+      expect(missingAccess.statusCode).toBe(404);
 
       await grantLibraryAccess(context, withPermissionUser.userId, library.libraryId, 'editor');
 
@@ -1716,7 +1913,7 @@ function buildAtomicityFailurePayload(failpoint: MetadataUpdateFailpoint) {
     language: 'de',
     pageCount: 520,
     seriesName: `Atomic Failure Series ${token}`,
-    seriesIndex: 9.9,
+    seriesIndex: '9.9',
     isbn10: '9999999999',
     isbn13: '9789999999999',
     rating: 2,

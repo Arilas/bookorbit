@@ -1,14 +1,16 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, getTableColumns, inArray, notExists, sql } from 'drizzle-orm';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, asc, desc, eq, getTableColumns, inArray, lte, notExists, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
+import type { ContentFilterRules, ReadAloudDeliveryPreference } from '@bookorbit/types';
 import { chunk } from '../../common/utils/batch.utils';
+import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
-type ResolvedBookFileByHash = { id: number; bookId: number; libraryId: number; format: string | null };
-type ResolvedBookFileByHashes = { bookFileId: number; bookId: number; libraryId: number; format: string | null };
+type ResolvedBookFileByHash = { id: number; bookId: number; libraryId: number; format: string | null; progressCompatible?: boolean };
+type ResolvedBookFileByHashes = { bookFileId: number; bookId: number; libraryId: number; format: string | null; progressCompatible?: boolean };
 type KoreaderUnmatchedSource = 'current_file' | 'file' | 'statistics';
 type KoreaderUnmatchedCandidate = {
   hash: string;
@@ -17,12 +19,57 @@ type KoreaderUnmatchedCandidate = {
   lastOpen?: number | null;
   source?: KoreaderUnmatchedSource;
   metadataAmbiguous?: boolean;
+  manualLinkRequested?: boolean;
 };
 type KoreaderHashLinkMetadata = {
   title?: string | null;
   authors?: string | null;
   lastOpen?: number | null;
 };
+
+type HashedResolvedBookFile = ResolvedBookFileByHashes & { hash: string | null };
+
+function compatibleProgressHash(hash: string | SQLWrapper) {
+  return sql<boolean>`coalesce(${schema.bookFiles.fileHash} = ${hash}, false) or exists (
+    select 1 from ${schema.bookFileHashHistory} delivered_hash
+    where delivered_hash.book_file_id = ${schema.bookFiles.id} and delivered_hash.file_hash = ${hash}
+      and delivered_hash.reason = 'kobo_download' and not exists (
+        select 1 from ${schema.bookFileHashHistory} source_change
+        where source_change.book_file_id = delivered_hash.book_file_id
+          and source_change.reason <> 'kobo_download' and source_change.created_at >= delivered_hash.created_at
+      )
+  )`;
+}
+
+function resolveUniqueBook<T extends { bookId: number }>(rows: T[]): T | null {
+  const first = rows[0];
+  if (!first) return null;
+  return rows.every((row) => row.bookId === first.bookId) ? first : null;
+}
+
+function addUnambiguousHashMatches(rows: HashedResolvedBookFile[], result: Map<string, ResolvedBookFileByHashes>): void {
+  const rowsByHash = new Map<string, HashedResolvedBookFile[]>();
+
+  for (const row of rows) {
+    if (!row.hash) continue;
+    const matches = rowsByHash.get(row.hash);
+    if (matches) matches.push(row);
+    else rowsByHash.set(row.hash, [row]);
+  }
+
+  for (const [hash, matches] of rowsByHash) {
+    const resolved = resolveUniqueBook(matches);
+    if (resolved) {
+      result.set(hash, {
+        bookFileId: resolved.bookFileId,
+        bookId: resolved.bookId,
+        libraryId: resolved.libraryId,
+        format: resolved.format,
+        ...(resolved.progressCompatible === false ? { progressCompatible: false } : {}),
+      });
+    }
+  }
+}
 
 export interface ReadingProgressUpsert {
   bookFileId: number;
@@ -34,6 +81,10 @@ export interface ReadingProgressUpsert {
   xpointer?: string | null;
   /** 1-based page for paged formats; null for reflowable and audio. */
   pageNumber?: number | null;
+  /** When the device read to this position; the write's own time when it does not say. */
+  readAt?: Date;
+  /** When the reading happened, for last_read_at; defaults to readAt. Never moves the stored value back. */
+  lastReadAt?: Date;
 }
 
 export interface DeviceProgressUpsert {
@@ -59,68 +110,138 @@ export class KoreaderRepository {
     });
   }
 
+  async findKoreaderCatalogPreferences(userId: number): Promise<{ hideAudioOnlyBooks: boolean } | undefined> {
+    const [row] = await this.db
+      .select({ hideAudioOnlyBooks: schema.koreaderUsers.hideAudioOnlyBooks })
+      .from(schema.koreaderUsers)
+      .where(eq(schema.koreaderUsers.userId, userId))
+      .limit(1);
+    return row;
+  }
+
   async findKoreaderUserByUsername(username: string) {
     return this.db.query.koreaderUsers.findFirst({
       where: eq(schema.koreaderUsers.username, username),
     });
   }
 
-  async createKoreaderUser(data: { userId: number; username: string; passwordHash: string; passwordMd5: string }) {
+  async createKoreaderUser(data: {
+    userId: number;
+    username: string;
+    passwordHash: string;
+    passwordMd5: string;
+    readAloudDelivery?: ReadAloudDeliveryPreference;
+  }) {
     const [row] = await this.db.insert(schema.koreaderUsers).values(data).returning();
     return row!;
   }
 
-  async updateKoreaderUser(userId: number, data: Partial<{ username: string; passwordHash: string; passwordMd5: string; syncEnabled: boolean }>) {
+  async updateKoreaderUser(
+    userId: number,
+    data: Partial<{
+      username: string;
+      passwordHash: string;
+      passwordMd5: string;
+      syncEnabled: boolean;
+      readAloudDelivery: ReadAloudDeliveryPreference;
+    }>,
+  ) {
     await this.db.update(schema.koreaderUsers).set(data).where(eq(schema.koreaderUsers.userId, userId));
+  }
+
+  async getDeviceDeliverySettings(userId: number, deviceId: string) {
+    return this.db.query.koreaderDeviceDeliverySettings.findFirst({
+      where: and(eq(schema.koreaderDeviceDeliverySettings.userId, userId), eq(schema.koreaderDeviceDeliverySettings.deviceId, deviceId)),
+    });
+  }
+
+  async getDeviceDeliverySettingsForDevices(userId: number, deviceIds: string[]) {
+    const rows: (typeof schema.koreaderDeviceDeliverySettings.$inferSelect)[] = [];
+    for (const batch of chunk([...new Set(deviceIds)], BATCH_QUERY_SIZE)) {
+      rows.push(
+        ...(await this.db
+          .select()
+          .from(schema.koreaderDeviceDeliverySettings)
+          .where(and(eq(schema.koreaderDeviceDeliverySettings.userId, userId), inArray(schema.koreaderDeviceDeliverySettings.deviceId, batch)))),
+      );
+    }
+    return rows;
+  }
+
+  async setDeviceDeliverySettings(userId: number, deviceId: string, variant: ReadAloudDeliveryPreference, migrateOnly = false) {
+    await this.db.transaction(async (tx) => {
+      const [credential] = await tx.select().from(schema.koreaderUsers).where(eq(schema.koreaderUsers.userId, userId)).for('update');
+      if (!credential) throw new NotFoundException('KOReader credentials not found');
+      // Locking the credential makes migration atomic with a web default change.
+      const values = {
+        userId,
+        credentialId: credential.id,
+        deviceId,
+        readAloudDelivery: migrateOnly && credential.readAloudDelivery ? null : variant,
+      };
+      const insert = tx.insert(schema.koreaderDeviceDeliverySettings).values(values);
+      if (migrateOnly) await insert.onConflictDoNothing();
+      else
+        await insert.onConflictDoUpdate({
+          target: [schema.koreaderDeviceDeliverySettings.userId, schema.koreaderDeviceDeliverySettings.deviceId],
+          set: { readAloudDelivery: variant, updatedAt: new Date() },
+        });
+    });
   }
 
   async deleteKoreaderUser(userId: number) {
     await this.db.delete(schema.koreaderUsers).where(eq(schema.koreaderUsers.userId, userId));
   }
 
-  // A file hash is not unique: the same content in two places is two book file rows, and one
-  // historical hash can belong to several of them. The oldest row wins so a hash always resolves
-  // to the same target, both across requests and between this and resolveBookFilesByHashes. An
-  // unordered pick would move a device's sync target under it and strand data on the loser.
+  // KOReader's partial hash can collide for different files. Same-book matches have a safe
+  // deterministic fallback, while a user-scoped hash link preserves the exact downloaded file.
   async resolveBookFileByHash(hash: string, accessibleLibraryIds: number[] | null, userId?: number): Promise<ResolvedBookFileByHash | null> {
     if (accessibleLibraryIds !== null && accessibleLibraryIds.length === 0) return null;
 
     const libraryFilter = accessibleLibraryIds ? inArray(schema.books.libraryId, accessibleLibraryIds) : undefined;
 
-    const [byFileHash] = await this.db
-      .select({ id: schema.bookFiles.id, bookId: schema.bookFiles.bookId, libraryId: schema.books.libraryId, format: schema.bookFiles.format })
+    const byFileHash = await this.db
+      .selectDistinctOn([schema.bookFiles.bookId], {
+        id: schema.bookFiles.id,
+        bookId: schema.bookFiles.bookId,
+        libraryId: schema.books.libraryId,
+        format: schema.bookFiles.format,
+      })
       .from(schema.bookFiles)
       .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
       .where(and(eq(schema.bookFiles.fileHash, hash), libraryFilter))
-      .orderBy(asc(schema.bookFiles.id))
-      .limit(1);
+      .orderBy(asc(schema.bookFiles.bookId), asc(schema.bookFiles.id))
+      .limit(2);
 
-    if (byFileHash) return byFileHash;
-
-    const [byFileHashHistory] = await this.db
-      .select({ id: schema.bookFiles.id, bookId: schema.bookFiles.bookId, libraryId: schema.books.libraryId, format: schema.bookFiles.format })
+    const byFileHashHistory = await this.db
+      .selectDistinctOn([schema.bookFiles.bookId], {
+        id: schema.bookFiles.id,
+        bookId: schema.bookFiles.bookId,
+        libraryId: schema.books.libraryId,
+        format: schema.bookFiles.format,
+        progressCompatible: compatibleProgressHash(schema.bookFileHashHistory.fileHash),
+      })
       .from(schema.bookFileHashHistory)
       .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.bookFileHashHistory.bookFileId))
       .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
       .where(and(eq(schema.bookFileHashHistory.fileHash, hash), libraryFilter))
-      .orderBy(asc(schema.bookFiles.id))
-      .limit(1);
+      .orderBy(asc(schema.bookFiles.bookId), asc(schema.bookFiles.id))
+      .limit(2);
 
-    if (byFileHashHistory) return byFileHashHistory;
-
-    if (userId !== undefined) {
-      const [byManualLink] = await this.db
-        .select({ id: schema.bookFiles.id, bookId: schema.bookFiles.bookId, libraryId: schema.books.libraryId, format: schema.bookFiles.format })
-        .from(schema.koreaderBookHashLinks)
-        .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.koreaderBookHashLinks.bookFileId))
-        .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
-        .where(and(eq(schema.koreaderBookHashLinks.userId, userId), eq(schema.koreaderBookHashLinks.hash, hash), libraryFilter))
-        .limit(1);
-
-      if (byManualLink) return byManualLink;
+    // A delivered variant can collide with another book's current hash. Both sources must
+    // agree before a device's progress can be assigned, even when a current hash exists.
+    const candidates: ResolvedBookFileByHash[] = [...byFileHash];
+    for (const row of byFileHashHistory) {
+      if (!candidates.some((candidate) => candidate.id === row.id)) candidates.push(row);
     }
-
-    return null;
+    if (userId !== undefined) {
+      const manual = await this.resolveManualBookFileByHash(hash, accessibleLibraryIds, userId);
+      if (manual) return manual;
+    }
+    const resolved = resolveUniqueBook(candidates);
+    return resolved?.progressCompatible === true
+      ? { id: resolved.id, bookId: resolved.bookId, libraryId: resolved.libraryId, format: resolved.format }
+      : resolved;
   }
 
   async resolveBookFilesByHashes(
@@ -147,15 +268,6 @@ export class KoreaderRepository {
       .where(and(inArray(schema.bookFiles.fileHash, hashes), libraryFilter))
       .orderBy(asc(schema.bookFiles.id));
 
-    for (const row of direct) {
-      if (row.hash && !result.has(row.hash)) {
-        result.set(row.hash, { bookFileId: row.bookFileId, bookId: row.bookId, libraryId: row.libraryId, format: row.format });
-      }
-    }
-
-    const missing = hashes.filter((hash) => !result.has(hash));
-    if (missing.length === 0) return result;
-
     const history = await this.db
       .select({
         hash: schema.bookFileHashHistory.fileHash,
@@ -163,21 +275,22 @@ export class KoreaderRepository {
         bookId: schema.bookFiles.bookId,
         libraryId: schema.books.libraryId,
         format: schema.bookFiles.format,
+        progressCompatible: compatibleProgressHash(schema.bookFileHashHistory.fileHash),
       })
       .from(schema.bookFileHashHistory)
       .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.bookFileHashHistory.bookFileId))
       .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
-      .where(and(inArray(schema.bookFileHashHistory.fileHash, missing), libraryFilter))
+      .where(and(inArray(schema.bookFileHashHistory.fileHash, hashes), libraryFilter))
       .orderBy(asc(schema.bookFiles.id));
 
-    for (const row of history) {
-      if (!result.has(row.hash)) {
-        result.set(row.hash, { bookFileId: row.bookFileId, bookId: row.bookId, libraryId: row.libraryId, format: row.format });
-      }
+    const uniqueFiles = new Map<string, HashedResolvedBookFile>();
+    for (const row of [...direct, ...history]) {
+      const key = `${row.hash}:${row.bookFileId}`;
+      if (!uniqueFiles.has(key)) uniqueFiles.set(key, row);
     }
-
-    const stillMissing = missing.filter((hash) => !result.has(hash));
-    if (stillMissing.length === 0 || userId === undefined) return result;
+    const candidates = [...uniqueFiles.values()];
+    addUnambiguousHashMatches(candidates, result);
+    if (userId === undefined) return result;
 
     const manualLinks = await this.db
       .select({
@@ -186,19 +299,49 @@ export class KoreaderRepository {
         bookId: schema.bookFiles.bookId,
         libraryId: schema.books.libraryId,
         format: schema.bookFiles.format,
+        progressCompatible: compatibleProgressHash(schema.koreaderBookHashLinks.hash),
       })
       .from(schema.koreaderBookHashLinks)
       .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.koreaderBookHashLinks.bookFileId))
       .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
-      .where(and(eq(schema.koreaderBookHashLinks.userId, userId), inArray(schema.koreaderBookHashLinks.hash, stillMissing), libraryFilter));
+      .where(and(eq(schema.koreaderBookHashLinks.userId, userId), inArray(schema.koreaderBookHashLinks.hash, hashes), libraryFilter));
 
     for (const row of manualLinks) {
-      if (!result.has(row.hash)) {
-        result.set(row.hash, { bookFileId: row.bookFileId, bookId: row.bookId, libraryId: row.libraryId, format: row.format });
-      }
+      result.set(row.hash, {
+        bookFileId: row.bookFileId,
+        bookId: row.bookId,
+        libraryId: row.libraryId,
+        format: row.format,
+        ...(row.progressCompatible === false ? { progressCompatible: false } : {}),
+      });
     }
 
     return result;
+  }
+
+  private async resolveManualBookFileByHash(
+    hash: string,
+    accessibleLibraryIds: number[] | null,
+    userId: number,
+  ): Promise<ResolvedBookFileByHash | null> {
+    const libraryFilter = accessibleLibraryIds ? inArray(schema.books.libraryId, accessibleLibraryIds) : undefined;
+    const [byManualLink] = await this.db
+      .select({
+        id: schema.bookFiles.id,
+        bookId: schema.bookFiles.bookId,
+        libraryId: schema.books.libraryId,
+        format: schema.bookFiles.format,
+        progressCompatible: compatibleProgressHash(hash),
+      })
+      .from(schema.koreaderBookHashLinks)
+      .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.koreaderBookHashLinks.bookFileId))
+      .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
+      .where(and(eq(schema.koreaderBookHashLinks.userId, userId), eq(schema.koreaderBookHashLinks.hash, hash), libraryFilter))
+      .limit(1);
+
+    if (!byManualLink) return null;
+    const { progressCompatible, ...file } = byManualLink;
+    return progressCompatible === false ? { ...file, progressCompatible: false } : file;
   }
 
   async upsertUnmatchedBooks(userId: number, candidates: KoreaderUnmatchedCandidate[], deviceId?: string): Promise<void> {
@@ -220,6 +363,7 @@ export class KoreaderRepository {
             lastOpen: candidate.lastOpen ?? null,
             source: candidate.source ?? 'statistics',
             metadataAmbiguous: candidate.metadataAmbiguous ?? false,
+            manualLinkRequested: candidate.manualLinkRequested ?? false,
             lastSeenAt: now,
           })),
         )
@@ -247,16 +391,19 @@ export class KoreaderRepository {
             `,
             source: sql`
               case
+                when ${schema.koreaderUnmatchedBooks.manualLinkRequested} then 'file'
                 when ${incomingSourceRank} >= ${storedSourceRank} then excluded.source
                 else ${schema.koreaderUnmatchedBooks.source}
               end
             `,
             metadataAmbiguous: sql`
               case
+                when ${schema.koreaderUnmatchedBooks.manualLinkRequested} then false
                 when ${incomingSourceRank} >= ${storedSourceRank} then excluded.metadata_ambiguous
                 else ${schema.koreaderUnmatchedBooks.metadataAmbiguous}
               end
             `,
+            manualLinkRequested: sql`${schema.koreaderUnmatchedBooks.manualLinkRequested} or excluded.manual_link_requested`,
             lastSeenAt: now,
           },
         });
@@ -277,11 +424,17 @@ export class KoreaderRepository {
     });
   }
 
-  async clearUnmatchedBooks(userId: number, hashes: string[]): Promise<void> {
+  async clearUnmatchedBooks(userId: number, hashes: string[], includeManualRequests = false): Promise<void> {
     if (hashes.length === 0) return;
     await this.db
       .delete(schema.koreaderUnmatchedBooks)
-      .where(and(eq(schema.koreaderUnmatchedBooks.userId, userId), inArray(schema.koreaderUnmatchedBooks.hash, hashes)));
+      .where(
+        and(
+          eq(schema.koreaderUnmatchedBooks.userId, userId),
+          inArray(schema.koreaderUnmatchedBooks.hash, hashes),
+          includeManualRequests ? undefined : eq(schema.koreaderUnmatchedBooks.manualLinkRequested, false),
+        ),
+      );
   }
 
   async dismissUnmatchedBook(userId: number, hash: string) {
@@ -348,6 +501,7 @@ export class KoreaderRepository {
         koreaderTitle: schema.koreaderBookHashLinks.koreaderTitle,
         koreaderAuthors: schema.koreaderBookHashLinks.koreaderAuthors,
         koreaderLastOpen: schema.koreaderBookHashLinks.koreaderLastOpen,
+        positionCompatible: compatibleProgressHash(schema.koreaderBookHashLinks.hash),
         createdAt: schema.koreaderBookHashLinks.createdAt,
         updatedAt: schema.koreaderBookHashLinks.updatedAt,
       })
@@ -378,6 +532,80 @@ export class KoreaderRepository {
     }
 
     return rows.map((row) => ({ ...row, bookAuthors: authorsByBook.get(row.bookId) ?? [] }));
+  }
+
+  /**
+   * Present books in the given libraries whose lowercased title is one of `titleKeys`, at most
+   * `perTitleLimit` per title (lowest ids first), with their primary file and authors. Pass
+   * `contentFilters` for a non-superuser so hidden books are never offered.
+   */
+  async findBooksByTitleKeys(
+    titleKeys: string[],
+    accessibleLibraryIds: number[] | null,
+    contentFilters: ContentFilterRules | null,
+    perTitleLimit: number,
+  ) {
+    if (titleKeys.length === 0) return [];
+    if (accessibleLibraryIds !== null && accessibleLibraryIds.length === 0) return [];
+
+    const titleKey = sql<string>`lower(${schema.bookMetadata.title})`;
+    const ranked = this.db
+      .select({
+        bookId: sql<number>`${schema.books.id}`.as('ranked_book_id'),
+        titleKey: sql<string>`lower(${schema.bookMetadata.title})`.as('ranked_title_key'),
+        rank: sql<number>`row_number() over (partition by lower(${schema.bookMetadata.title}) order by ${schema.books.id})`.as('ranked_rank'),
+      })
+      .from(schema.bookMetadata)
+      .innerJoin(schema.books, eq(schema.books.id, schema.bookMetadata.bookId))
+      .where(
+        and(
+          inArray(titleKey, titleKeys),
+          eq(schema.books.status, 'present'),
+          accessibleLibraryIds ? inArray(schema.books.libraryId, accessibleLibraryIds) : undefined,
+          ...(contentFilters ? buildContentFilterClauses(contentFilters, this.db) : []),
+        ),
+      )
+      .as('ranked');
+
+    const rows = await this.db
+      .select({
+        bookId: ranked.bookId,
+        titleKey: ranked.titleKey,
+        title: schema.bookMetadata.title,
+        subtitle: schema.bookMetadata.subtitle,
+        language: schema.bookMetadata.language,
+        publishedYear: schema.bookMetadata.publishedYear,
+        format: schema.bookFiles.format,
+        role: schema.bookFiles.role,
+        libraryName: schema.libraries.name,
+      })
+      .from(ranked)
+      .innerJoin(schema.books, eq(schema.books.id, ranked.bookId))
+      .innerJoin(schema.bookMetadata, eq(schema.bookMetadata.bookId, schema.books.id))
+      .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.books.primaryFileId))
+      .innerJoin(schema.libraries, eq(schema.libraries.id, schema.books.libraryId))
+      .where(lte(ranked.rank, perTitleLimit))
+      .orderBy(asc(ranked.bookId));
+
+    const authorsByBook = new Map<number, string[]>();
+    for (const ids of chunk(
+      rows.map((row) => row.bookId),
+      BATCH_QUERY_SIZE,
+    )) {
+      const authorRows = await this.db
+        .select({ bookId: schema.bookAuthors.bookId, name: schema.authors.name })
+        .from(schema.bookAuthors)
+        .innerJoin(schema.authors, eq(schema.authors.id, schema.bookAuthors.authorId))
+        .where(inArray(schema.bookAuthors.bookId, ids))
+        .orderBy(schema.bookAuthors.bookId, schema.bookAuthors.displayOrder);
+      for (const row of authorRows) {
+        const list = authorsByBook.get(row.bookId) ?? [];
+        list.push(row.name);
+        authorsByBook.set(row.bookId, list);
+      }
+    }
+
+    return rows.map((row) => ({ ...row, authors: authorsByBook.get(row.bookId) ?? [] }));
   }
 
   async upsertBookHashLink(userId: number, hash: string, bookFileId: number, metadata: KoreaderHashLinkMetadata = {}) {
@@ -411,6 +639,20 @@ export class KoreaderRepository {
       });
   }
 
+  async createBookHashLinkIfAbsent(userId: number, hash: string, bookFileId: number, metadata: KoreaderHashLinkMetadata = {}): Promise<void> {
+    await this.db.execute(sql`
+      insert into ${schema.koreaderBookHashLinks}
+        (user_id, hash, book_file_id, koreader_title, koreader_authors, koreader_last_open)
+      select ${userId}, ${hash}, ${bookFileId}, ${metadata.title?.trim() || null},
+        ${metadata.authors?.trim() || null}, ${metadata.lastOpen ?? null}
+      where not exists (
+        select 1 from ${schema.koreaderUnmatchedBooks}
+        where user_id = ${userId} and hash = ${hash} and manual_link_requested = true
+      )
+      on conflict (user_id, hash) do nothing
+    `);
+  }
+
   async getBookHashLink(userId: number, hash: string): Promise<{ bookFileId: number } | null> {
     const [row] = await this.db
       .select({ bookFileId: schema.koreaderBookHashLinks.bookFileId })
@@ -420,18 +662,25 @@ export class KoreaderRepository {
     return row ?? null;
   }
 
-  async deleteBookHashLink(userId: number, hash: string) {
-    const [row] = await this.db
-      .delete(schema.koreaderBookHashLinks)
-      .where(and(eq(schema.koreaderBookHashLinks.userId, userId), eq(schema.koreaderBookHashLinks.hash, hash)))
-      .returning({
-        hash: schema.koreaderBookHashLinks.hash,
-        bookFileId: schema.koreaderBookHashLinks.bookFileId,
-        koreaderTitle: schema.koreaderBookHashLinks.koreaderTitle,
-        koreaderAuthors: schema.koreaderBookHashLinks.koreaderAuthors,
-        koreaderLastOpen: schema.koreaderBookHashLinks.koreaderLastOpen,
-      });
-    return row ?? null;
+  async unlinkBookHashLink(userId: number, hash: string) {
+    const result = await this.db.execute<Pick<typeof schema.koreaderUnmatchedBooks.$inferSelect, 'hash'>>(sql`
+      with deleted as (
+        delete from ${schema.koreaderBookHashLinks}
+        where user_id = ${userId} and hash = ${hash}
+        returning *
+      )
+      insert into ${schema.koreaderUnmatchedBooks}
+        (user_id, hash, title, authors, last_open, source, metadata_ambiguous, manual_link_requested)
+      select user_id, hash, koreader_title, koreader_authors, koreader_last_open, 'file', false, true
+      from deleted
+      on conflict (user_id, hash) do update set
+        title = coalesce(excluded.title, koreader_unmatched_books.title),
+        authors = coalesce(excluded.authors, koreader_unmatched_books.authors),
+        last_open = coalesce(excluded.last_open, koreader_unmatched_books.last_open),
+        source = 'file', metadata_ambiguous = false, manual_link_requested = true, last_seen_at = now()
+      returning hash
+    `);
+    return result.rows[0] ?? null;
   }
 
   async getAccessibleLibraryIds(userId: number): Promise<number[] | null> {
@@ -565,11 +814,11 @@ export class KoreaderRepository {
   }
 
   async upsertReadingProgress(entry: ReadingProgressUpsert) {
-    const { bookFileId, userId, percentage, cfi = null, xpointer = null, pageNumber = null } = entry;
+    const { bookFileId, userId, percentage, cfi = null, xpointer = null, pageNumber = null, readAt = new Date(), lastReadAt = readAt } = entry;
 
     await this.db
       .insert(schema.readingProgress)
-      .values({ bookFileId, userId, percentage, cfi, pageNumber, koreaderProgress: xpointer })
+      .values({ bookFileId, userId, appPasswordId: null, percentage, cfi, pageNumber, koreaderProgress: xpointer, textUpdatedAt: readAt, lastReadAt })
       .onConflictDoUpdate({
         target: [schema.readingProgress.bookFileId, schema.readingProgress.userId],
         // Deliberately do NOT update updatedAt here. reading_progress.updatedAt must only
@@ -582,6 +831,7 @@ export class KoreaderRepository {
         // older location. Kobo location fields clear because the position no longer matches the
         // device's bookmark; the Kobo pull path recomputes a precise Location from the cfi.
         set: {
+          appPasswordId: null,
           percentage,
           cfi,
           pageNumber,
@@ -590,7 +840,12 @@ export class KoreaderRepository {
           koboLocationType: null,
           koboLocationValue: null,
           koboContentSourceProgressPercent: null,
+          textUpdatedAt: readAt,
           updatedAt: sql`"reading_progress"."updated_at"`,
+          // The device's reading time, not the write's: a sweep pushes a whole shelf at once and
+          // an offline book arrives on reconnection, so the write's own time ranked them all as
+          // just read. Held to the stored value so an older push never sinks a newer read elsewhere.
+          lastReadAt: sql`greatest("reading_progress"."last_read_at", ${lastReadAt.toISOString()}::timestamptz)`,
         },
       });
   }
@@ -694,13 +949,22 @@ export class KoreaderRepository {
   }
 
   /**
-   * The file a book's KOReader progress hangs off, in the shape the shared-progress path needs.
-   * Resolved through the book's primary file, matching findBookFileIdByBookId: the book page
-   * reports one file's holds, so the release action has to act on that same file rather than
-   * whichever one a marker happens to be found on first.
+   * The file a book's KOReader progress hangs off, in the shape the shared-progress path needs:
+   * the copy this user's devices synced most recently, or the primary file when none has. A
+   * device syncs whichever copy it was given, and a Storyteller read-along EPUB becomes the
+   * primary while devices usually hold the original beside it. The book page reports one file's
+   * devices and holds, and the release action resolves through this same query, so it acts on
+   * the file the page showed rather than whichever one a marker happens to be found on first.
    */
-  async findProgressBookFileByBookId(bookId: number, accessibleLibraryIds: number[] | null) {
+  async findProgressBookFileByBookId(bookId: number, userId: number, accessibleLibraryIds: number[] | null) {
     if (accessibleLibraryIds !== null && accessibleLibraryIds.length === 0) return null;
+    const lastDeviceSyncAt = sql`(
+      select max(${schema.koreaderDeviceProgress.updatedAt})
+      from ${schema.koreaderDeviceProgress}
+      where ${schema.koreaderDeviceProgress.bookFileId} = ${schema.bookFiles.id}
+        and ${schema.koreaderDeviceProgress.userId} = ${userId}
+        and ${schema.koreaderDeviceProgress.orphaned} = false
+    )`;
     const [row] = await this.db
       .select({
         id: schema.bookFiles.id,
@@ -713,13 +977,14 @@ export class KoreaderRepository {
       .where(
         and(
           eq(schema.books.id, bookId),
-          eq(schema.books.primaryFileId, schema.bookFiles.id),
+          or(eq(schema.books.primaryFileId, schema.bookFiles.id), sql`${lastDeviceSyncAt} is not null`),
           // Scoped the same way every other entry point into this module is. A device progress
           // row outlives the library grant that created it, so ownership of the row is not
           // ownership of the book, and this path writes.
           accessibleLibraryIds === null ? undefined : inArray(schema.books.libraryId, accessibleLibraryIds),
         ),
       )
+      .orderBy(sql`${lastDeviceSyncAt} desc nulls last`, asc(schema.bookFiles.id))
       .limit(1);
     return row ?? null;
   }
@@ -908,8 +1173,17 @@ export class KoreaderRepository {
   }
 
   async removeDevice(userId: number, deviceId: string): Promise<number> {
+    const renditionIds = renditionIdsForDevice(userId, deviceId);
     return this.db.transaction(async (tx) => {
-      const [deletedProgress, deletedSweep, deletedPageStats, deletedUnmatchedDeviceLinks, deletedDeviceSettings] = await Promise.all([
+      const [
+        deletedProgress,
+        deletedSweep,
+        deletedPageStats,
+        deletedUnmatchedDeviceLinks,
+        deletedDeviceSettings,
+        deletedAnnotationSyncState,
+        deletedBookmarkLinks,
+      ] = await Promise.all([
         tx
           .delete(schema.koreaderDeviceProgress)
           .where(and(eq(schema.koreaderDeviceProgress.userId, userId), eq(schema.koreaderDeviceProgress.deviceId, deviceId)))
@@ -930,7 +1204,25 @@ export class KoreaderRepository {
           .delete(schema.koreaderDeviceSettings)
           .where(and(eq(schema.koreaderDeviceSettings.userId, userId), eq(schema.koreaderDeviceSettings.deviceId, deviceId)))
           .returning({ deviceId: schema.koreaderDeviceSettings.deviceId }),
+        tx
+          .delete(schema.annotationSyncState)
+          .where(
+            and(
+              eq(schema.annotationSyncState.userId, userId),
+              eq(schema.annotationSyncState.source, 'koreader'),
+              or(eq(schema.annotationSyncState.deviceId, deviceId), inArray(schema.annotationSyncState.deviceId, renditionIds)),
+            ),
+          )
+          .returning({ id: schema.annotationSyncState.id }),
+        tx
+          .delete(schema.koreaderBookmarkLinks)
+          .where(and(eq(schema.koreaderBookmarkLinks.userId, userId), inArray(schema.koreaderBookmarkLinks.deviceId, renditionIds)))
+          .returning({ id: schema.koreaderBookmarkLinks.id }),
       ]);
+
+      await tx
+        .delete(schema.koreaderDeviceDeliverySettings)
+        .where(and(eq(schema.koreaderDeviceDeliverySettings.userId, userId), eq(schema.koreaderDeviceDeliverySettings.deviceId, deviceId)));
 
       // Not counted towards the deleted-row total: a marker on its own never made the device listable.
       await tx
@@ -970,6 +1262,8 @@ export class KoreaderRepository {
         deletedPageStats.length +
         deletedUnmatchedDeviceLinks.length +
         deletedDeviceSettings.length +
+        deletedAnnotationSyncState.length +
+        deletedBookmarkLinks.length +
         deletedUnmatchedBooks.length
       );
     });
@@ -1018,4 +1312,43 @@ export class KoreaderRepository {
       .limit(1);
     return row?.id ?? null;
   }
+}
+
+/**
+ * Every rendition id this device can have exchanged under. Exchanges key their rows by
+ * `exchangeDeviceId(deviceId, hash)`, a one-way digest, and nothing records which hashes a device
+ * used, so the ids are rebuilt from every hash an exchange could have matched for the user's
+ * KOReader-synced books (file, hash history and manual links, as `resolveBookFilesByHashes` reads
+ * them). Device ids are `[A-Za-z0-9-]` and hashes hex, so the JSON text needs no escaping.
+ */
+function renditionIdsForDevice(userId: number, deviceId: string): SQL {
+  return sql`(with synced_books as (
+      select ${schema.annotations.bookId} as book_id
+      from ${schema.annotationSyncState}
+      inner join ${schema.annotations} on ${schema.annotations.id} = ${schema.annotationSyncState.annotationId}
+      where ${schema.annotationSyncState.userId} = ${userId}
+        and ${schema.annotationSyncState.source} = 'koreader'
+        and ${schema.annotationSyncState.deviceId} like 'rendition:%'
+      union
+      select ${schema.bookmarks.bookId}
+      from ${schema.koreaderBookmarkLinks}
+      inner join ${schema.bookmarks} on ${schema.bookmarks.id} = ${schema.koreaderBookmarkLinks.bookmarkId}
+      where ${schema.koreaderBookmarkLinks.userId} = ${userId}
+    ),
+    hashes as (
+      select ${schema.bookFiles.fileHash} as hash
+      from ${schema.bookFiles}
+      where ${schema.bookFiles.bookId} in (select book_id from synced_books) and ${schema.bookFiles.fileHash} is not null
+      union
+      select ${schema.bookFileHashHistory.fileHash}
+      from ${schema.bookFileHashHistory}
+      inner join ${schema.bookFiles} on ${schema.bookFiles.id} = ${schema.bookFileHashHistory.bookFileId}
+      where ${schema.bookFiles.bookId} in (select book_id from synced_books)
+      union
+      select ${schema.koreaderBookHashLinks.hash}
+      from ${schema.koreaderBookHashLinks}
+      where ${schema.koreaderBookHashLinks.userId} = ${userId}
+    )
+    select 'rendition:' || encode(sha256(convert_to('["' || ${deviceId}::text || '","' || lower(hash) || '"]', 'UTF8')), 'hex')
+    from hashes)`;
 }

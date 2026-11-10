@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+import { markProviderFailed } from '../../../../common/provider-cache/provider-call-context';
 import { fetchWithThrottle } from '../../fetch-with-throttle';
 import { ProviderThrottleError } from '../../provider-throttle.error';
 import { PROVIDER_DELAYS_MS, PROVIDER_TIMEOUT_MS } from '../provider-constants';
@@ -21,6 +22,11 @@ const SEARCH_FIELDS = `${VOLUME_FIELDS},${ISSUE_LIST_FIELDS}`;
 
 interface CachedVolumes {
   data: ComicVineVolume[];
+  expiresAt: number;
+}
+
+interface CachedVolume {
+  data: ComicVineVolume;
   expiresAt: number;
 }
 
@@ -60,6 +66,7 @@ export class ComicVineClient {
   private readonly logger = new Logger(ComicVineClient.name);
   private readonly rateLimiter = new RateLimiter();
   private readonly volumeCache = new Map<string, CachedVolumes>();
+  private readonly volumeByIdCache = new Map<number, CachedVolume>();
 
   windowResetMs(): number {
     return this.rateLimiter.timeUntilWindowResetMs();
@@ -81,8 +88,26 @@ export class ComicVineClient {
     const data = await this.get<ComicVineVolume[]>(url, signal);
     if (data) {
       this.cacheVolumes(cacheKey, data);
+      for (const volume of data) this.cacheVolume(volume);
     }
     return data ?? [];
+  }
+
+  async getVolumeById(volumeId: number, apiKey: string, signal?: AbortSignal): Promise<ComicVineVolume | null> {
+    if (!Number.isSafeInteger(volumeId) || volumeId <= 0) return null;
+
+    const cached = this.volumeByIdCache.get(volumeId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
+
+    const url = this.buildUrl(`/volume/4050-${volumeId}/`, apiKey, {
+      field_list: VOLUME_FIELDS,
+    });
+
+    const data = await this.get<ComicVineVolume>(url, signal);
+    if (data) this.cacheVolume(data);
+    return data;
   }
 
   async searchIssuesInVolume(volumeId: number, issueNumber: string, apiKey: string, signal?: AbortSignal): Promise<ComicVineIssue[]> {
@@ -137,6 +162,7 @@ export class ComicVineClient {
 
       const body = (await res.json()) as ComicVineApiResponse<T>;
       if (body.status_code !== 1) {
+        markProviderFailed(`comicvine: api status_code=${body.status_code}`);
         this.logger.warn(`[comicvine] [fail] method=GET status=${res.status} durationMs=${Date.now() - startedAt} message="${body.error}"`);
         return null;
       }
@@ -146,6 +172,7 @@ export class ComicVineClient {
       return body.results;
     } catch (err) {
       if (err instanceof ProviderThrottleError) throw err;
+      markProviderFailed('comicvine: unusable response');
       this.logger.warn(`[comicvine] [fail] method=GET durationMs=${Date.now() - startedAt} message="${sanitizeLogError(err)}"`);
       return null;
     }
@@ -167,5 +194,15 @@ export class ComicVineClient {
       if (oldest) this.volumeCache.delete(oldest);
     }
     this.volumeCache.set(key, { data, expiresAt: Date.now() + VOLUME_CACHE_TTL_MS });
+  }
+
+  private cacheVolume(data: ComicVineVolume): void {
+    if (!Number.isSafeInteger(data.id) || data.id <= 0) return;
+
+    if (this.volumeByIdCache.size >= VOLUME_CACHE_MAX_SIZE && !this.volumeByIdCache.has(data.id)) {
+      const oldest = this.volumeByIdCache.keys().next().value;
+      if (oldest !== undefined) this.volumeByIdCache.delete(oldest);
+    }
+    this.volumeByIdCache.set(data.id, { data, expiresAt: Date.now() + VOLUME_CACHE_TTL_MS });
   }
 }

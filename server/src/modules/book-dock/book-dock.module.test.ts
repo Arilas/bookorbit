@@ -2,6 +2,7 @@ import 'reflect-metadata';
 
 vi.mock('../app-settings/app-settings.module', () => ({ AppSettingsModule: class AppSettingsModule {} }));
 vi.mock('../auth/auth.module', () => ({ AuthModule: class AuthModule {} }));
+vi.mock('../file-write/file-write.module', () => ({ FileWriteModule: class FileWriteModule {} }));
 vi.mock('../library/library.module', () => ({ LibraryModule: class LibraryModule {} }));
 vi.mock('../metadata-fetch/metadata-fetch.module', () => ({ MetadataFetchModule: class MetadataFetchModule {} }));
 vi.mock('../metadata/metadata.module', () => ({ MetadataModule: class MetadataModule {} }));
@@ -14,6 +15,7 @@ import { BookDockEventsService } from './book-dock-events.service';
 import { BookDockFinalizeService } from './book-dock-finalize.service';
 import { BookDockGateway } from './book-dock.gateway';
 import { BookDockIngestService } from './book-dock-ingest.service';
+import { BookDockJoinService } from './book-dock-join.service';
 import { BookDockMetadataService } from './book-dock-metadata.service';
 import { BookDockModule } from './book-dock.module';
 import { BookDockProcessingStateService } from './book-dock-processing-state.service';
@@ -36,6 +38,7 @@ describe('BookDockModule', () => {
         BookDockMetadataService,
         BookDockProcessingStateService,
         BookDockFinalizeService,
+        BookDockJoinService,
         BookDockWatcherService,
         BookDockGateway,
       ]),

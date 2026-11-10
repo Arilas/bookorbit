@@ -4,19 +4,26 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { Save, Sparkles } from '@lucide/vue'
-import { NOTIFICATION_CATEGORIES, type NotificationCategory, type NotificationPreferences } from '@bookorbit/types'
+import { NOTIFICATION_CATEGORY_IDS, NotificationLevel, Permission, resolveNotificationLevel, type NotificationCategory } from '@bookorbit/types'
 import { useAuth } from '@/features/auth/composables/useAuth'
+import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useWhatsNew } from '@/features/whats-new/composables/useWhatsNew'
 import { api } from '@/lib/api'
 import SettingsPageHeader from '@/features/settings/SettingsPageHeader.vue'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
+import NotificationLevelSegmented from './NotificationLevelSegmented.vue'
 import { NOTIFICATION_CATEGORY_GROUPS, NOTIFICATION_CATEGORY_ICONS } from '../lib/notification-category-groups'
+import { useBookRequestVisibility } from '@/features/book-requests/composables/useBookRequestVisibility'
 
 const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 
 const { t } = useI18n()
 
 const { user, me } = useAuth()
+const { showBookRequests } = useBookRequestVisibility()
+const { hasPermission, isDemoRestrictedAccount } = usePermissions()
+/** Only someone who can start a read-aloud ever receives one of its notifications. */
+const showReadAloud = computed(() => hasPermission(Permission.LibraryGenerateReadAloud) && !isDemoRestrictedAccount.value)
 const { popupEnabled, setPopupEnabled, loadPrefs } = useWhatsNew()
 
 const saving = ref(false)
@@ -33,13 +40,15 @@ async function handleWhatsNewToggle() {
   }
 }
 
-const preferences = ref<NotificationPreferences>({})
+type LevelMap = Record<NotificationCategory, NotificationLevel>
+
+const preferences = ref<LevelMap>({} as LevelMap)
 
 function loadFromUser() {
   const userPrefs = user.value?.settings?.notificationPreferences
-  const result: NotificationPreferences = {}
-  for (const key of Object.keys(NOTIFICATION_CATEGORIES) as NotificationCategory[]) {
-    result[key] = userPrefs?.[key] !== false
+  const result = {} as LevelMap
+  for (const key of NOTIFICATION_CATEGORY_IDS) {
+    result[key] = resolveNotificationLevel(userPrefs?.[key])
   }
   preferences.value = result
 }
@@ -48,18 +57,24 @@ loadFromUser()
 
 const hasChanges = computed(() => {
   const userPrefs = user.value?.settings?.notificationPreferences
-  for (const key of Object.keys(NOTIFICATION_CATEGORIES) as NotificationCategory[]) {
-    const current = preferences.value[key] !== false
-    const saved = userPrefs?.[key] !== false
-    if (current !== saved) return true
-  }
-  return false
+  return NOTIFICATION_CATEGORY_IDS.some((key) => preferences.value[key] !== resolveNotificationLevel(userPrefs?.[key]))
 })
 
-const enabledCount = computed(
-  () => Object.keys(NOTIFICATION_CATEGORIES).filter((key) => preferences.value[key as NotificationCategory] !== false).length,
+function isCategoryVisible(category: NotificationCategory): boolean {
+  if (category === 'bookRequests') return showBookRequests.value
+  if (category === 'readAloud') return showReadAloud.value
+  return true
+}
+
+const visibleGroups = computed(() =>
+  NOTIFICATION_CATEGORY_GROUPS.map((group) => ({
+    ...group,
+    categories: group.categories.filter(isCategoryVisible),
+  })).filter((group) => group.categories.length > 0),
 )
-const totalCount = computed(() => Object.keys(NOTIFICATION_CATEGORIES).length)
+const visibleCategoryIds = computed(() => visibleGroups.value.flatMap((group) => group.categories))
+const enabledCount = computed(() => visibleCategoryIds.value.filter((key) => preferences.value[key] !== NotificationLevel.Off).length)
+const totalCount = computed(() => visibleCategoryIds.value.length)
 
 function categoryLabel(category: NotificationCategory): string {
   return t(`notifications.preferences.categories.${category}.label`)
@@ -69,11 +84,11 @@ function categoryDescription(category: NotificationCategory): string {
   return t(`notifications.preferences.categories.${category}.description`)
 }
 
-function isEnabled(category: NotificationCategory): boolean {
-  return preferences.value[category] !== false
+function levelFor(category: NotificationCategory): NotificationLevel {
+  return preferences.value[category] ?? NotificationLevel.All
 }
 
-function handleToggle(category: NotificationCategory, value: boolean) {
+function handleLevelChange(category: NotificationCategory, value: NotificationLevel) {
   preferences.value = { ...preferences.value, [category]: value }
 }
 
@@ -130,7 +145,7 @@ async function handleSave() {
   </div>
 
   <div class="space-y-4" :class="{ 'mt-5 md:mt-0': !props.embedded }">
-    <section v-for="group in NOTIFICATION_CATEGORY_GROUPS" :key="group.id" :aria-labelledby="`notification-group-${group.id}`" class="space-y-2">
+    <section v-for="group in visibleGroups" :key="group.id" :aria-labelledby="`notification-group-${group.id}`" class="space-y-2">
       <div class="flex items-baseline justify-between gap-3">
         <h2 :id="`notification-group-${group.id}`" class="settings-group-label mb-0">
           {{ t(`notifications.preferences.groups.${group.id}`) }}
@@ -149,11 +164,11 @@ async function handleSave() {
               <p class="settings-hint">{{ categoryDescription(category) }}</p>
             </div>
           </div>
-          <ToggleSwitch
-            :model-value="isEnabled(category)"
-            :aria-label="categoryLabel(category)"
-            class="shrink-0"
-            @update:model-value="(value) => handleToggle(category, value)"
+          <NotificationLevelSegmented
+            :model-value="levelFor(category)"
+            :category="category"
+            :label="categoryLabel(category)"
+            @update:model-value="(value) => handleLevelChange(category, value)"
           />
         </div>
       </div>

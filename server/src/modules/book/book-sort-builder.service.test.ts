@@ -84,6 +84,23 @@ describe('BookSortBuilder', () => {
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
   });
 
+  it('builds weighted relevance sorting when a query is present', () => {
+    const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+    const result = service.build([{ field: 'relevance', dir: 'desc' }], 42, undefined, { query: 'dune' });
+
+    expect(result).toHaveLength(3);
+    expect(result[0]).toMatchObject({ type: 'sql' });
+    expect(result[1]).toMatchObject({ type: 'sql', text: ' ASC NULLS LAST' });
+    expect(raw).toHaveBeenCalledWith('DESC');
+  });
+
+  it('rejects relevance sorting without a query', () => {
+    expect(() => service.build([{ field: 'relevance', dir: 'desc' }], 42)).toThrow(
+      new BadRequestException('relevance sort requires a non-empty search query'),
+    );
+  });
+
   it('builds author sort with the denormalized sort key', () => {
     const raw = (sql as unknown as { raw: vi.Mock }).raw;
 
@@ -135,6 +152,24 @@ describe('BookSortBuilder', () => {
     expect(result[0]?.values[1]).toBe(Math.floor(new Date('2025-01-15T00:00:00Z').getTime() / 86_400_000) + 7);
     expect(raw).toHaveBeenNthCalledWith(1, 'DESC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
+  });
+
+  it('uses the supplied shuffle seed instead of the daily fallback', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-15T00:00:00Z'));
+
+    const result = service.build([{ field: 'random', dir: 'asc' }], 7, undefined, { randomSeed: 12345 });
+
+    expect(result[0]?.values[1]).toBe(12345);
+  });
+
+  it('falls back to the daily seed when the supplied shuffle seed is out of range', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-15T00:00:00Z'));
+
+    const result = service.build([{ field: 'random', dir: 'asc' }], 7, undefined, { randomSeed: -1 });
+
+    expect(result[0]?.values[1]).toBe(Math.floor(new Date('2025-01-15T00:00:00Z').getTime() / 86_400_000) + 7);
   });
 
   it('throws for readProgress sort without userId', () => {
@@ -239,9 +274,10 @@ describe('BookSortBuilder', () => {
 
     const result = service.build([{ field: 'seriesIndex', dir: 'desc' }]);
 
-    expect(result).toHaveLength(3);
+    expect(result).toHaveLength(4);
     expect(raw).toHaveBeenNthCalledWith(1, 'DESC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
+    expect(raw).toHaveBeenNthCalledWith(3, 'DESC');
   });
 
   it('does not add series name fallback when series is already sorted', () => {
@@ -252,9 +288,10 @@ describe('BookSortBuilder', () => {
       { field: 'seriesIndex', dir: 'desc' },
     ]);
 
-    expect(result).toHaveLength(3);
+    expect(result).toHaveLength(4);
     expect(raw).toHaveBeenNthCalledWith(1, 'ASC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
+    expect(raw).toHaveBeenNthCalledWith(3, 'DESC');
   });
 
   it('adds multiple sorts in the requested order', () => {

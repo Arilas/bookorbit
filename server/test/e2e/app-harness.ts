@@ -1,6 +1,10 @@
 import { randomUUID } from 'crypto';
+import { mkdtemp, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { expect, vi } from 'vitest';
 import fastifyCookie from '@fastify/cookie';
+import fastifyMultipart from '@fastify/multipart';
 import { count, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { hash } from 'bcryptjs';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -15,6 +19,7 @@ import { DB } from '../../src/db';
 import * as schema from '../../src/db/schema';
 import { books, bookFiles, libraries, libraryFolders, scanJobs } from '../../src/db/schema';
 import { MetadataService } from '../../src/modules/metadata/metadata.service';
+import { allowAppAttest } from './allow-app-attest';
 
 export type Db = NodePgDatabase<typeof schema>;
 type OrganizationMode = 'book_per_file' | 'book_per_folder';
@@ -104,15 +109,29 @@ export interface E2EContext {
   app: NestFastifyApplication;
   db: Db;
   adminToken: string;
+  /** Set when the context owns a throwaway data folder, which close removes again. */
+  isolatedAppData: { path: string; previous: string | undefined } | null;
 }
 
-export async function createE2EContext(): Promise<E2EContext> {
-  const moduleFixture = await Test.createTestingModule({
+/**
+ * Scans write and prune covers under APP_DATA_PATH, which `.env` points at the developer's own
+ * data folder. Suites that scan and do not set their own path pass `isolateAppData`. Suites that
+ * upload files pass `multipart`, which `main.ts` registers for the real server.
+ */
+export async function createE2EContext(
+  options: { isolateAppData?: boolean; multipart?: boolean; realAppAttest?: boolean } = {},
+): Promise<E2EContext> {
+  let isolatedAppData: E2EContext['isolatedAppData'] = null;
+  if (options.isolateAppData) {
+    isolatedAppData = { path: await mkdtemp(join(tmpdir(), 'bookorbit-e2e-data-')), previous: process.env.APP_DATA_PATH };
+    process.env.APP_DATA_PATH = isolatedAppData.path;
+  }
+  const builder = Test.createTestingModule({
     imports: [AppModule],
   })
     .overrideProvider(MetadataService)
-    .useValue(makeMetadataNoopMock())
-    .compile();
+    .useValue(makeMetadataNoopMock());
+  const moduleFixture = await (options.realAppAttest ? builder : allowAppAttest(builder)).compile();
 
   const app = moduleFixture.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
   app.setGlobalPrefix('api/v1');
@@ -125,16 +144,21 @@ export async function createE2EContext(): Promise<E2EContext> {
   );
   app.useGlobalFilters(new GlobalExceptionFilter());
   await app.register(fastifyCookie as never);
+  if (options.multipart) await app.register(fastifyMultipart as never);
   await app.init();
   await app.getHttpAdapter().getInstance().ready();
 
   const db = app.get<Db>(DB);
   const adminToken = await getAdminToken(app);
-  return { app, db, adminToken };
+  return { app, db, adminToken, isolatedAppData };
 }
 
 export async function closeE2EContext(ctx: E2EContext): Promise<void> {
   await ctx.app.close();
+  if (!ctx.isolatedAppData) return;
+  if (ctx.isolatedAppData.previous === undefined) delete process.env.APP_DATA_PATH;
+  else process.env.APP_DATA_PATH = ctx.isolatedAppData.previous;
+  await rm(ctx.isolatedAppData.path, { recursive: true, force: true });
 }
 
 export interface SeedLibraryInput {

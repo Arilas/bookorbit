@@ -66,6 +66,7 @@ export class BookDockController {
     return this.service.listFiles({
       status: query.status,
       needsReview: query.needsReview,
+      readyToFile: query.readyToFile,
       page: query.page ?? 1,
       limit: query.limit ?? 20,
       sort: query.sort ?? 'createdAt',
@@ -117,9 +118,10 @@ export class BookDockController {
     return this.service.getStatistics(user.id, this.canManageAll(user));
   }
 
+  /** `readAlong=true` also says whether an EPUB carries narration, which means opening the file. */
   @Get('files/:id')
-  getFile(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number) {
-    return this.service.getFile(id, user.id, this.canManageAll(user));
+  getFile(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number, @Query('readAlong') readAlong?: string) {
+    return this.service.getFile(id, user.id, this.canManageAll(user), { readAlong: readAlong === 'true' });
   }
 
   @Get('files/:id/cover')
@@ -172,6 +174,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -186,6 +189,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -200,7 +204,14 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
+  }
+
+  @Post('files/:id/refetch-metadata')
+  @HttpCode(HttpStatus.ACCEPTED)
+  refetchMetadata(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    return this.service.refetchMetadata(id, user.id, this.canManageAll(user));
   }
 
   @Post('files/set-target')
@@ -216,6 +227,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -230,6 +242,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -248,6 +261,7 @@ export class BookDockController {
       user.id,
       this.canManageAll(user),
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -263,6 +277,7 @@ export class BookDockController {
       dto.status,
       dto.search,
       dto.needsReview,
+      dto.readyToFile,
     );
   }
 
@@ -283,6 +298,8 @@ export class BookDockController {
       dto.status,
       dto.search,
       dto.needsReview,
+      dto.readyToFile,
+      user,
     );
   }
 
@@ -303,6 +320,8 @@ export class BookDockController {
       dto.status,
       dto.search,
       dto.needsReview,
+      dto.readyToFile,
+      user,
     );
   }
 
@@ -333,6 +352,8 @@ export class BookDockController {
       dto.status,
       dto.search,
       dto.needsReview,
+      dto.readyToFile,
+      user,
     );
   }
 

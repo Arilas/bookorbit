@@ -8,20 +8,25 @@ const permState = {
   isSuperuser: false,
   permissions: [] as string[],
   demoRestricted: false,
-  authMethod: 'primary' as 'primary' | 'app_password',
+  authenticationMethod: 'password' as 'password' | 'app_password',
   provisioningMethod: 'local' as 'local' | 'shared',
 }
 
-vi.mock('vue-router', () => ({
-  useRoute: () => ({ name: 'settings-appearance-theme' }),
-}))
+vi.mock('vue-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('vue-router')>()
+  return {
+    ...actual,
+    useRoute: () => ({ name: 'settings-appearance-theme' }),
+    useRouter: () => ({ push: vi.fn<(to: { name: string }) => void>() }),
+  }
+})
 
 vi.mock('@/features/auth/composables/usePermissions', () => ({
   usePermissions: () => ({
     isSuperuser: computed(() => permState.isSuperuser),
     userPermissions: computed(() => permState.permissions),
     isDemoRestrictedAccount: computed(() => permState.demoRestricted),
-    authMethod: computed(() => permState.authMethod),
+    authenticationMethod: computed(() => permState.authenticationMethod),
     provisioningMethod: computed(() => permState.provisioningMethod),
   }),
 }))
@@ -31,13 +36,13 @@ function mountSidebar(opts?: {
   su?: boolean
   perms?: string[]
   demo?: boolean
-  authMethod?: 'primary' | 'app_password'
+  authenticationMethod?: 'password' | 'app_password'
   provisioningMethod?: 'local' | 'shared'
 }) {
   permState.isSuperuser = opts?.su ?? false
   permState.permissions = opts?.perms ?? []
   permState.demoRestricted = opts?.demo ?? false
-  permState.authMethod = opts?.authMethod ?? 'primary'
+  permState.authenticationMethod = opts?.authenticationMethod ?? 'password'
   permState.provisioningMethod = opts?.provisioningMethod ?? 'local'
   return mount(SettingsSidebar, {
     props: { isRail: opts?.rail ?? false },
@@ -70,7 +75,7 @@ describe('SettingsSidebar', () => {
   it('collapses to one popover per group when the sidebar is a rail', () => {
     const wrapper = mountSidebar({ rail: true, su: true })
     expect(wrapper.findComponent({ name: 'SettingsNav' }).exists()).toBe(false)
-    expect(wrapper.findAll('[data-testid="rail-group"]')).toHaveLength(4)
+    expect(wrapper.findAll('[data-testid="rail-group"]')).toHaveLength(5)
   })
 
   it('flattens nested destinations into the rail popovers', () => {
@@ -94,7 +99,9 @@ describe('SettingsSidebar', () => {
   })
 
   it('only shows groups the user has access to', () => {
-    expect(mountSidebar({ rail: true }).findAll('[data-testid="rail-group"]')).toHaveLength(1)
+    const personal = mountSidebar({ rail: true })
+    expect(personal.findAll('[data-testid="rail-group"]')).toHaveLength(2)
+    expect(personal.findAll('[data-testid="settings-sidebar-rail-item"]').map((node) => node.text())).toContain('Missing-field reminders')
     expect(mountSidebar({ rail: true, perms: ['manage_libraries'] }).findAll('[data-testid="rail-group"]')).toHaveLength(2)
   })
 
@@ -112,7 +119,7 @@ describe('SettingsSidebar', () => {
   })
 
   it('hides app passwords in collapsed rail mode for an app-password-authenticated session', () => {
-    const labels = mountSidebar({ rail: true, authMethod: 'app_password' })
+    const labels = mountSidebar({ rail: true, authenticationMethod: 'app_password' })
       .findAll('[data-testid="settings-sidebar-rail-item"]')
       .map((node) => node.text())
 

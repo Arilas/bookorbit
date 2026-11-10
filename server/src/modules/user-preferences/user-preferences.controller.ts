@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpCode, Put } from '@nestjs/common';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/types/request-user';
+import { RequireAppAttest } from '../app-attest/app-attest.guard';
 import { UpsertUserPreferenceDto } from './dto/upsert-user-preference.dto';
 import { UserPreferencesService } from './user-preferences.service';
 
@@ -45,6 +46,30 @@ export class UserPreferencesController {
     await this.userPreferencesService.upsertCoverSearchPreferences(user.id, dto.settings);
   }
 
+  @Get('book-requests')
+  async getBookRequestPreferences(@CurrentUser() user: RequestUser) {
+    const settings = await this.userPreferencesService.getBookRequestPreferences(user.id);
+    return { settings };
+  }
+
+  @Put('book-requests')
+  @HttpCode(204)
+  async upsertBookRequestPreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
+    await this.userPreferencesService.upsertBookRequestPreferences(user.id, dto.settings);
+  }
+
+  @Get('read-aloud')
+  async getReadAloudPreferences(@CurrentUser() user: RequestUser) {
+    const settings = await this.userPreferencesService.getReadAloudPreferences(user.id);
+    return { settings };
+  }
+
+  @Put('read-aloud')
+  @HttpCode(204)
+  async upsertReadAloudPreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
+    await this.userPreferencesService.upsertReadAloudPreferences(user.id, dto.settings);
+  }
+
   @Get('locale')
   async getLocalePreferences(@CurrentUser() user: RequestUser) {
     const settings = await this.userPreferencesService.getLocalePreferences(user.id);
@@ -67,6 +92,20 @@ export class UserPreferencesController {
   @HttpCode(204)
   async upsertServerFontPreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
     await this.userPreferencesService.upsertServerFontPreferences(user.id, dto.settings);
+  }
+
+  @Get('annotation-colors')
+  @RequireAppAttest()
+  async getAnnotationColorNamePreferences(@CurrentUser() user: RequestUser) {
+    const settings = await this.userPreferencesService.getAnnotationColorNamePreferences(user.id);
+    return { settings };
+  }
+
+  @Put('annotation-colors')
+  @RequireAppAttest()
+  @HttpCode(204)
+  async upsertAnnotationColorNamePreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
+    await this.userPreferencesService.upsertAnnotationColorNamePreferences(user.id, dto.settings);
   }
 
   @Get('whats-new')

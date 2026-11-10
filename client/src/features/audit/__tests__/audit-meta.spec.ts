@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { AuditAction, type AuditLogEntry } from '@bookorbit/types'
-import { getAuditAppPasswordActor, getBookDeletionAuditMeta } from '../audit-meta'
+import { getAuditAppPasswordActor, getBookDeletionAuditMeta, parseAuditAppPasswordActor } from '../audit-meta'
 
 function makeEntry(meta: Record<string, unknown> | null, action = AuditAction.BookBulkDelete): AuditLogEntry {
   return {
@@ -44,26 +44,34 @@ describe('getAuditAppPasswordActor', () => {
       getAuditAppPasswordActor(
         makeEntry({
           actorAuth: {
-            authMethod: 'app_password',
+            authenticationMethod: 'app_password',
             appPasswordId: 12,
-            appPasswordLabel: 'iPhone app',
+            appName: 'iPhone app',
           },
         }),
       ),
     ).toEqual({
-      authMethod: 'app_password',
+      authenticationMethod: 'app_password',
       appPasswordId: 12,
-      appPasswordLabel: 'iPhone app',
+      appName: 'iPhone app',
     })
   })
 
   it.each([
     null,
     { actorAuth: null },
-    { actorAuth: { authMethod: 'primary', appPasswordId: 12, appPasswordLabel: 'spoofed' } },
-    { actorAuth: { authMethod: 'app_password', appPasswordId: 0, appPasswordLabel: 'invalid' } },
-    { actorAuth: { authMethod: 'app_password', appPasswordId: 12, appPasswordLabel: 123 } },
+    { actorAuth: { authenticationMethod: 'password', appPasswordId: 12, appName: 'spoofed' } },
+    { actorAuth: { authenticationMethod: 'app_password', appPasswordId: 0, appName: 'invalid' } },
+    { actorAuth: { authenticationMethod: 'app_password', appPasswordId: 12, appName: 123 } },
   ])('rejects malformed actor metadata', (meta) => {
     expect(getAuditAppPasswordActor(makeEntry(meta))).toBeNull()
+  })
+
+  it('validates the same trusted shape outside an event meta object', () => {
+    expect(parseAuditAppPasswordActor({ authenticationMethod: 'app_password', appPasswordId: 9, appName: null })).toEqual({
+      authenticationMethod: 'app_password',
+      appPasswordId: 9,
+      appName: null,
+    })
   })
 })

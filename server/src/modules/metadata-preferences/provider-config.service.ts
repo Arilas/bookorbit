@@ -1,13 +1,24 @@
-import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
-import { eq, sql } from 'drizzle-orm';
+import { BadRequestException, Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
+import { eq, isNotNull, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { MetadataProviderKey, ProviderConfigurations, ProviderConnectionTestResult, ProviderStatus } from '@bookorbit/types';
+import {
+  BUILT_IN_METADATA_PROVIDER_LABELS,
+  MetadataProviderKey,
+  MOVED_METADATA_PROVIDERS,
+  type MovedMetadataProviderKey,
+  ProviderConfigurations,
+  ProviderConnectionTestResult,
+  ProviderStatus,
+} from '@bookorbit/types';
 
 import { stripBearerPrefix, toBearerAuthorization } from '../../common/utils/bearer-token.utils';
+import { amazonRequestHeaders, isAmazonBotChallenge } from '../../common/utils/amazon-http.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { amazonOrigin, normalizeAmazonDomain, normalizeAudibleDomain } from '../../common/utils/metadata-provider-hosts.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
+import { MetadataHttpProviderCatalog } from '../metadata-http-provider/metadata-http-provider.catalog';
+import { MetadataPreferencesService } from './metadata-preferences.service';
 
 type Db = NodePgDatabase<typeof schema>;
 type ProviderConfigPatch = {
@@ -20,19 +31,6 @@ const HARDCOVER_GRAPHQL_URL = 'https://api.hardcover.app/v1/graphql';
 const HARDCOVER_TEST_QUERY = 'query { me { username } }';
 const AMAZON_TEST_QUERY = 'books';
 const PROVIDER_TEST_TIMEOUT_MS = 10_000;
-const AMAZON_CAPTCHA_PATTERNS = [/validateCaptcha/i, /captcha/i, /not a robot/i];
-const AMAZON_TEST_HEADERS: HeadersInit = {
-  'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-  accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'accept-language': 'en-US,en;q=0.9',
-  'sec-ch-ua': '"Google Chrome";v="137", "Chromium";v="137", "Not_A Brand";v="24"',
-  'sec-ch-ua-mobile': '?0',
-  'sec-ch-ua-platform': '"macOS"',
-  'sec-fetch-dest': 'document',
-  'sec-fetch-mode': 'navigate',
-  'sec-fetch-site': 'none',
-};
-
 const DEFAULT_CONFIG: ProviderConfigurations = {
   google: { enabled: false, apiKey: '' },
   amazon: { enabled: true, domain: 'amazon.com', cookie: '' },
@@ -46,8 +44,6 @@ const DEFAULT_CONFIG: ProviderConfigurations = {
   comicvine: { enabled: false, apiKey: '' },
   ranobedb: { enabled: false },
   kobo: { enabled: false, country: 'us', language: 'en' },
-  lubimyczytac: { enabled: false },
-  aladin: { enabled: false, ttbKey: '' },
 };
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -129,30 +125,7 @@ function mergeKoboConfig(base: ProviderConfigurations['kobo'], value: unknown): 
   };
 }
 
-function mergeAladinConfig(base: ProviderConfigurations['aladin'], value: unknown): ProviderConfigurations['aladin'] {
-  const next = asObject(value);
-  return {
-    enabled: asBoolean(next.enabled, base.enabled),
-    ttbKey: asString(next.ttbKey, base.ttbKey),
-  };
-}
-
-const PROVIDER_LABELS: Record<MetadataProviderKey, string> = {
-  [MetadataProviderKey.GOOGLE]: 'Google Books',
-  [MetadataProviderKey.AMAZON]: 'Amazon',
-  [MetadataProviderKey.GOODREADS]: 'Goodreads',
-  [MetadataProviderKey.HARDCOVER]: 'Hardcover',
-  [MetadataProviderKey.OPEN_LIBRARY]: 'Open Library',
-  [MetadataProviderKey.ITUNES]: 'iTunes',
-  [MetadataProviderKey.AUDIBLE]: 'Audible',
-  [MetadataProviderKey.AUDNEXUS]: 'AudNexus',
-  [MetadataProviderKey.LIBROFM]: 'Libro.fm',
-  [MetadataProviderKey.COMICVINE]: 'ComicVine',
-  [MetadataProviderKey.RANOBEDB]: 'RanobeDB',
-  [MetadataProviderKey.KOBO]: 'Kobo',
-  [MetadataProviderKey.LUBIMYCZYTAC]: 'LubimyCzytac',
-  [MetadataProviderKey.ALADIN]: 'Aladin',
-};
+const PROVIDER_LABELS = BUILT_IN_METADATA_PROVIDER_LABELS;
 
 type ProviderEnableRule = {
   canEnable: (config: ProviderConfigurations) => boolean;
@@ -176,18 +149,49 @@ const PROVIDER_ENABLE_RULES = {
     blockedMessage: 'ComicVine requires an API key before it can be enabled',
     setupHint: 'API key required',
   },
-  aladin: {
-    canEnable: (config) => !!config.aladin.ttbKey.trim(),
-    blockedMessage: 'Aladin requires a TTB Key before it can be enabled',
-    setupHint: 'TTB Key required',
-  },
 } satisfies Partial<Record<keyof ProviderConfigurations, ProviderEnableRule>>;
 
 @Injectable()
-export class ProviderConfigService {
+export class ProviderConfigService implements OnModuleInit {
   private readonly logger = new Logger(ProviderConfigService.name);
 
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(
+    @Inject(DB) private readonly db: Db,
+    @Optional() private readonly httpProviders?: MetadataHttpProviderCatalog,
+    @Optional() private readonly preferences?: MetadataPreferencesService,
+  ) {}
+
+  /**
+   * Providers that are no longer built in keep no settings here. Their old ones, Aladin's TTB key
+   * among them, are deleted rather than left in the database.
+   */
+  async onModuleInit(): Promise<void> {
+    const removed = await this.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${PROVIDER_CONFIG_KEY})::bigint)`);
+      const row = await tx.query.appSettings.findFirst({ where: eq(schema.appSettings.key, PROVIDER_CONFIG_KEY) });
+      let stored: unknown;
+      try {
+        stored = row ? JSON.parse(row.value) : null;
+      } catch {
+        return [];
+      }
+      if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return [];
+      const settings = stored as Record<string, unknown>;
+      const moved = Object.keys(MOVED_METADATA_PROVIDERS).filter((key) => key in settings);
+      if (moved.length === 0) return [];
+      for (const key of moved) delete settings[key];
+      await tx
+        .update(schema.appSettings)
+        .set({ value: JSON.stringify(settings) })
+        .where(eq(schema.appSettings.key, PROVIDER_CONFIG_KEY));
+      return moved;
+    });
+    if (removed.length > 0) {
+      this.logger.log(
+        `[metadata_provider_config.moved_out] [end] providers=${removed.join(',')} - removed settings of providers that are no longer built in`,
+      );
+    }
+  }
 
   private createDefaultConfig(): ProviderConfigurations {
     return {
@@ -203,8 +207,6 @@ export class ProviderConfigService {
       comicvine: { ...DEFAULT_CONFIG.comicvine },
       ranobedb: { ...DEFAULT_CONFIG.ranobedb },
       kobo: { ...DEFAULT_CONFIG.kobo },
-      lubimyczytac: { ...DEFAULT_CONFIG.lubimyczytac },
-      aladin: { ...DEFAULT_CONFIG.aladin },
     };
   }
 
@@ -223,8 +225,6 @@ export class ProviderConfigService {
       comicvine: mergeComicVineConfig(base.comicvine, next.comicvine),
       ranobedb: mergeSimpleConfig(base.ranobedb, next.ranobedb),
       kobo: mergeKoboConfig(base.kobo, next.kobo),
-      lubimyczytac: mergeSimpleConfig(base.lubimyczytac, next.lubimyczytac),
-      aladin: mergeAladinConfig(base.aladin, next.aladin),
     };
   }
 
@@ -295,10 +295,6 @@ export class ProviderConfigService {
         country: this.normalizeKoboPathSegment(config.kobo.country, DEFAULT_CONFIG.kobo.country),
         language: this.normalizeKoboPathSegment(config.kobo.language, DEFAULT_CONFIG.kobo.language),
       },
-      aladin: {
-        ...config.aladin,
-        ttbKey: config.aladin.ttbKey.trim(),
-      },
     };
 
     if (!normalized.google.enabled || normalized.google.apiKey) return normalized;
@@ -360,6 +356,11 @@ export class ProviderConfigService {
     });
     if (!row) return defaults;
     return this.normalizeConfig(this.parsePersistedConfig(row.value, defaults, 'get', startedAt));
+  }
+
+  async getLinkSettings() {
+    const config = await this.getConfig();
+    return { amazonDomain: config.amazon.domain };
   }
 
   async updateConfig(patch: ProviderConfigPatch): Promise<ProviderConfigurations> {
@@ -465,21 +466,79 @@ export class ProviderConfigService {
         configured: true,
         hint: 'Web scraping may be blocked by Kobo bot protection',
       },
-      {
-        key: MetadataProviderKey.LUBIMYCZYTAC,
-        label: PROVIDER_LABELS[MetadataProviderKey.LUBIMYCZYTAC],
-        enabled: cfg.lubimyczytac.enabled,
-        configured: true,
-        hint: 'Polish book catalog (lubimyczytac.pl). Scrapes public pages.',
-      },
-      {
-        key: MetadataProviderKey.ALADIN,
-        label: PROVIDER_LABELS[MetadataProviderKey.ALADIN],
-        enabled: cfg.aladin.enabled,
-        configured: !!this.getEnableRule('aladin')?.canEnable(cfg),
-        hint: !this.getEnableRule('aladin')?.canEnable(cfg) ? this.getEnableRule('aladin')?.setupHint : undefined,
-      },
+      ...this.externalProviderStatuses(),
+      ...(await this.movedProviderStatuses()),
     ];
+  }
+
+  /**
+   * Providers that used to be built in and are not registered. Listing them keeps them readable in
+   * field rules, and tells the settings page what to run, or that the source closed, and whether
+   * anything still uses them.
+   */
+  private async movedProviderStatuses(): Promise<ProviderStatus[]> {
+    const registered = new Set((this.httpProviders?.registered() ?? []).map((provider) => provider.key as string));
+    const missing = (Object.keys(MOVED_METADATA_PROVIDERS) as MovedMetadataProviderKey[]).filter((key) => !registered.has(key));
+    if (missing.length === 0) return [];
+    const inUse = await this.movedProvidersInUse(missing);
+    return missing.map((key) => {
+      const { label, image } = MOVED_METADATA_PROVIDERS[key];
+      return {
+        key,
+        label,
+        enabled: false,
+        configured: false,
+        hint: image ? 'Now runs as its own provider. Add it under External providers.' : `${label} closed the service BookOrbit used.`,
+        source: 'external' as const,
+        movedOut: { image, inUse: inUse.has(key) },
+      };
+    });
+  }
+
+  /**
+   * A field rule names it, or, for one that can be added back, a book still holds one of its ids. A
+   * closed source's ids stay on books and need nothing done, so they alone do not count.
+   */
+  private async movedProvidersInUse(keys: MovedMetadataProviderKey[]): Promise<Set<MovedMetadataProviderKey>> {
+    const idColumns = { lubimyczytac: schema.bookMetadata.lubimyczytacId, aladin: schema.bookMetadata.aladinId };
+    const named = await this.preferences?.providersNamedInRules().catch(() => null);
+    const used = new Set<MovedMetadataProviderKey>();
+    for (const key of keys) {
+      if (named?.has(key)) {
+        used.add(key);
+        continue;
+      }
+      if (!MOVED_METADATA_PROVIDERS[key].image) continue;
+      const [stored] = await this.db
+        .select({ bookId: schema.bookMetadata.bookId })
+        .from(schema.bookMetadata)
+        .where(isNotNull(idColumns[key]))
+        .limit(1);
+      if (stored) used.add(key);
+    }
+    return used;
+  }
+
+  /** External providers are configured on their own page; here they only need to be listed for field rules. */
+  private externalProviderStatuses(): ProviderStatus[] {
+    return (this.httpProviders?.registered() ?? []).map((provider) => {
+      const healthy = provider.status === 'ok' || provider.status === 'stale';
+      return {
+        key: provider.key,
+        label: provider.label,
+        enabled: provider.enabled && healthy && !provider.authorizationUnreadable,
+        configured: provider.info !== null,
+        hint: provider.authorizationUnreadable
+          ? 'External provider authorization header could not be decrypted'
+          : healthy
+            ? undefined
+            : `External provider ${provider.status.replace('_', ' ')}`,
+        source: 'external' as const,
+        supportedFields: provider.info?.supportedFields ?? null,
+        ...(provider.iconUrl ? { iconUrl: provider.iconUrl } : {}),
+        ...(provider.color ? { color: provider.color } : {}),
+      };
+    });
   }
 
   async testProvider(key: MetadataProviderKey, patch?: ProviderConfigPatch): Promise<ProviderConnectionTestResult> {
@@ -512,8 +571,6 @@ export class ProviderConfigService {
         return this.testAmazonProvider(config.amazon);
       case MetadataProviderKey.HARDCOVER:
         return this.testHardcoverProvider(config.hardcover.apiKey);
-      case MetadataProviderKey.ALADIN:
-        return this.testAladinProvider(config.aladin.ttbKey);
       default:
         throw new BadRequestException(`Provider test not supported for ${key}`);
     }
@@ -522,10 +579,10 @@ export class ProviderConfigService {
   private async testAmazonProvider(config: ProviderConfigurations['amazon']): Promise<ProviderConnectionTestResult> {
     const domain = normalizeAmazonDomain(config.domain);
     const cookie = this.normalizeAmazonCookie(config.cookie);
-    const url = new URL('/s', amazonOrigin(domain));
+    const url = new URL('/gp/aw/s', amazonOrigin(domain));
     url.searchParams.set('k', AMAZON_TEST_QUERY);
     url.searchParams.set('i', 'stripbooks');
-    const headers: HeadersInit = cookie ? { ...AMAZON_TEST_HEADERS, cookie } : AMAZON_TEST_HEADERS;
+    const headers = amazonRequestHeaders(url, cookie);
     const response = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(PROVIDER_TEST_TIMEOUT_MS) });
 
     if (!response.ok) {
@@ -538,8 +595,7 @@ export class ProviderConfigService {
     }
 
     const body = await response.text();
-    const captchaDetected = AMAZON_CAPTCHA_PATTERNS.some((pattern) => pattern.test(body));
-    if (captchaDetected) {
+    if (isAmazonBotChallenge(body)) {
       return {
         key: MetadataProviderKey.AMAZON,
         ok: false,
@@ -626,58 +682,5 @@ export class ProviderConfigService {
       status: 'success',
       message: `Connected as ${username}.`,
     };
-  }
-
-  private async testAladinProvider(ttbKey: string): Promise<ProviderConnectionTestResult> {
-    const key = ttbKey.trim();
-    if (!key) {
-      return {
-        key: MetadataProviderKey.ALADIN,
-        ok: false,
-        status: 'fail',
-        message: 'Aladin TTB Key is required.',
-      };
-    }
-
-    const testUrl = `https://www.aladin.co.kr/ttb/api/ItemSearch.aspx?TTBKey=${encodeURIComponent(key)}&Query=%ED%8C%8C%EC%9D%B4%EC%8D%AC&QueryType=Keyword&MaxResults=1&start=1&SearchTarget=Book&output=JS&Version=20131101`;
-
-    try {
-      const response = await fetch(testUrl, { method: 'GET', signal: AbortSignal.timeout(PROVIDER_TEST_TIMEOUT_MS) });
-
-      if (!response.ok) {
-        return {
-          key: MetadataProviderKey.ALADIN,
-          ok: false,
-          status: 'fail',
-          message: `Aladin request failed with HTTP ${response.status}.`,
-        };
-      }
-
-      const body = (await response.json()) as { item?: unknown[]; errorCode?: number; errorMessage?: string };
-
-      if (body.errorCode) {
-        return {
-          key: MetadataProviderKey.ALADIN,
-          ok: false,
-          status: 'fail',
-          message: `Aladin API error: ${body.errorMessage ?? body.errorCode}`,
-        };
-      }
-
-      return {
-        key: MetadataProviderKey.ALADIN,
-        ok: true,
-        status: 'success',
-        message: 'Aladin API connection successful.',
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        key: MetadataProviderKey.ALADIN,
-        ok: false,
-        status: 'fail',
-        message: `Aladin connection test failed: ${message}`,
-      };
-    }
   }
 }
